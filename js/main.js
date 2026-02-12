@@ -1957,6 +1957,7 @@ function normalizeClientSettingsForSave(raw) {
 
 
 
+
 // ===== Auth fetch with refresh retry =====
 
 async function apiPostJson(path, body) {
@@ -2411,9 +2412,21 @@ async function postHrRotaResolveMappings(importId, payload) {
   const candidate_mappings = Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [];
   const client_aliases     = Array.isArray(body.client_aliases)     ? body.client_aliases     : [];
 
-  if (!candidate_mappings.length && !client_aliases.length) {
+  // ✅ NEW: optional role mappings (hr_row_id → selected target id)
+  const role_mappings =
+    Array.isArray(body.role_mappings) ? body.role_mappings :
+    Array.isArray(body.timesheet_target_mappings) ? body.timesheet_target_mappings :
+    Array.isArray(body.roleMappings) ? body.roleMappings :
+    [];
+
+  if (!candidate_mappings.length && !client_aliases.length && !role_mappings.length) {
     L('no mappings to send; returning early', { importId });
-    return { ok: true, candidate_mappings_applied: 0, client_aliases_applied: 0 };
+    return {
+      ok: true,
+      candidate_mappings_applied: 0,
+      client_aliases_applied: 0,
+      role_mappings_applied: 0
+    };
   }
 
   if (typeof authFetch !== 'function' || typeof API !== 'function') {
@@ -2428,18 +2441,33 @@ async function postHrRotaResolveMappings(importId, payload) {
     hospital_norm: a.hospital_norm || null
   }));
 
+  const roleDebug = role_mappings.map(r => ({
+    hr_row_id: r.hr_row_id || null,
+    target_id: r.target_id || r.timesheet_target_id || null,
+    candidate_id: r.candidate_id || null,
+    client_id: r.client_id || null,
+    work_date: r.work_date || null,
+    grade_raw: r.grade_raw || null
+  }));
+
   L('posting HR rota resolve-conflicts', {
     importId,
     url: API(url),
     candidate_mappings_count: candidate_mappings.length,
     client_aliases_count: client_aliases.length,
-    client_aliases_hr_row_ids: aliasDebug
+    role_mappings_count: role_mappings.length,
+    client_aliases_hr_row_ids: aliasDebug,
+    role_mappings_debug: roleDebug
   });
+
+  // ✅ Only include role_mappings if present (backward compatible with older backend)
+  const postBody = { candidate_mappings, client_aliases };
+  if (role_mappings.length) postBody.role_mappings = role_mappings;
 
   const res  = await authFetch(API(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candidate_mappings, client_aliases })
+    body: JSON.stringify(postBody)
   });
 
   const text = await res.text().catch(() => '');
@@ -2524,6 +2552,7 @@ function openHrRotaAssignCandidateModal(importId, rowIndex) {
     if (window.__toast) window.__toast(msg); else alert(msg);
   }
 }
+
 
 function openHrRotaAssignClientModal(importId, rowIndex) {
   const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
@@ -13436,6 +13465,56 @@ function renderTimesheetIssuesTab(ctx) {
   const issues = [];
 
   // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Validation framework detection + coherent UX
+  // When HR validation framework is active:
+  //  - if validation ERROR => show it as primary issue
+  //  - if validation OK => suppress stale/conflicting HR_HOURS_MISSING warnings
+  // This is display-only; DB fields remain unchanged.
+  // ─────────────────────────────────────────────────────────────
+  const hrValidationRequired =
+    boolish(tsfin.client_hr_validation_required) ||
+    boolish(tsfin.hr_validation_required_for_invoice) ||
+    boolish(details.client_hr_validation_required) ||
+    boolish(details.hr_validation_required_for_invoice) ||
+    boolish(row.client_hr_validation_required) ||
+    boolish(row.hr_validation_required_for_invoice) ||
+    false;
+
+  const validationStatusRaw =
+    tsfin.validation_status ||
+    details.validation_status ||
+    row.validation_status ||
+    details.timesheet_validation_status ||
+    row.timesheet_validation_status ||
+    null;
+
+  const validationStatus = String(validationStatusRaw || '').trim().toUpperCase();
+
+  const validationFrameworkInUse = !!hrValidationRequired;
+
+  // Helper: decide whether a validation status is "OK" vs "ERROR"
+  const validationIsOk =
+    (validationStatus === 'VALIDATION_OK' || validationStatus === 'OK' || validationStatus === 'PASS' || validationStatus === 'OVERRIDDEN');
+
+  const validationIsError =
+    (validationStatus === 'VALIDATION_ERROR' || validationStatus === 'ERROR' || validationStatus === 'FAIL');
+
+  if (validationFrameworkInUse) {
+    if (validationIsError) {
+      issues.push('Validation failed (HealthRoster): this timesheet is not consistent with HealthRoster and is blocked until corrected or overridden.');
+    } else if (validationIsOk) {
+      // We do not push an "OK" issue line; we just use this to suppress conflicting crosscheck warnings below.
+      // (User sees the OK status in HealthRoster validation screens, not as an "issue".)
+    } else if (validationStatus) {
+      // Unknown but present; surface as neutral info.
+      issues.push(`Validation status: ${validationStatus}.`);
+    } else {
+      // Validation required but no status present: treat as informational blocker.
+      issues.push('Validation is required for this client, but no validation result is recorded yet.');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // ✅ NEW: Reference blocker issue + per-day/segment detail
   // Source of truth:
   //  - ref blocker codes live in issue_codes (Option A strings)
@@ -13617,7 +13696,6 @@ function renderTimesheetIssuesTab(ctx) {
 
         // --- pay delay (exclude_from_pay) ---
         if (boolish(seg.exclude_from_pay)) {
-          // optional reason (only if present; doesn't invent anything)
           const reason = (seg.held_back_reason != null && String(seg.held_back_reason).trim())
             ? String(seg.held_back_reason).trim()
             : '';
@@ -13626,10 +13704,10 @@ function renderTimesheetIssuesTab(ctx) {
 
         // --- invoice delay (exactly your SQL rule) ---
         const lockedRaw = seg.invoice_locked_invoice_id;
-        const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim(); // SQL nullif(...,'') behaviour
+        const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim();
 
         const targetRaw = seg.invoice_target_week_start;
-        const target    = (targetRaw == null) ? '' : String(targetRaw).slice(0, 10).trim(); // keep YYYY-MM-DD
+        const target    = (targetRaw == null) ? '' : String(targetRaw).slice(0, 10).trim();
 
         const baseStart = baselineWeekStart || weekStartMondayYmd(segDate);
 
@@ -13648,16 +13726,13 @@ function renderTimesheetIssuesTab(ctx) {
         }
       }
 
-      // Only add when we actually have delays
       if (invoiceDelayed.length) {
-        // summary + per-date lines
         const allInvDelayed = (invoiceDelayed.length === segs.length);
         issues.push(allInvDelayed
           ? 'Whole invoice is delayed: all dated lines are being held back for invoicing.'
           : `Some invoice issuing delays: ${invoiceDelayed.length} dated line(s) are being held back for invoicing.`
         );
 
-        // per-date detail
         for (const it of invoiceDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
           const dmy = fmtYmdToDmy(it.date);
           const dow = fmtDow(it.date);
@@ -13688,7 +13763,8 @@ function renderTimesheetIssuesTab(ctx) {
     if (LOGM) L('[ISSUES] SEGMENTS delay scan failed (non-fatal)', e);
   }
 
-  // HR cross-check issues (from TSFIN) — keep as “issues flagged”, but no Validation Log UI
+  // HR cross-check issues (from TSFIN)
+  // ✅ UPDATED: If validation framework is in use and validation is OK, suppress HR_HOURS_MISSING to avoid contradictory UX.
   try {
     const hrIssuesArr = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
     const hrIssues = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
@@ -13701,7 +13777,12 @@ function renderTimesheetIssuesTab(ctx) {
       if (code === 'HOURS_MISMATCH_HR') {
         issues.push('Timesheet hours mismatch with HealthRoster.');
       } else if (code === 'HR_HOURS_MISSING') {
-        issues.push('Timesheet has hours not yet on HealthRoster.');
+        // Suppress when validation is in use and OK (stale TSFIN should clear after recompute).
+        if (validationFrameworkInUse && validationIsOk) {
+          // intentionally suppressed
+        } else {
+          issues.push('Timesheet has hours not yet on HealthRoster.');
+        }
       } else if (code === 'DUPLICATE_CONTRACTS') {
         issues.push('Multiple contracts cover the same period for this client.');
       }
@@ -13743,7 +13824,6 @@ function renderTimesheetIssuesTab(ctx) {
     </div>
   `;
 }
-
 
 
 // === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
@@ -48856,20 +48936,82 @@ async function handleHrWeeklyFileDrop(file) {
     let summaryState;
     try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
 
-    // ✅ NEW: Import Options step must run BEFORE summary modal is rendered.
-    // If user cancels, abort flow (do not open the summary modal).
-    if (typeof openWeeklyImportOptionsModal === 'function') {
-      if (summaryEl) summaryEl.textContent = `Import ${importId}: choose import options…`;
-      const continued = await openWeeklyImportOptionsModal('HR_WEEKLY', importId, summaryState);
-      if (!continued) {
-        if (summaryEl) summaryEl.textContent = `Import ${importId}: cancelled before preview.`;
-        return;
-      }
-    } else {
-      console.warn('[IMPORTS] openWeeklyImportOptionsModal is not defined; skipping Import Options step.');
+    // ✅ REQUIRED: HR_WEEKLY must NOT show options modal.
+    // Instead, auto-seed weekly UI store options:
+    // - missingShiftsEnabled = true
+    // - dateFrom/dateTo = truth_meta.file_date_min/max (when available)
+    // This is belt-and-braces: renderImportSummaryModal also enforces missingShiftsEnabled=true,
+    // but we seed here so the UI is correct even before any later rerenders.
+    try {
+      const asYmd = (v) => {
+        if (!v) return null;
+        if (typeof v === 'string') {
+          const s = v.trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+          if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+        }
+        try {
+          const d = new Date(v);
+          if (Number.isNaN(d.getTime())) return null;
+          const yyyy = d.getUTCFullYear();
+          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        } catch {
+          return null;
+        }
+      };
+
+      const tm =
+        (summaryState && typeof summaryState.truth_meta === 'object' && summaryState.truth_meta) ? summaryState.truth_meta :
+        (summaryState && summaryState.summary && typeof summaryState.summary.truth_meta === 'object' && summaryState.summary.truth_meta) ? summaryState.summary.truth_meta :
+        null;
+
+      const fileMin = tm ? asYmd(tm.file_date_min) : null;
+      const fileMax = tm ? asYmd(tm.file_date_max) : null;
+
+      window.__weeklyImportUi = window.__weeklyImportUi || {};
+      window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
+
+      const impIdStr = String(importId);
+      const existingUi = window.__weeklyImportUi.HR_WEEKLY[impIdStr] || null;
+
+      const ui = existingUi && typeof existingUi === 'object'
+        ? existingUi
+        : {
+            options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+            actionSelection: new Set(),
+            filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+            emailSelection: new Set(),
+            hydratedFlags: { didInitDefaultActionChecks: false }
+          };
+
+      ui.options = ui.options && typeof ui.options === 'object' ? ui.options : {};
+      ui.options.missingShiftsEnabled = true;
+
+      // Only seed dateFrom/dateTo if we have file min/max.
+      // (If absent, renderImportSummaryModal/ensureWeeklyUiStore will still compute defaults.)
+      if (fileMin) ui.options.dateFrom = fileMin;
+      if (fileMax) ui.options.dateTo = fileMax;
+
+      if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+      if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+
+      ui.filters = ui.filters && typeof ui.filters === 'object' ? ui.filters : {};
+      if (typeof ui.filters.showOnlyRed !== 'boolean') ui.filters.showOnlyRed = false;
+      if (typeof ui.filters.showOnlyUnticked !== 'boolean') ui.filters.showOnlyUnticked = false;
+      if (typeof ui.filters.showOnlyCancellations !== 'boolean') ui.filters.showOnlyCancellations = false;
+      if (typeof ui.filters.search !== 'string') ui.filters.search = '';
+
+      ui.hydratedFlags = ui.hydratedFlags && typeof ui.hydratedFlags === 'object' ? ui.hydratedFlags : {};
+      if (typeof ui.hydratedFlags.didInitDefaultActionChecks !== 'boolean') ui.hydratedFlags.didInitDefaultActionChecks = false;
+
+      window.__weeklyImportUi.HR_WEEKLY[impIdStr] = ui;
+    } catch (e) {
+      console.warn('[IMPORTS][HR_WEEKLY] failed to auto-seed weekly UI store options (non-fatal)', e);
     }
 
-    // 4) Persist and render summary modal (only after options chosen)
+    // 4) Persist and render summary modal (no options step)
     window.modalCtx = window.modalCtx || {};
     window.modalCtx.importsState = window.modalCtx.importsState || {};
     window.modalCtx.importsState.hrWeekly = {
@@ -49121,8 +49263,6 @@ async function applyHrRotaValidation(importId, sendEmailRowIds) {
 
   return payload;
 }
-
-
 
 
 async function apiQueueHrRotaTsoEmail(row) {
@@ -49869,6 +50009,9 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
                 Staff (from import): <strong>${enc(staffRaw || '—')}</strong><br/>
                 Unit / Site: <span class="mini">${enc(unitRaw || '—')}</span>
               </div>
+              <div class="hint mini" style="margin-top:6px;">
+                Select the correct candidate. This will be saved via resolve-conflicts and the import will reclassify immediately.
+              </div>
             </div>
           </div>
         </div>
@@ -49883,16 +50026,18 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
                      placeholder="Type to search by first or surname"
                      value="${enc(term)}" />
               <div class="hint mini" style="margin-top:4px;">
-                Start typing the candidate's name. The list on the right will filter as you type.
+                Start typing the candidate's name. Results will filter as you type.
               </div>
             </div>
           </div>
+
           <div class="row">
             <label>Matches</label>
             <div class="controls" id="weeklyCandResults">
               <span class="mini">Type a name to search for candidates.</span>
             </div>
           </div>
+
           <div class="row" style="margin-top:8px;">
             <label></label>
             <div class="controls">
@@ -49943,28 +50088,48 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
       return;
     }
 
-    const listHtml = `
-      <div class="card" style="max-height:250px;overflow:auto;border:1px solid #ddd;margin-top:4px;">
-        <ul class="mini">
-          ${results.map(c => {
-            const id   = c.id;
-            const name = c.display_name || c.name || ((c.first_name || '') + ' ' + (c.last_name || ''));
-            const selected = String(id) === String(selectedId);
-            const style = selected ? ' style="background:#007bff;color:#fff;cursor:pointer;"' : ' style="cursor:pointer;"';
-            return `
-              <li class="weekly-candidate-option"${style}
-                  data-act="weekly-cand-select"
-                  data-candidate-id="${enc(id)}">
-                <strong>${enc(name || '')}</strong>
-                ${c.tms_ref ? ` &nbsp; <span class="mono">(${enc(c.tms_ref)})</span>` : ''}
-              </li>
-            `;
-          }).join('')}
-        </ul>
+    const rowsHtml = results.map(c => {
+      const id   = c.id;
+      const name =
+        c.display_name ||
+        c.name ||
+        ((c.first_name || '') + ' ' + (c.last_name || '')).trim();
+
+      const isActive = String(id) === String(selectedId);
+
+      return `
+        <tr class="${isActive ? 'active' : ''}"
+            style="cursor:pointer;"
+            data-act="weekly-cand-select"
+            data-candidate-id="${enc(id)}">
+          <td class="mini" style="white-space:normal;word-break:break-word;">
+            <strong>${enc(name || '—')}</strong>
+          </td>
+          <td class="mini" style="width:160px;white-space:nowrap;">
+            ${c.tms_ref ? `<span class="mono">${enc(c.tms_ref)}</span>` : `<span class="mini" style="opacity:.7;">—</span>`}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    host.innerHTML = `
+      <div class="picker-table-wrap" style="max-height:260px; overflow:auto; border:1px solid var(--line); border-radius:10px; padding:6px;">
+        <table class="grid" style="table-layout:auto; width:100%;">
+          <thead>
+            <tr>
+              <th style="width:auto;">Candidate</th>
+              <th style="width:160px;">Ref</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+      </div>
+      <div class="hint mini" style="margin-top:6px;">
+        Click a row to select it, then click “Link to this candidate”.
       </div>
     `;
-
-    host.innerHTML = listHtml;
   }
 
   async function searchAndRender(term) {
@@ -50016,9 +50181,9 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
     if (resultsHost && !resultsHost.__weeklyCandSelectWired) {
       resultsHost.__weeklyCandSelectWired = true;
       resultsHost.addEventListener('click', (ev) => {
-        const li = ev.target.closest('li[data-act="weekly-cand-select"]');
-        if (!li) return;
-        const candId = li.getAttribute('data-candidate-id') || '';
+        const tr = ev.target.closest('tr[data-act="weekly-cand-select"]');
+        if (!tr) return;
+        const candId = tr.getAttribute('data-candidate-id') || '';
         if (!candId) return;
         window.__weeklyResolveCandidateState = state();
         window.__weeklyResolveCandidateState.selectedCandidateId = candId;
@@ -50031,7 +50196,7 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
     if (!root.__wkResolveActionsWired.has('import-summary-weekly-resolve-candidate')) {
       root.__wkResolveActionsWired.add('import-summary-weekly-resolve-candidate');
 
-      root.addEventListener('click', (ev) => {
+      root.addEventListener('click', async (ev) => {
         const frNow = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
         if (!frNow || frNow.kind !== 'import-summary-weekly-resolve-candidate') return;
 
@@ -50050,47 +50215,49 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
         if (act === 'weekly-cand-link') {
           const selectedId = s.selectedCandidateId;
           if (!selectedId) {
-            alert('Select a candidate from the list on the right first.');
+            alert('Select a candidate from the list first.');
+            return;
+          }
+
+          if (typeof postWeeklyResolveMappings !== 'function') {
+            alert('postWeeklyResolveMappings is not defined.');
+            return;
+          }
+          if (typeof refreshWeeklyImportSummary !== 'function') {
+            alert('refreshWeeklyImportSummary is not defined.');
             return;
           }
 
           const mappings = ensureWeeklyImportMappings(type, importId);
+
           const staffNorm = row.staff_norm || String(staffRaw || '').trim().toLowerCase();
           const hospRaw   = row.hospital_or_trust || row.unit || row.hospital_norm || '';
           const hospNorm  = String(hospRaw || '').trim().toLowerCase();
 
-          mappings.candidate_mappings.push({
-            staff_norm: staffNorm,
+          // Include fields required by backend resolve path:
+          // - staff_norm / hospital_or_trust for hr_name_mappings
+          // - candidate_id / client_id / work_date for contract validation
+          const mapping = {
+            staff_norm: staffNorm || '',
             hospital_or_trust: hospNorm || null,
-            candidate_id: selectedId
-          });
+            candidate_id: selectedId,
+            client_id: row.client_id || null,
+            work_date: row.work_date || row.date_local || row.date || row.week_ending_date || null
+          };
 
-          const all = window.__importSummaryState && window.__importSummaryState[type];
-          if (all && Array.isArray(all.rows)) {
-            const newRows = all.rows.slice();
-            const cur = { ...(newRows[rowIdx] || {}) };
-            cur.candidate_id = selectedId;
+          try {
+            await postWeeklyResolveMappings(importId, type, { candidate_mappings: [mapping], client_aliases: [] });
+            mappings.candidate_mappings.push(mapping);
 
-            if (!cur.client_id) cur.resolution_status = 'NO_CLIENT';
-            else cur.resolution_status = 'OK';
+            window.__toast && window.__toast('Candidate linked. Reclassifying…');
+            await refreshWeeklyImportSummary(type, importId);
 
-            newRows[rowIdx] = cur;
-            window.__importSummaryState[type] = {
-              import_id: all.import_id,
-              summary: all.summary,
-              rows: newRows
-            };
-            renderImportSummaryModal(type, {
-              import_id: all.import_id,
-              summary: all.summary.summary || all.summary,
-              rows: newRows
-            });
+            const closeBtn = document.getElementById('btnCloseModal');
+            if (closeBtn) closeBtn.click();
+          } catch (err) {
+            console.error('[WEEKLY][RESOLVE] candidate resolve-conflicts failed', err);
+            alert(err?.message || 'Failed to resolve candidate.');
           }
-
-          window.__toast && window.__toast('Candidate mapping queued for this import.');
-
-          const closeBtn = document.getElementById('btnCloseModal');
-          if (closeBtn) closeBtn.click();
         }
       });
     }
@@ -50115,6 +50282,7 @@ function ensureWeeklyImportMappings(type, importId) {
   }
   return m;
 }
+
 function renderImportSummaryModal(importType, summaryState) {
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -50127,7 +50295,7 @@ function renderImportSummaryModal(importType, summaryState) {
   // This ensures top-level extensions like actions / groups / truth_meta and
   // changed_shifts are never dropped (even if nested under summary).
   // ─────────────────────────────────────────────────────────────
-    const normalizePreview = (ss) => {
+  const normalizePreview = (ss) => {
     const raw = ss || {};
     const sum = (raw && typeof raw.summary === 'object' && raw.summary) ? raw.summary : raw;
 
@@ -50182,6 +50350,12 @@ function renderImportSummaryModal(importType, summaryState) {
       Array.isArray(sum.autoApplyActionIds) ? sum.autoApplyActionIds :
       [];
 
+    // ✅ Preserve mode summary if present (snake + camel, raw + summary)
+    let mode_summary =
+      raw.mode_summary || sum.mode_summary ||
+      raw.modeSummary || sum.modeSummary ||
+      null;
+
     const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
     const decisionNeededCount = changed_shifts.filter(x => asBool(x?.requires_any_decision)).length;
 
@@ -50193,6 +50367,11 @@ function renderImportSummaryModal(importType, summaryState) {
 
     // ✅ Put auto_apply_action_ids into summary too, so summary-only code paths see them.
     if (!Array.isArray(summary.auto_apply_action_ids)) summary.auto_apply_action_ids = auto_apply_action_ids;
+
+    // ✅ Put mode_summary into summary too (for summary-only code paths).
+    if (typeof summary.mode_summary !== 'string' && typeof mode_summary === 'string') {
+      summary.mode_summary = mode_summary;
+    }
 
     const canonical = Object.assign({}, raw);
     canonical.import_id = importId;
@@ -50214,16 +50393,63 @@ function renderImportSummaryModal(importType, summaryState) {
     canonical.auto_apply_action_ids = auto_apply_action_ids;
     canonical.autoApplyActionIds = auto_apply_action_ids;
 
+    // ✅ Hoist mode summary (snake + camel compatibility)
+    if (typeof mode_summary === 'string' && mode_summary) {
+      canonical.mode_summary = mode_summary;
+      canonical.modeSummary = mode_summary;
+    }
+
     return canonical;
   };
-
 
   const preview = normalizePreview(summaryState);
   const importId = preview.import_id || null;
   const rows = Array.isArray(preview.rows) ? preview.rows : [];
 
-  window.__importSummaryState = window.__importSummaryState || {};
+  // Compute an authoritative mode for HR_WEEKLY:
+  // Prefer backend mode_summary; only fall back to safe heuristics.
+  const computeWeeklyMode = (t, p) => {
+    const T = String(t || '').toUpperCase();
+    const raw =
+      (p && (p.mode_summary || p.modeSummary)) ||
+      (p && p.summary && (p.summary.mode_summary || p.summary.modeSummary)) ||
+      null;
 
+    const ms = String(raw || '').trim().toUpperCase();
+    if (ms === 'MODE_A_ONLY' || ms === 'MODE_B_ONLY' || ms === 'MIXED') return ms;
+
+    // Fallback heuristics (only when backend didn't provide mode_summary):
+    // IMPORTANT: avoid falling back to Mode-B messaging when Phase-2 rejects produce no groups.
+    if (T === 'HR_WEEKLY') {
+      const vg = Array.isArray(p?.validation_groups) ? p.validation_groups.length : 0;
+      const ag = Array.isArray(p?.action_groups) ? p.action_groups.length : 0;
+      const acts = Array.isArray(p?.actions) ? p.actions.length : 0;
+
+      if (vg > 0 && (ag > 0 || acts > 0)) return 'MIXED';
+      if (vg > 0) return 'MODE_A_ONLY';
+      if (ag > 0 || acts > 0) return 'MODE_B_ONLY';
+
+      // If EVERYTHING is empty, treat as Mode A by default so we never show apply/overwrite semantics.
+      return 'MODE_A_ONLY';
+    }
+
+    // For NHSP, keep historical behaviour (no forced default).
+    return '';
+  };
+
+  const effectiveMode = computeWeeklyMode(type, preview);
+
+  // Keep canonical preview consistent (top-level + summary) for downstream UI.
+  if (type === 'HR_WEEKLY') {
+    if (effectiveMode) {
+      preview.mode_summary = effectiveMode;
+      preview.modeSummary = effectiveMode;
+      preview.summary = preview.summary && typeof preview.summary === 'object' ? preview.summary : {};
+      preview.summary.mode_summary = effectiveMode;
+    }
+  }
+
+  window.__importSummaryState = window.__importSummaryState || {};
   // Store canonical preview object (NOT just summary+rows)
   window.__importSummaryState[type] = preview;
 
@@ -50259,14 +50485,14 @@ function renderImportSummaryModal(importType, summaryState) {
       }
     };
 
-    const actions = Array.isArray(ss?.actions) ? ss.actions : [];
+    const actionsArr = Array.isArray(ss?.actions) ? ss.actions : [];
     const truthMeta = (ss && typeof ss.truth_meta === 'object' && ss.truth_meta) ? ss.truth_meta : {};
     const fileMin = asYmd(truthMeta.file_date_min);
     const fileMax = asYmd(truthMeta.file_date_max);
 
     const minMaxFromActions = () => {
       let minD = null, maxD = null;
-      for (const a of (actions || [])) {
+      for (const a of (actionsArr || [])) {
         const wd = asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
         if (!wd) continue;
         if (!minD || wd < minD) minD = wd;
@@ -50317,6 +50543,11 @@ function renderImportSummaryModal(importType, summaryState) {
     if (!ui.options.dateFrom) ui.options.dateFrom = defaultFrom;
     if (!ui.options.dateTo)   ui.options.dateTo = defaultTo;
 
+    // ✅ HR_WEEKLY invariant: ALWAYS include missing shifts (no options modal governs this).
+    if (t === 'HR_WEEKLY') {
+      ui.options.missingShiftsEnabled = true;
+    }
+
     // Fix invalid ranges without overwriting user intent unless broken
     const df = asYmd(ui.options.dateFrom);
     const dt = asYmd(ui.options.dateTo);
@@ -50343,7 +50574,7 @@ function renderImportSummaryModal(importType, summaryState) {
     // Reconcile actionSelection against current actions[] and current options.
     // Options only govern visibility/eligibility of MISSING_FROM_IMPORT cancellations.
     const byId = new Map();
-    for (const a of (actions || [])) {
+    for (const a of (actionsArr || [])) {
       const id = a?.action_id ? String(a.action_id) : (a?.actionId ? String(a.actionId) : null);
       if (!id) continue;
       byId.set(id, a);
@@ -50369,6 +50600,13 @@ function renderImportSummaryModal(importType, summaryState) {
 
     const shouldHideMissingCancel = (a) => {
       if (!isMissingFromImportCancel(a)) return false;
+
+      // ✅ HR_WEEKLY: never hide missing-shift cancels due to "disabled" option (it is always enabled).
+      if (t === 'HR_WEEKLY') {
+        const wd = a?.work_date || a?.workDate || a?.date_local || a?.date || null;
+        return !inYmdRange(wd, ui.options.dateFrom, ui.options.dateTo);
+      }
+
       if (!ui.options.missingShiftsEnabled) return true;
       const wd = a?.work_date || a?.workDate || a?.date_local || a?.date || null;
       return !inYmdRange(wd, ui.options.dateFrom, ui.options.dateTo);
@@ -50436,8 +50674,58 @@ function renderImportSummaryModal(importType, summaryState) {
       return renderHrRotaDailySummary(type, importId, rows, preview);
     }
 
-    if (type === 'NHSP' || type === 'HR_WEEKLY') {
-      // Pass canonical preview so renderWeeklyImportSummary can always find changed shifts.
+    if (type === 'NHSP') {
+      // NHSP unchanged: keep existing weekly apply-style renderer
+      return renderWeeklyImportSummary(type, importId, rows, preview);
+    }
+
+    if (type === 'HR_WEEKLY') {
+      const ms = String(preview?.mode_summary || preview?.modeSummary || preview?.summary?.mode_summary || '').toUpperCase();
+
+      // ✅ Authoritative routing for HR_WEEKLY
+      if (ms === 'MODE_A_ONLY' || ms === 'MIXED') {
+        if (typeof renderHrWeeklyValidationSummary === 'function') {
+          const validationHtml = renderHrWeeklyValidationSummary(type, importId, preview);
+
+          // For MIXED, append existing weekly summary (actions) below validation UI.
+          if (ms === 'MIXED') {
+            const actionsHtml = renderWeeklyImportSummary(type, importId, rows, preview);
+            return html(`
+              ${validationHtml}
+              <div class="form" style="margin-top:10px">
+                <div class="card">
+                  <div class="row">
+                    <label>Apply actions</label>
+                    <div class="controls">
+                      <span class="mini">This import includes both validation items and apply actions.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              ${actionsHtml}
+            `);
+          }
+
+          return validationHtml;
+        }
+
+        // Fallback: if the new renderer isn't present, do not show apply messaging.
+        return html(`
+          <div class="form">
+            <div class="card">
+              <div class="row">
+                <label>Validation</label>
+                <div class="controls">
+                  <span class="mini">Validation renderer is missing (renderHrWeeklyValidationSummary).</span>
+                  <div class="hint">Update the frontend bundle to include the Mode-A validation renderer.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `);
+      }
+
+      // Mode B only: keep existing weekly apply-style renderer unchanged
       return renderWeeklyImportSummary(type, importId, rows, preview);
     }
 
@@ -50455,14 +50743,22 @@ function renderImportSummaryModal(importType, summaryState) {
     `);
   };
 
-  const summaryTitle =
-    (type === 'HR_ROTA_DAILY'
-      ? 'HR Rota Daily Validation'
-      : (type === 'NHSP'
-          ? 'NHSP Weekly Import Summary'
-          : 'HealthRoster Weekly Import Summary'));
+  // Title must reflect validation mode for HR_WEEKLY (and keep NHSP unchanged)
+  const summaryTitle = (() => {
+    if (type === 'HR_ROTA_DAILY') return 'HR Rota Daily Validation';
+    if (type === 'NHSP') return 'NHSP Weekly Import Summary';
 
-    // Create or reuse modal frame
+    if (type === 'HR_WEEKLY') {
+      const ms = String(preview?.mode_summary || preview?.modeSummary || preview?.summary?.mode_summary || '').toUpperCase();
+      if (ms === 'MODE_A_ONLY') return 'HealthRoster Weekly Validation';
+      if (ms === 'MIXED') return 'HealthRoster Weekly Validation + Apply';
+      return 'HealthRoster Weekly Import Summary';
+    }
+
+    return 'Import Summary';
+  })();
+
+  // Create or reuse modal frame
   if (!existingSummaryFrame) {
     showModal(
       summaryTitle,
@@ -50481,7 +50777,6 @@ function renderImportSummaryModal(importType, summaryState) {
       }
     );
   } else {
-
     try {
       existingSummaryFrame.title         = summaryTitle;
       existingSummaryFrame.tabs          = [{ key: 'main', label: 'Summary' }];
@@ -50497,12 +50792,265 @@ function renderImportSummaryModal(importType, summaryState) {
     }
   }
 
-  // Wire actions if weekly summary (safe to call; it guards internally)
+  // Wiring:
+  // - NHSP: unchanged weekly wiring
+  // - HR_WEEKLY:
+  //   - MODE_A_ONLY: do NOT call weekly action wiring; wire validation UI only
+  //   - MIXED: call weekly action wiring (for actions section) AND wire validation UI
+  //   - MODE_B_ONLY: unchanged weekly wiring
   try {
-    if (type === 'NHSP' || type === 'HR_WEEKLY') {
+    if (type === 'NHSP') {
       wireWeeklyImportSummaryActions(type, importId);
+    } else if (type === 'HR_WEEKLY') {
+      const ms = String(preview?.mode_summary || preview?.modeSummary || preview?.summary?.mode_summary || '').toUpperCase();
+
+      if (ms === 'MODE_A_ONLY') {
+        if (typeof wireHrWeeklyValidationSummaryActions === 'function') {
+          wireHrWeeklyValidationSummaryActions('HR_WEEKLY', importId);
+        }
+      } else if (ms === 'MIXED') {
+        // Mode-B actions section wiring (existing behaviour)
+        wireWeeklyImportSummaryActions(type, importId);
+
+        // Mode-A validation section wiring (emails + reclassify + finalise)
+        if (typeof wireHrWeeklyValidationSummaryActions === 'function') {
+          wireHrWeeklyValidationSummaryActions('HR_WEEKLY', importId);
+        }
+      } else {
+        // MODE_B_ONLY (or unknown): preserve existing behaviour
+        wireWeeklyImportSummaryActions(type, importId);
+      }
     }
   } catch {}
+}
+
+function wireHrWeeklyValidationSummaryActions(type, importId) {
+  const T = String(type || '').toUpperCase();
+  const impId = String(importId || '').trim();
+  if (T !== 'HR_WEEKLY') return;
+  if (!impId) return;
+
+  // Only wire when the validation summary is actually present.
+  // (This function must NOT touch Mode-B wiring.)
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('modalBody');
+      if (!root) return;
+
+      const host = root.querySelector('#hrWeeklyValidationSummary');
+      if (!host) return;
+
+      // De-dupe wiring per importId
+      root.__hrWeeklyValSummaryWired = root.__hrWeeklyValSummaryWired || new Set();
+      const wiredKey = `hr-weekly-val-summary:${impId}`;
+      if (root.__hrWeeklyValSummaryWired.has(wiredKey)) return;
+      root.__hrWeeklyValSummaryWired.add(wiredKey);
+
+      // Ensure weekly UI store exists and has emailSelection Set
+      const ensureUi = () => {
+        window.__weeklyImportUi = window.__weeklyImportUi || {};
+        window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
+
+        let ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
+
+        // Try to use existing initializer if available (preferred)
+        if (!ui && typeof ensureWeeklyUiStore === 'function') {
+          try {
+            const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+              ? window.__importSummaryState.HR_WEEKLY
+              : null;
+            ensureWeeklyUiStore('HR_WEEKLY', impId, p || {});
+          } catch {}
+          ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
+        }
+
+        // Absolute fallback: minimal UI store shape (only what we need here)
+        if (!ui || typeof ui !== 'object') {
+          ui = {
+            options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+            actionSelection: new Set(),
+            emailSelection: new Set(),
+            filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+            hydratedFlags: { didInitDefaultActionChecks: true }
+          };
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        }
+
+        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+        if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+
+        // Enforce HR_WEEKLY invariant (does not touch Mode-B logic)
+        if (!ui.options || typeof ui.options !== 'object') ui.options = {};
+        ui.options.missingShiftsEnabled = true;
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        return ui;
+      };
+
+      const getPreview = () => {
+        const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+          ? window.__importSummaryState.HR_WEEKLY
+          : null;
+        return (p && typeof p === 'object') ? p : {};
+      };
+
+      const getMode = (p) => {
+        const sum = (p && p.summary && typeof p.summary === 'object') ? p.summary : {};
+        const raw = (p && (p.mode_summary || p.modeSummary)) || sum.mode_summary || sum.modeSummary || '';
+        const ms = String(raw || '').trim().toUpperCase();
+        if (ms === 'MODE_A_ONLY' || ms === 'MODE_B_ONLY' || ms === 'MIXED') return ms;
+
+        // Safe fallback: never assume Mode-B if unsure
+        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups.length : 0;
+        const ag = Array.isArray(p?.action_groups) ? p.action_groups.length : 0;
+        const acts = Array.isArray(p?.actions) ? p.actions.length : 0;
+        if (vg > 0 && (ag > 0 || acts > 0)) return 'MIXED';
+        if (vg > 0) return 'MODE_A_ONLY';
+        if (ag > 0 || acts > 0) return 'MODE_B_ONLY';
+        return 'MODE_A_ONLY';
+      };
+
+      const parseKey = (k) => {
+        const s = String(k || '');
+        const i = s.indexOf('|');
+        if (i <= 0) return null;
+        const ts = s.slice(0, i).trim();
+        const fp = s.slice(i + 1).trim();
+        if (!ts || !fp) return null;
+        return { ts, fp };
+      };
+
+      const buildEmailActions = () => {
+        const ui = ensureUi();
+        const sel = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+        const out = [];
+        for (const k of sel) {
+          const it = parseKey(k);
+          if (!it) continue;
+          out.push({ timesheet_id: it.ts, issue_fingerprint: it.fp });
+        }
+        return out;
+      };
+
+      // Checkbox state: persist in ui.emailSelection
+      host.addEventListener('change', (ev) => {
+        const cb = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-email-toggle"]')
+          : null;
+        if (!cb) return;
+
+        const tsid = String(cb.getAttribute('data-timesheet-id') || '').trim();
+        const fp   = String(cb.getAttribute('data-issue-fingerprint') || '').trim();
+        if (!tsid || !fp) return;
+
+        const ui = ensureUi();
+        const key = `${tsid}|${fp}`;
+        if (cb.checked) ui.emailSelection.add(key);
+        else ui.emailSelection.delete(key);
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+      });
+
+      // Button wiring: Reclassify + Finalise
+      host.addEventListener('click', async (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+        if (!btn) return;
+
+        const act = String(btn.getAttribute('data-act') || '');
+
+        if (act === 'hr-weekly-val-reclassify') {
+          try {
+            if (typeof refreshWeeklyImportSummary !== 'function') {
+              throw new Error('refreshWeeklyImportSummary is not defined.');
+            }
+            await refreshWeeklyImportSummary('HR_WEEKLY', impId);
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] reclassify failed', e);
+            alert(e?.message || 'Reclassify failed.');
+          }
+          return;
+        }
+
+        if (act === 'hr-weekly-val-finalise') {
+          try {
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
+            if (typeof applyWeeklyImportTransactional !== 'function') {
+              throw new Error('applyWeeklyImportTransactional is not defined.');
+            }
+
+            const ui = ensureUi();
+            const p = getPreview();
+            const mode = getMode(p);
+
+            const auto_apply_action_ids =
+              Array.isArray(p?.auto_apply_action_ids) ? p.auto_apply_action_ids :
+              Array.isArray(p?.autoApplyActionIds) ? p.autoApplyActionIds :
+              (p?.summary && Array.isArray(p.summary.auto_apply_action_ids)) ? p.summary.auto_apply_action_ids :
+              [];
+
+            const email_actions = buildEmailActions();
+
+            let selected_action_ids = [];
+            let decisions = {};
+
+            if (mode === 'MIXED') {
+              // selected_action_ids = ui.actionSelection ∪ auto_apply_action_ids
+              const seen = new Set();
+              const out = [];
+
+              for (const v of Array.from(ui.actionSelection || [])) {
+                const s = String(v || '').trim();
+                if (!s || seen.has(s)) continue;
+                seen.add(s);
+                out.push(s);
+              }
+              for (const v of (auto_apply_action_ids || [])) {
+                const s = String(v || '').trim();
+                if (!s || seen.has(s)) continue;
+                seen.add(s);
+                out.push(s);
+              }
+              selected_action_ids = out;
+
+              // decisions as normal (serialize against current preview to avoid unknown-key rejection)
+              if (typeof getOrInitWeeklyImportDecisionsStore === 'function') {
+                try {
+                  const ds = getOrInitWeeklyImportDecisionsStore('HR_WEEKLY', impId, p);
+                  if (ds && typeof ds.serialize === 'function') {
+                    decisions = ds.serialize(p) || {};
+                  }
+                } catch {
+                  decisions = {};
+                }
+              }
+            } else {
+              // Mode-A-only
+              selected_action_ids = [];
+              decisions = {};
+            }
+
+            const result = await applyWeeklyImportTransactional('HR_WEEKLY', impId, {
+              selected_action_ids,
+              decisions,
+              email_actions
+            }) || {};
+
+            alert(`Import ${result.import_id || impId} has been finalised.`);
+            if (typeof refreshWeeklyImportSummary === 'function') {
+              await refreshWeeklyImportSummary('HR_WEEKLY', impId);
+            }
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] finalise failed', e);
+            alert(e?.message || 'Finalise failed.');
+          }
+        }
+      });
+    } catch (e) {
+      console.warn('[IMPORTS][HR_WEEKLY][VAL] wiring failed (non-fatal)', e);
+    }
+  }, 0);
 }
 
 async function openWeeklyImportOptionsModal(type, importId, preview) {
@@ -50592,48 +51140,224 @@ async function openWeeklyImportOptionsModal(type, importId, preview) {
   // Re-store (so caller can rely on it immediately)
   window.__weeklyImportUi[t][impId] = ui;
 
-  // AFTER (openWeeklyImportOptionsModal) — no modal; silently initialise defaults and continue
+  // ─────────────────────────────────────────────────────────────
+  // HR_WEEKLY: guaranteed no-op (no modal). Seed defaults and continue.
+  // ─────────────────────────────────────────────────────────────
+  if (t === 'HR_WEEKLY') {
+    try {
+      window.__weeklyImportUi = window.__weeklyImportUi || {};
+      window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
 
-  // ✅ HR_WEEKLY: do NOT show an options modal.
-  // Always enable missing shifts and default date range to file min/max (or derived from actions).
-  // This preserves the exact same persistent store shape the rest of the weekly UI expects.
-  // Returns true so the flow continues directly to the summary.
-  try {
-    window.__weeklyImportUi = window.__weeklyImportUi || {};
-    window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
+      const store = window.__weeklyImportUi[t][impId] || ui;
+      store.options = (store.options && typeof store.options === 'object') ? store.options : {};
 
-    const store = window.__weeklyImportUi[t][impId] || ui;
-    store.options = (store.options && typeof store.options === 'object') ? store.options : {};
-
-    if (typeof store.options.missingShiftsEnabled !== 'boolean') {
+      // Force-on for HR_WEEKLY (as per requirement)
       store.options.missingShiftsEnabled = true;
-    } else {
-      store.options.missingShiftsEnabled = true; // force on for HR_WEEKLY (as per requirement)
+
+      const dfA = asYmd(store.options.dateFrom);
+      const dtA = asYmd(store.options.dateTo);
+
+      if (!dfA) store.options.dateFrom = defaultFrom;
+      if (!dtA) store.options.dateTo = defaultTo;
+
+      const dfB = asYmd(store.options.dateFrom);
+      const dtB = asYmd(store.options.dateTo);
+      if (dfB && dtB && dfB > dtB) {
+        store.options.dateFrom = defaultFrom;
+        store.options.dateTo = defaultTo;
+      } else {
+        store.options.dateFrom = dfB || store.options.dateFrom || defaultFrom;
+        store.options.dateTo   = dtB || store.options.dateTo   || defaultTo;
+      }
+
+      if (!(store.actionSelection instanceof Set)) store.actionSelection = new Set();
+      if (!(store.emailSelection instanceof Set)) store.emailSelection = new Set();
+
+      store.filters = (store.filters && typeof store.filters === 'object') ? store.filters : {};
+      if (typeof store.filters.showOnlyRed !== 'boolean') store.filters.showOnlyRed = false;
+      if (typeof store.filters.showOnlyUnticked !== 'boolean') store.filters.showOnlyUnticked = false;
+      if (typeof store.filters.showOnlyCancellations !== 'boolean') store.filters.showOnlyCancellations = false;
+      if (typeof store.filters.search !== 'string') store.filters.search = '';
+
+      store.hydratedFlags = (store.hydratedFlags && typeof store.hydratedFlags === 'object') ? store.hydratedFlags : {};
+      if (typeof store.hydratedFlags.didInitDefaultActionChecks !== 'boolean') store.hydratedFlags.didInitDefaultActionChecks = false;
+
+      window.__weeklyImportUi[t][impId] = store;
+    } catch {
+      // best-effort; never block the user from reaching the summary
     }
 
-    const df0 = asYmd(store.options.dateFrom);
-    const dt0 = asYmd(store.options.dateTo);
-
-    if (!df0) store.options.dateFrom = defaultFrom;
-    if (!dt0) store.options.dateTo = defaultTo;
-
-    const df1 = asYmd(store.options.dateFrom);
-    const dt1 = asYmd(store.options.dateTo);
-    if (df1 && dt1 && df1 > dt1) {
-      store.options.dateFrom = defaultFrom;
-      store.options.dateTo = defaultTo;
-    } else {
-      store.options.dateFrom = df1 || store.options.dateFrom || defaultFrom;
-      store.options.dateTo   = dt1 || store.options.dateTo   || defaultTo;
-    }
-
-    window.__weeklyImportUi[t][impId] = store;
-  } catch {
-    // best-effort; never block the user from reaching the summary
+    return true;
   }
 
-  return true;
+  // ─────────────────────────────────────────────────────────────
+  // NHSP: options modal flow remains unchanged (modal code lives below).
+  // ─────────────────────────────────────────────────────────────
 
+  const fmt = (s) => (s ? enc(String(s)) : '—');
+
+  const render = () => {
+    const cur = window.__weeklyImportUi[t] && window.__weeklyImportUi[t][impId]
+      ? window.__weeklyImportUi[t][impId]
+      : ui;
+
+    const opt = cur && cur.options && typeof cur.options === 'object' ? cur.options : {};
+    const df = asYmd(opt.dateFrom) || '';
+    const dt = asYmd(opt.dateTo) || '';
+    const ms = (opt.missingShiftsEnabled === true);
+
+    return html(`
+      <div class="form">
+        <div class="card">
+          <div class="row">
+            <label>Missing shifts</label>
+            <div class="controls">
+              <label class="inline">
+                <input type="checkbox" id="weeklyOptMissing" ${ms ? 'checked' : ''}/>
+                <span>Include missing shifts (cancellations)</span>
+              </label>
+              <div class="hint">
+                Missing-from-import cancellations will be included only when enabled and within the date range.
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Date range</label>
+            <div class="controls">
+              <div class="grid2">
+                <div>
+                  <div class="mini">From</div>
+                  <input class="input" id="weeklyOptFrom" type="date" value="${enc(df)}"/>
+                </div>
+                <div>
+                  <div class="mini">To</div>
+                  <input class="input" id="weeklyOptTo" type="date" value="${enc(dt)}"/>
+                </div>
+              </div>
+              <div class="hint">
+                Defaults: file range ${fmt(fileMin)} → ${fmt(fileMax)} (fallback: actions range ${fmt(actMin)} → ${fmt(actMax)}).
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label></label>
+            <div class="controls">
+              <button type="button" class="btn" id="weeklyOptCancel">Cancel</button>
+              <button type="button" class="btn btn-primary" id="weeklyOptContinue">Continue</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  // Show a modal and wait for user decision.
+  // We use the existing showModal framework and resolve a Promise.
+  return await new Promise((resolve) => {
+    const kind = `weekly-import-options-${t.toLowerCase()}`;
+
+    const renderTab = (key) => {
+      if (key !== 'main') return '';
+      return render();
+    };
+
+    const onShown = () => {
+      try {
+        const body = document.getElementById('modalBody');
+        if (!body) return;
+
+        const btnCancel = body.querySelector('#weeklyOptCancel');
+        const btnContinue = body.querySelector('#weeklyOptContinue');
+        const chkMissing = body.querySelector('#weeklyOptMissing');
+        const inpFrom = body.querySelector('#weeklyOptFrom');
+        const inpTo = body.querySelector('#weeklyOptTo');
+
+        const closeTop = () => {
+          try {
+            if (typeof closeModal === 'function') closeModal();
+          } catch {}
+        };
+
+        const commit = () => {
+          const store = (window.__weeklyImportUi[t] && window.__weeklyImportUi[t][impId])
+            ? window.__weeklyImportUi[t][impId]
+            : ui;
+
+          store.options = (store.options && typeof store.options === 'object') ? store.options : {};
+          store.options.missingShiftsEnabled = !!(chkMissing && chkMissing.checked);
+
+          const df = asYmd(inpFrom && inpFrom.value);
+          const dt = asYmd(inpTo && inpTo.value);
+
+          // Save raw values; normalise inverted ranges to defaults
+          store.options.dateFrom = df || defaultFrom;
+          store.options.dateTo = dt || defaultTo;
+
+          const df2 = asYmd(store.options.dateFrom);
+          const dt2 = asYmd(store.options.dateTo);
+          if (df2 && dt2 && df2 > dt2) {
+            store.options.dateFrom = defaultFrom;
+            store.options.dateTo = defaultTo;
+          } else {
+            store.options.dateFrom = df2 || store.options.dateFrom || defaultFrom;
+            store.options.dateTo = dt2 || store.options.dateTo || defaultTo;
+          }
+
+          if (!(store.actionSelection instanceof Set)) store.actionSelection = new Set();
+          if (!(store.emailSelection instanceof Set)) store.emailSelection = new Set();
+
+          store.filters = (store.filters && typeof store.filters === 'object') ? store.filters : {};
+          if (typeof store.filters.showOnlyRed !== 'boolean') store.filters.showOnlyRed = false;
+          if (typeof store.filters.showOnlyUnticked !== 'boolean') store.filters.showOnlyUnticked = false;
+          if (typeof store.filters.showOnlyCancellations !== 'boolean') store.filters.showOnlyCancellations = false;
+          if (typeof store.filters.search !== 'string') store.filters.search = '';
+
+          store.hydratedFlags = (store.hydratedFlags && typeof store.hydratedFlags === 'object') ? store.hydratedFlags : {};
+          if (typeof store.hydratedFlags.didInitDefaultActionChecks !== 'boolean') store.hydratedFlags.didInitDefaultActionChecks = false;
+
+          window.__weeklyImportUi[t][impId] = store;
+        };
+
+        if (btnCancel) {
+          btnCancel.onclick = () => {
+            closeTop();
+            resolve(false);
+          };
+        }
+
+        if (btnContinue) {
+          btnContinue.onclick = () => {
+            commit();
+            closeTop();
+            resolve(true);
+          };
+        }
+      } catch {
+        // If wiring fails, allow flow to continue rather than blocking user.
+        resolve(true);
+      }
+    };
+
+    showModal(
+      (t === 'NHSP' ? 'Weekly Import Options (NHSP)' : 'Weekly Import Options'),
+      [{ key: 'main', label: 'Options' }],
+      renderTab,
+      null,
+      false,
+      null,
+      {
+        kind,
+        noParentGate: true,
+        stayOpenOnSave: false,
+        showSave: false
+      }
+    );
+
+    // Wire after modal is created.
+    setTimeout(onShown, 0);
+  });
 }
 
 
@@ -60634,6 +61358,724 @@ function renderTimesheetOverviewTab(ctx) {
   `;
 }
 
+function renderHrWeeklyValidationSummary(type, importId, preview) {
+  const T = String(type || '').toUpperCase();
+  const impId = (importId != null) ? String(importId) : '';
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  const p = (preview && typeof preview === 'object') ? preview : {};
+  const sum = (p.summary && typeof p.summary === 'object') ? p.summary : {};
+
+  const modeRaw =
+    (p.mode_summary || p.modeSummary || sum.mode_summary || sum.modeSummary || '');
+  let mode = String(modeRaw || '').trim().toUpperCase();
+
+  // Safety fallback: never default to "apply" semantics if backend didn't provide mode.
+  if (mode !== 'MODE_A_ONLY' && mode !== 'MODE_B_ONLY' && mode !== 'MIXED') {
+    const vgN = Array.isArray(p.validation_groups) ? p.validation_groups.length : 0;
+    const agN = Array.isArray(p.action_groups) ? p.action_groups.length : 0;
+    const aN  = Array.isArray(p.actions) ? p.actions.length : 0;
+    if (vgN > 0 && (agN > 0 || aN > 0)) mode = 'MIXED';
+    else if (vgN > 0) mode = 'MODE_A_ONLY';
+    else if (agN > 0 || aN > 0) mode = 'MODE_B_ONLY';
+    else mode = 'MODE_A_ONLY';
+  }
+
+  const niceYmd = (ymd) => {
+    const s = String(ymd || '').trim();
+    if (!s) return '';
+    if (typeof formatYmdToNiceDate === 'function' && /^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      try { return formatYmdToNiceDate(s); } catch {}
+    }
+    return s;
+  };
+
+  const vg = Array.isArray(p.validation_groups) ? p.validation_groups : [];
+  const allRows = Array.isArray(p.rows) ? p.rows : [];
+
+  // Email selection state (Set of "timesheet_id|issue_fingerprint")
+  const ui = (window.__weeklyImportUi &&
+              window.__weeklyImportUi.HR_WEEKLY &&
+              window.__weeklyImportUi.HR_WEEKLY[impId] &&
+              window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Set)
+    ? window.__weeklyImportUi.HR_WEEKLY[impId]
+    : null;
+
+  const selSet = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+
+  const keyFor = (tsid, fp) => {
+    const a = String(tsid || '').trim();
+    const b = String(fp || '').trim();
+    if (!a || !b) return '';
+    return `${a}|${b}`;
+  };
+
+  const pillForStatus = (s) => {
+    const v = String(s || '').toUpperCase();
+    if (v === 'OK' || v === 'PASS' || v === 'VALIDATION_OK') return 'pill-ok';
+    if (v === 'AMBIGUOUS' || v === 'WARN' || v === 'WARNING') return 'pill-warn';
+    if (v === 'FAIL' || v === 'ERROR' || v === 'VALIDATION_ERROR' || v === 'MISSING_TIMESHEET') return 'pill-bad';
+    return 'pill-info';
+  };
+
+  const renderFailureReasons = (reasons) => {
+    const arr = Array.isArray(reasons) ? reasons.filter(Boolean) : [];
+    if (!arr.length) return html(`<div class="mini">No failure reasons.</div>`);
+    return html(`
+      <div class="mini" style="margin-top:6px; margin-bottom:4px;">Failure reasons</div>
+      <ul class="mini" style="margin:0; padding-left:18px;">
+        ${arr.map(r => html(`<li>${enc(String(r))}</li>`)).join('')}
+      </ul>
+    `);
+  };
+
+  const renderDayDetails = (days) => {
+    const arr = Array.isArray(days) ? days : [];
+    if (!arr.length) return html(`<div class="mini">No per-day breakdown supplied.</div>`);
+
+    return html(`
+      <div style="margin-top:8px;">
+        ${arr.map((d) => {
+          const ymd =
+            d?.work_date || d?.ymd || d?.date_local || d?.date || '';
+          const dayStatus = String(d?.day_status || d?.status || '').toUpperCase();
+          const deltaMins = (d?.delta_minutes != null) ? d.delta_minutes : (d?.deltaMins != null ? d.deltaMins : null);
+
+          const hrPaid = (d?.hr_paid_minutes != null) ? d.hr_paid_minutes : null;
+          const tsPaid = (d?.ts_paid_minutes != null) ? d.ts_paid_minutes : null;
+          const hrCnt  = (d?.hr_entry_count != null) ? d.hr_entry_count : null;
+          const tsCnt  = (d?.worker_entry_count != null) ? d.worker_entry_count : null;
+
+          const pairings = Array.isArray(d?.pairings) ? d.pairings : [];
+          const hrEntries = Array.isArray(d?.hr_entries) ? d.hr_entries : (Array.isArray(d?.hr_entries_json) ? d.hr_entries_json : []);
+          const wkEntries = Array.isArray(d?.worker_entries) ? d.worker_entries : (Array.isArray(d?.worker_entries_json) ? d.worker_entries_json : []);
+
+          const headerBits = [];
+          if (dayStatus) headerBits.push(`• ${dayStatus}`);
+          if (deltaMins != null) headerBits.push(`• Δ ${deltaMins} mins`);
+          if (hrPaid != null && tsPaid != null) headerBits.push(`• Paid mins HR=${hrPaid} TS=${tsPaid}`);
+          if (hrCnt != null && tsCnt != null) headerBits.push(`• Entries HR=${hrCnt} TS=${tsCnt}`);
+          if (pairings.length) headerBits.push(`• ${pairings.length} pairing(s)`);
+
+          const renderPairings = () => {
+            if (!pairings.length) {
+              // Fallback: show raw entries if present (keeps it useful even if pairings are absent)
+              const showRaw = (hrEntries && hrEntries.length) || (wkEntries && wkEntries.length);
+              if (!showRaw) return html(`<div class="mini">No pairings/entries returned for this day.</div>`);
+              return html(`
+                <div class="mini" style="margin-top:6px;">Entries (raw)</div>
+                <pre class="mini" style="white-space:pre-wrap; margin:0; border:1px solid var(--line); border-radius:10px; padding:8px; background:#0b1427;">
+HR: ${enc(JSON.stringify(hrEntries || [], null, 2))}
+TS: ${enc(JSON.stringify(wkEntries || [], null, 2))}
+                </pre>
+              `);
+            }
+
+            return html(`
+              <div style="overflow:auto; border:1px solid var(--line); border-radius:10px; margin-top:6px;">
+                <table class="grid" style="table-layout:auto; width:100%;">
+                  <thead>
+                    <tr>
+                      <th style="width:120px;">Match</th>
+                      <th>HR</th>
+                      <th>Worker</th>
+                      <th style="width:140px;">Diffs</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${pairings.map((p) => {
+                      const match = String(p?.match_status || p?.matchStatus || '').toUpperCase() || '—';
+                      const sd = p?.start_diff_mins ?? p?.startDiffMins ?? null;
+                      const ed = p?.end_diff_mins ?? p?.endDiffMins ?? null;
+                      const bd = p?.break_diff_mins ?? p?.breakDiffMins ?? null;
+
+                      const diffs = [];
+                      if (sd != null) diffs.push(`start ${sd}m`);
+                      if (ed != null) diffs.push(`end ${ed}m`);
+                      if (bd != null) diffs.push(`break ${bd}m`);
+
+                      const hr = p?.hr || p?.hr_entry || p?.hrEntry || null;
+                      const wk = p?.worker || p?.worker_entry || p?.workerEntry || null;
+
+                      const hrTxt = hr
+                        ? `${hr?.start || hr?.start_local || hr?.start_utc || ''} → ${hr?.end || hr?.end_local || hr?.end_utc || ''} (break ${hr?.break_mins ?? hr?.break_minutes ?? hr?.break ?? ''})`
+                        : '—';
+
+                      const wkTxt = wk
+                        ? `${wk?.start || wk?.start_local || wk?.start_utc || ''} → ${wk?.end || wk?.end_local || wk?.end_utc || ''} (break ${wk?.break_mins ?? wk?.break_minutes ?? wk?.break ?? ''})`
+                        : '—';
+
+                      return html(`
+                        <tr>
+                          <td class="mini">${enc(match)}</td>
+                          <td class="mini" style="white-space:normal; word-break:break-word;">${enc(hrTxt)}</td>
+                          <td class="mini" style="white-space:normal; word-break:break-word;">${enc(wkTxt)}</td>
+                          <td class="mini">${enc(diffs.length ? diffs.join(', ') : '—')}</td>
+                        </tr>
+                      `);
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>
+            `);
+          };
+
+          return html(`
+            <details style="margin:6px 0;">
+              <summary class="mini" style="cursor:pointer;">
+                ${enc(niceYmd(ymd) || 'Unknown date')} ${headerBits.length ? enc(' ' + headerBits.join(' ')) : ''}
+              </summary>
+              <div style="margin-top:6px; padding-left:10px;">
+                ${renderPairings()}
+              </div>
+            </details>
+          `);
+        }).join('')}
+      </div>
+    `);
+  };
+
+  // Unresolved / rejected items (derive from preview.rows)
+  const unresolved = [];
+  for (let i = 0; i < allRows.length; i++) {
+    const r = allRows[i];
+    if (!r) continue;
+    const lvl = String(r.level || '').toLowerCase();
+    if (lvl !== 'row') continue;
+
+    const act = String(r.action || r.resolution_status || '').toUpperCase();
+    if (!act) continue;
+
+    // Consider any REJECT_* or non-OK status as unresolved for Mode-A readiness.
+    const unresolvedHere = act.startsWith('REJECT_') || act === 'NO_CANDIDATE' || act === 'NO_CLIENT' || act === 'BAD_ROW';
+    if (!unresolvedHere) continue;
+
+    unresolved.push({ idx: i, row: r, act });
+  }
+
+  const unresolvedTable = () => {
+    if (!unresolved.length) {
+      return html(`<span class="mini">No unresolved items were detected in this preview.</span>`);
+    }
+
+    const rowsHtml = unresolved.map(({ idx, row, act }) => {
+      const staff = row.staff_name || row.staff_raw || '';
+      const unit  = row.ward || row.unit || row.hospital_or_trust || row.trust_raw || '';
+      const wd    = row.work_date || row.date_local || '';
+      const code  = row.incoming_code || row.grade_raw || row.assignment_code || '';
+      const reason = row.reason || '';
+
+      const canAssignCand = (act === 'NO_CANDIDATE' || act === 'REJECT_NO_CANDIDATE');
+      const needsBandMap =
+        (act === 'REJECT_NO_CONTRACT' || act === 'REJECT_NO_CONTRACT_BAND_MISMATCH');
+
+      // HR_WEEKLY: client is chosen when opening import; do not offer client resolution here.
+      const btnCand = canAssignCand
+        ? `<button type="button" class="btn mini" data-act="hr-weekly-val-resolve-candidate" data-row-idx="${enc(String(idx))}">Assign candidate…</button>`
+        : '';
+
+      const btnBand = needsBandMap
+        ? `<button type="button"
+                   class="btn mini"
+                   data-act="hr-weekly-val-fix-band"
+                   data-incoming-code="${enc(String(code || '').trim())}"
+                   data-client-id="${enc(String(row.client_id || '').trim())}"
+                   data-candidate-id="${enc(String(row.candidate_id || '').trim())}"
+                   data-import-id="${enc(impId)}">
+             Fix band mapping…
+           </button>`
+        : '';
+
+      const btns = (btnCand || btnBand)
+        ? `<div class="wi-actions">${btnCand}${btnBand ? (btnCand ? '&nbsp;' : '') + btnBand : ''}</div>`
+        : `<span class="mini">—</span>`;
+
+      const statusPill = `<span class="pill pill-bad" style="white-space:normal;word-break:break-word;display:inline-block;">${enc(act)}</span>`;
+
+      return `
+        <tr data-row-idx="${enc(String(idx))}">
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(staff || '—')}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(unit || '—')}</td>
+          <td class="mini">${enc(niceYmd(wd) || wd || '—')}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(code || '—')}</td>
+          <td class="mini">${statusPill}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(reason || '')}</td>
+          <td>${btns}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return html(`
+      <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
+        <table class="grid" style="table-layout:auto; width:100%; min-width:980px;">
+          <thead>
+            <tr>
+              <th style="width:180px;">Staff</th>
+              <th style="width:260px;">Unit / Site</th>
+              <th style="width:140px;">Date</th>
+              <th style="width:140px;">Grade / Code</th>
+              <th style="width:190px;">Status</th>
+              <th>Reason</th>
+              <th style="width:260px;">Resolve</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    `);
+  };
+
+  const groupsHtml = vg.length
+    ? vg.map((g, idx) => {
+        const tsid = g?.timesheet_id || g?.timesheetId || null;
+        const we   = g?.week_ending_date || g?.weekEndingDate || null;
+
+        const candName = g?.candidate_name || g?.candidateName || '';
+        const overall = g?.overall_status || g?.overallStatus || g?.status || 'UNKNOWN';
+        const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
+        const failureReasons = g?.failure_reasons || g?.failureReasons || [];
+        const days = g?.days || [];
+
+        const recip = g?.recipient_email || g?.recipientEmail || '';
+        const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
+        const canEmail = (g?.can_email === true) || (g?.canEmail === true);
+        const fp = g?.issue_fingerprint || g?.issueFingerprint || '';
+
+        const k = keyFor(tsid, fp);
+        const checked = (k && selSet.has(k)) ? 'checked' : '';
+
+        let cannotEmailReason = '';
+        if (!canEmail) {
+          if (!tsid) cannotEmailReason = 'Timesheet missing (cannot email).';
+          else if (!fp) cannotEmailReason = 'Issue fingerprint missing.';
+          else if (!String(recip || '').trim()) cannotEmailReason = 'Recipient email missing for this client.';
+          else cannotEmailReason = 'Email not available for this row.';
+        }
+
+        const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
+
+        return html(`
+          <details style="margin:8px 0;">
+            <summary style="cursor:pointer;">
+              <span class="mini">${statusPill}</span>
+              <span class="mini" style="margin-left:8px;">
+                ${enc(candName || 'Unknown candidate')}
+                ${we ? ` • W/E ${enc(niceYmd(we))}` : ''}
+                ${tsid ? ` • TS ${enc(String(tsid))}` : ''}
+                ${hasMismatch ? ` • ${enc('Mismatch')}` : ''}
+              </span>
+            </summary>
+
+            <div style="margin-top:8px; padding-left:10px;">
+              <div class="mini" style="margin-bottom:6px;">
+                Recipient: <span class="mono">${enc(String(recip || '—'))}</span>
+                ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
+                ${fp ? ` &nbsp;•&nbsp; <span class="mini">Fingerprint: <span class="mono">${enc(String(fp))}</span></span>` : ''}
+              </div>
+
+              <div class="mini" style="margin-top:6px;">
+                <label class="inline mini" style="gap:6px;">
+                  <input type="checkbox"
+                         data-act="hr-weekly-val-email-toggle"
+                         data-timesheet-id="${enc(String(tsid || ''))}"
+                         data-issue-fingerprint="${enc(String(fp || ''))}"
+                         ${canEmail ? '' : 'disabled'}
+                         ${canEmail && checked ? 'checked' : ''}/>
+                  <span>
+                    ${enc(
+                      canEmail
+                        ? (emailedAlready ? 'Re-email temp staffing' : 'Email temp staffing')
+                        : (cannotEmailReason || 'Cannot email')
+                    )}
+                  </span>
+                </label>
+              </div>
+
+              <div style="margin-top:8px;">
+                ${renderFailureReasons(failureReasons)}
+              </div>
+
+              <div style="margin-top:8px;">
+                ${renderDayDetails(days)}
+              </div>
+            </div>
+          </details>
+        `);
+      }).join('')
+    : html(`<div class="mini">No validation groups were returned by the preview.</div>`);
+
+  const finaliseLabel = (mode === 'MIXED')
+    ? 'Finalise (apply actions + emails)'
+    : 'Finalise validations';
+
+  return html(`
+    <div class="form" id="hrWeeklyValidationSummary" data-import-id="${enc(impId)}" data-mode="${enc(mode)}">
+      <div class="card">
+        <div class="row">
+          <label>Validation results</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(impId || '—')}</span><br/>
+              Mode: <span class="pill pill-weekly" style="padding:2px 8px;">${enc(mode || 'MODE_A_ONLY')}</span><br/>
+              Validation groups: <span class="mono">${enc(String(vg.length))}</span>
+            </div>
+            <div class="hint" style="margin-top:8px;">
+              Mode A is validation-only: this screen shows mismatches and allows optional emails to Temporary Staffing. It must not imply “overwrite timesheet” behaviour.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Groups</label>
+          <div class="controls">
+            ${groupsHtml}
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px; display:${unresolved.length ? '' : 'none'};">
+        <div class="row">
+          <label>Cannot validate yet</label>
+          <div class="controls">
+            <div class="mini" style="margin-bottom:8px;">
+              Some rows are rejected/unresolved (e.g. missing candidate mapping or missing band mapping). Resolve these items, then reclassify.
+            </div>
+            ${unresolvedTable()}
+            <div class="hint" style="margin-top:8px;">
+              Candidate mapping teaches the system which person a rota name refers to. Band mapping teaches which contracts/bands a Grade code should match.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <label></label>
+        <div class="controls">
+          <button type="button" class="btn" data-act="hr-weekly-val-reclassify">Reclassify</button>
+          <button type="button" class="btn btn-primary" style="margin-left:8px;" data-act="hr-weekly-val-finalise">${enc(finaliseLabel)}</button>
+          <span class="mini" style="margin-left:8px;">
+            Reclassify refreshes validation after any mapping changes. Finalise sends selected emails (and applies actions if mixed).
+          </span>
+        </div>
+      </div>
+    </div>
+  `);
+}
+async function openHrRotaAssignRoleModal(importId, rowIndex) {
+  const impId = String(importId || '').trim();
+  const idx = Number(rowIndex);
+  if (!impId) {
+    alert('Missing import_id for role assignment.');
+    return;
+  }
+  if (!Number.isFinite(idx) || idx < 0) {
+    alert('Invalid row index for role assignment.');
+    return;
+  }
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+  const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+  if (!row) {
+    alert('Row not found for role assignment.');
+    return;
+  }
+
+  const hrRowId = row.hr_row_id ? String(row.hr_row_id).trim() : '';
+  if (!hrRowId) {
+    alert('This row has no hr_row_id, so a role assignment cannot be saved safely.');
+    return;
+  }
+
+  const staff = String(row.staff_name || row.staff_raw || '').trim();
+  const unit  = String(row.unit || row.hospital_or_trust || row.hospital_norm || '').trim();
+  const date  = String(row.date_local || row.date || row.shift_date || row.work_date || '').trim();
+  const grade = String(row.grade_raw || row.incoming_code || row.assignment_code || '').trim();
+
+  const optionsRaw =
+    (Array.isArray(row.timesheet_target_options) ? row.timesheet_target_options :
+     Array.isArray(row.timesheetTargetOptions) ? row.timesheetTargetOptions :
+     Array.isArray(row.target_options) ? row.target_options :
+     Array.isArray(row.targetOptions) ? row.targetOptions :
+     []);
+
+  const options = (Array.isArray(optionsRaw) ? optionsRaw : []).map((o) => {
+    const obj = (o && typeof o === 'object') ? o : {};
+    const id =
+      String(
+        obj.target_id ??
+        obj.targetId ??
+        obj.timesheet_target_id ??
+        obj.timesheetTargetId ??
+        obj.timesheet_id ??
+        obj.timesheetId ??
+        obj.contract_id ??
+        obj.contractId ??
+        ''
+      ).trim();
+
+    const label =
+      String(
+        obj.label ??
+        obj.display_label ??
+        obj.displayLabel ??
+        obj.band_label ??
+        obj.bandLabel ??
+        obj.role_label ??
+        obj.roleLabel ??
+        obj.contract_label ??
+        obj.contractLabel ??
+        ''
+      ).trim();
+
+    const extra = {
+      candidate_id: obj.candidate_id ?? obj.candidateId ?? null,
+      client_id: obj.client_id ?? obj.clientId ?? null,
+      band: obj.band ?? obj.band_text ?? obj.bandText ?? null,
+      role: obj.role ?? obj.role_text ?? obj.roleText ?? null
+    };
+
+    return { id, label, extra };
+  }).filter(x => x.id);
+
+  if (!options.length) {
+    alert('No role/timesheet target options were provided for this row.');
+    return;
+  }
+
+  // Persistent selection store per import
+  window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
+  if (!window.__hrRotaRoleSelections[impId] || typeof window.__hrRotaRoleSelections[impId] !== 'object') {
+    window.__hrRotaRoleSelections[impId] = {};
+  }
+
+  const existing = window.__hrRotaRoleSelections[impId][hrRowId] || null;
+  const initialSelectedId = existing && existing.target_id ? String(existing.target_id).trim() : '';
+
+  window.__hrRotaAssignRoleState = {
+    importId: impId,
+    rowIndex: idx,
+    hr_row_id: hrRowId,
+    selectedTargetId: initialSelectedId || (options.length === 1 ? options[0].id : ''),
+    options
+  };
+
+  const state = () => window.__hrRotaAssignRoleState || {};
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+    const s = state();
+    const selected = String(s.selectedTargetId || '').trim();
+
+    const rowsHtml = s.options.map((o) => {
+      const isSel = String(o.id) === selected;
+      const band = o.extra && o.extra.band ? String(o.extra.band) : '';
+      const role = o.extra && o.extra.role ? String(o.extra.role) : '';
+      const metaBits = [];
+      if (role) metaBits.push(role);
+      if (band) metaBits.push(band);
+
+      return `
+        <tr class="${isSel ? 'active' : ''}"
+            style="cursor:pointer;"
+            data-act="hr-rota-role-pick"
+            data-target-id="${enc(o.id)}">
+          <td class="mini" style="white-space:normal;word-break:break-word;">
+            <strong>${enc(o.label || o.id)}</strong>
+            ${metaBits.length ? `<div class="mini" style="opacity:.8;margin-top:2px;">${enc(metaBits.join(' • '))}</div>` : ``}
+          </td>
+          <td class="mini" style="width:220px;white-space:nowrap;">
+            <span class="mono">${enc(o.id)}</span>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    return html(`
+      <div class="form" id="hrRotaAssignRole">
+        <div class="card">
+          <div class="row">
+            <label>Assign role / target</label>
+            <div class="controls">
+              <div class="mini">
+                Import: <span class="mono">${enc(impId)}</span><br/>
+                Staff: <strong>${enc(staff || '—')}</strong><br/>
+                Unit / Site: <span class="mini">${enc(unit || '—')}</span><br/>
+                Date: <span class="mini">${enc(date || '—')}</span>
+                ${grade ? `<br/>Grade: <span class="mono">${enc(grade)}</span>` : ``}
+              </div>
+              <div class="hint mini" style="margin-top:6px;">
+                Choose the correct role/timesheet target for this day. This selection will be saved and used for future imports.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Targets</label>
+            <div class="controls">
+              <div style="max-height:300px; overflow:auto; border:1px solid var(--line); border-radius:10px; padding:6px;">
+                <table class="grid" style="table-layout:auto; width:100%;">
+                  <thead>
+                    <tr>
+                      <th>Target</th>
+                      <th style="width:220px;">ID</th>
+                    </tr>
+                  </thead>
+                  <tbody id="hrRotaRoleTargets">
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="row" style="margin-top:10px;">
+                <label></label>
+                <div class="controls">
+                  <button type="button" class="btn btn-primary" data-act="hr-rota-role-save">
+                    Save selection
+                  </button>
+                  <button type="button" class="btn" style="margin-left:8px;" data-act="hr-rota-role-cancel">
+                    Cancel
+                  </button>
+                  <span class="mini" style="margin-left:8px;">
+                    After saving, the daily preview will reclassify.
+                  </span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  showModal(
+    'Assign role (HR Rota Daily)',
+    [{ key: 'main', label: 'Assign role' }],
+    renderTab,
+    null,
+    false,
+    null,
+    { kind: 'hr-rota-assign-role', noParentGate: true, stayOpenOnSave: false }
+  );
+
+  setTimeout(() => {
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (!fr || fr.kind !== 'hr-rota-assign-role') return;
+
+    const host = root.querySelector('#hrRotaAssignRole');
+    if (!host) return;
+
+    // De-dupe
+    root.__hrRotaAssignRoleWired ||= new Set();
+    const wKey = `hr-rota-assign-role:${impId}:${hrRowId}`;
+    if (root.__hrRotaAssignRoleWired.has(wKey)) return;
+    root.__hrRotaAssignRoleWired.add(wKey);
+
+    host.addEventListener('click', async (ev) => {
+      const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-act="hr-rota-role-pick"]') : null;
+      if (tr) {
+        const targetId = String(tr.getAttribute('data-target-id') || '').trim();
+        if (!targetId) return;
+        window.__hrRotaAssignRoleState = state();
+        window.__hrRotaAssignRoleState.selectedTargetId = targetId;
+
+        // Re-render selection highlight
+        try {
+          const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+          if (fr2 && fr2.kind === 'hr-rota-assign-role' && typeof fr2.setTab === 'function') fr2.setTab('main');
+        } catch {}
+        return;
+      }
+
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+      if (!btn) return;
+      const act = String(btn.getAttribute('data-act') || '');
+
+      if (act === 'hr-rota-role-cancel') {
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.click();
+        return;
+      }
+
+      if (act === 'hr-rota-role-save') {
+        const s = state();
+        const selectedId = String(s.selectedTargetId || '').trim();
+        if (!selectedId) {
+          alert('Select a target first.');
+          return;
+        }
+
+        // Find selected option (for label persistence)
+        const chosen = (s.options || []).find(o => String(o.id) === selectedId) || null;
+        const chosenLabel = chosen ? (chosen.label || chosen.id) : selectedId;
+
+        // Persist locally (survives rerender)
+        window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
+        if (!window.__hrRotaRoleSelections[impId] || typeof window.__hrRotaRoleSelections[impId] !== 'object') {
+          window.__hrRotaRoleSelections[impId] = {};
+        }
+        window.__hrRotaRoleSelections[impId][hrRowId] = {
+          target_id: selectedId,
+          label: String(chosenLabel || selectedId)
+        };
+
+        // Persist to backend for future imports + reclassify correctness
+        // Expected helper exists per your plan: postHrRotaResolveMappings(importId, payload)
+        // Payload includes stable hr_row_id -> selected target id plus useful context.
+        if (typeof postHrRotaResolveMappings !== 'function') {
+          alert('postHrRotaResolveMappings is not defined (cannot persist role mapping to backend).');
+          return;
+        }
+
+        const payload = {
+          role_mappings: [{
+            hr_row_id: hrRowId,
+            target_id: selectedId,
+            candidate_id: row.candidate_id || null,
+            client_id: row.client_id || null,
+            work_date: row.work_date || row.date_local || row.date || row.shift_date || null,
+            grade_raw: row.grade_raw || row.incoming_code || row.assignment_code || null
+          }]
+        };
+
+        try {
+          await postHrRotaResolveMappings(impId, payload);
+
+          window.__toast && window.__toast('Role mapping saved. Reclassifying…');
+
+          if (typeof refreshHrRotaSummary === 'function') {
+            await refreshHrRotaSummary(impId);
+          }
+
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
+        } catch (err) {
+          console.error('[HR_ROTA][ROLE] save failed', err);
+          alert(err?.message || 'Failed to save role mapping.');
+        }
+      }
+    });
+  }, 0);
+}
 
 function renderHrRotaDailySummary(type, importId, rows, ss) {
   const enc = (typeof escapeHtml === 'function')
@@ -60645,6 +62087,8 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
   const summary = (ss && typeof ss.summary === 'object' && ss.summary) ? ss.summary : {};
   const total   = summary.total_rows || rows.length || 0;
 
+  const impKey = String(importId || '').trim();
+
   const counts = { OK: 0, FAILED: 0, UNMATCHED: 0 };
   rows.forEach(r => {
     const st = String(r.status || '').toUpperCase();
@@ -60653,17 +62097,21 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
     else counts.FAILED++;
   });
 
-  // ✅ Persist selections across rerender/refresh (do NOT reset every render)
+  // ✅ Persist email selections across rerender/refresh (do NOT reset every render)
   window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-  const impKey = String(importId || '').trim();
-
   if (!window.__hrRotaEmailSelections[impKey] || !(window.__hrRotaEmailSelections[impKey] instanceof Set)) {
     window.__hrRotaEmailSelections[impKey] = new Set();
   }
   const emailSel = window.__hrRotaEmailSelections[impKey];
 
-  // ✅ Reconcile selection set to only contain REAL hr_row_id values present in this render
-  // (prevents ever sending fallback idx ids, and drops stale selections after refresh)
+  // ✅ Persist role selections across rerender/refresh (hr_row_id -> {target_id,label})
+  window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
+  if (!window.__hrRotaRoleSelections[impKey] || typeof window.__hrRotaRoleSelections[impKey] !== 'object') {
+    window.__hrRotaRoleSelections[impKey] = {};
+  }
+  const roleSel = window.__hrRotaRoleSelections[impKey];
+
+  // ✅ Reconcile email selection set to only contain REAL hr_row_id values present in this render
   const validHrRowIds = new Set();
   for (const r of (rows || [])) {
     const hrid = r && r.hr_row_id ? String(r.hr_row_id).trim() : '';
@@ -60673,6 +62121,40 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
     const s = String(id || '').trim();
     if (!s || !validHrRowIds.has(s)) emailSel.delete(id);
   }
+  for (const k of Object.keys(roleSel || {})) {
+    if (!validHrRowIds.has(String(k))) {
+      delete roleSel[k];
+    }
+  }
+
+  const needsRoleResolve = (r) => {
+    if (!r) return false;
+    const flag = (r.role_resolution_required === true) || (r.roleResolutionRequired === true);
+    if (flag) return true;
+
+    const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
+    if (reasonCode === 'role_unresolved' ||
+        reasonCode === 'role_ambiguous' ||
+        reasonCode === 'timesheet_target_unresolved' ||
+        reasonCode === 'timesheet_target_ambiguous' ||
+        reasonCode === 'band_unresolved' ||
+        reasonCode === 'band_ambiguous') return true;
+
+    const opts =
+      (Array.isArray(r.timesheet_target_options) ? r.timesheet_target_options :
+       Array.isArray(r.timesheetTargetOptions) ? r.timesheetTargetOptions :
+       Array.isArray(r.target_options) ? r.target_options :
+       Array.isArray(r.targetOptions) ? r.targetOptions :
+       []);
+    return Array.isArray(opts) && opts.length > 1;
+  };
+
+  const selectedRoleLabelFor = (hrRowId) => {
+    const rec = roleSel && hrRowId ? roleSel[String(hrRowId)] : null;
+    if (!rec || typeof rec !== 'object') return '';
+    const lbl = String(rec.label || '').trim();
+    return lbl;
+  };
 
   const rowsHtml = rows.length
     ? rows.map((r, idx) => {
@@ -60686,6 +62168,8 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         const canAssignCand   = (reasonCode === 'candidate_unresolved');
         const canAssignClient = (reasonCode === 'client_unresolved');
 
+        const needRole = needsRoleResolve(r);
+
         const isTimeMismatch =
           reasonCode === 'actual_hours_mismatch' ||
           reasonCode === 'start_end_mismatch' ||
@@ -60696,11 +62180,13 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           stCls = 'pill-ok';
         } else if (reasonCode === 'candidate_unresolved' || reasonCode === 'client_unresolved') {
           stCls = 'pill-bad';
+        } else if (needRole) {
+          stCls = 'pill-bad';
         } else if (isTimeMismatch) {
           stCls = 'pill-warn';
         }
 
-        // Normalised, human-readable label text (no <br/>, allow browser wrapping)
+        // Normalised, human-readable label text
         let pillLabel;
         if (st === 'OK' || st === 'VALIDATION_OK') {
           pillLabel = 'OK';
@@ -60708,6 +62194,8 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           pillLabel = 'CANDIDATE UNMATCHED';
         } else if (reasonCode === 'client_unresolved') {
           pillLabel = 'CLIENT UNMATCHED';
+        } else if (needRole) {
+          pillLabel = 'ROLE/TARGET UNRESOLVED';
         } else if (reasonCode === 'actual_hours_mismatch') {
           pillLabel = 'HOURS MISMATCH';
         } else if (reasonCode === 'start_end_mismatch') {
@@ -60733,7 +62221,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         if (!hrRowId) {
           emailCellHtml = '<span class="mini">—</span>';
         } else if (recipientMissing) {
-          // ✅ Recipient missing: show red badge and no checkbox (tooltip explains)
           const title = recipientEmail
             ? `Recipient email present but marked missing: ${recipientEmail}`
             : 'Recipient email missing (clients.ts_queries_email not set).';
@@ -60747,7 +62234,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
             </div>
           `;
         } else if (!canEmail) {
-          // ✅ Checkbox gate is can_email (not email_eligible)
           const iconHtml = emailAlreadySent
             ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
             : '';
@@ -60775,6 +62261,11 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           `;
         }
 
+        const roleLabel = hrRowId ? selectedRoleLabelFor(hrRowId) : '';
+        const roleMini = roleLabel
+          ? `<div class="mini" style="margin-top:4px;opacity:.85;">Selected: ${enc(roleLabel)}</div>`
+          : '';
+
         return `
           <tr>
             <td><span class="mini">${enc(staff || '—')}</span></td>
@@ -60787,7 +62278,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
                   white-space: normal;
                   word-break: break-word;
                   display: inline-block;
-                  max-width: 160px;
+                  max-width: 170px;
                   text-align: center;
                 "
               >
@@ -60815,6 +62306,18 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
                        Assign client…
                      </button>`
                   : ''
+              }
+              ${
+                needRole
+                  ? `<button type="button"
+                             class="btn mini"
+                             style="${(canAssignCand || canAssignClient) ? 'margin-left:4px;' : ''}"
+                             data-act="resolve-role"
+                             data-row-idx="${idx}">
+                       Assign role…
+                     </button>
+                     ${roleMini}`
+                  : roleMini
               }
             </td>
             <td>${emailCellHtml}</td>
@@ -60891,7 +62394,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
     </div>
   `);
 
-  // Wiring (unchanged in spirit)
+  // Wiring (extended to include role resolve + apply gating)
   setTimeout(() => {
     try {
       const root = document.getElementById('hrRotaSummary');
@@ -60902,7 +62405,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         const staff = String(row.staff_name || row.staff_raw || '').trim();
         if (!staff) return null;
 
-        // naive split into first/surname (good enough for seeding suggestions)
         const parts = staff.split(/\s+/).filter(Boolean);
         const first = parts.length ? parts[0] : '';
         const sur   = parts.length > 1 ? parts[parts.length - 1] : '';
@@ -60917,7 +62419,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         };
         if (email) hint.email = email;
 
-        // drop empties
         Object.keys(hint).forEach(k => { if (!hint[k]) delete hint[k]; });
         return Object.keys(hint).length ? hint : null;
       };
@@ -60941,6 +62442,15 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         const unit = row.unit || row.hospital_or_trust || row.hospital_norm || '';
         const staff = row.staff_name || row.staff_raw || '';
 
+        if (act === 'resolve-role') {
+          if (typeof openHrRotaAssignRoleModal !== 'function') {
+            alert('Role assignment modal is not available.');
+            return;
+          }
+          openHrRotaAssignRoleModal(importId, idx);
+          return;
+        }
+
         if (act === 'resolve-candidate') {
           // HR-row resolution path (no TS / still candidate_unresolved)
           if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
@@ -60948,7 +62458,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
             return;
           }
 
-          // Timesheet-backed resolution path: ✅ use contract picker wrapper with seeded hint
+          // Timesheet-backed resolution path
           if (hasTimesheet) {
             const hint = buildHintFromHrRow(row);
 
@@ -60962,7 +62472,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
               return;
             }
 
-            // Fallback (should be rare once wrappers are in place)
             if (typeof openResolveCandidateModal === 'function') {
               openResolveCandidateModal({
                 timesheet_id:      row.timesheet_id,
@@ -60985,7 +62494,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
             return;
           }
 
-          // Timesheet-backed resolution path: ✅ use contract picker wrapper with seeded query
+          // Timesheet-backed resolution path
           if (hasTimesheet) {
             if (typeof openResolveClientPicker === 'function') {
               openResolveClientPicker({
@@ -60995,7 +62504,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
               return;
             }
 
-            // Fallback (should be rare once wrappers are in place)
             if (typeof openResolveClientModal === 'function') {
               openResolveClientModal({
                 timesheet_id:  row.timesheet_id,
@@ -61016,7 +62524,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         if (!cb) return;
 
         const rowId = String(cb.getAttribute('data-row-id') || '').trim();
-        if (!rowId) return; // ✅ only real hr_row_id values ever
+        if (!rowId) return;
 
         window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
         if (!window.__hrRotaEmailSelections[impKey] || !(window.__hrRotaEmailSelections[impKey] instanceof Set)) {
@@ -61057,6 +62565,34 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
               return;
             }
 
+            // ✅ Gate apply: must not finalise while candidate or role/target resolution is missing
+            const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+            const rowsNow = st && Array.isArray(st.rows) ? st.rows : [];
+
+            let missingCand = 0;
+            let missingRole = 0;
+
+            for (const r of rowsNow) {
+              const reasonCode = String(r?.reason_code || r?.failure_reason || r?.reason || '').toLowerCase();
+              const candUnresolved = (reasonCode === 'candidate_unresolved') && !(r && r.candidate_id);
+              if (candUnresolved) missingCand++;
+
+              const needRole = needsRoleResolve(r);
+              if (needRole) {
+                const hrid = r && r.hr_row_id ? String(r.hr_row_id).trim() : '';
+                const picked = hrid && roleSel && roleSel[hrid] && String(roleSel[hrid].target_id || '').trim();
+                if (!picked) missingRole++;
+              }
+            }
+
+            if (missingCand || missingRole) {
+              const parts = [];
+              if (missingCand) parts.push(`Candidate unresolved: ${missingCand}`);
+              if (missingRole) parts.push(`Role/target unresolved: ${missingRole}`);
+              alert(`Cannot finalise yet.\n\n${parts.join('\n')}\n\nResolve these rows first, then reclassify.`);
+              return;
+            }
+
             const ok = window.confirm('Are you sure you are ready to finalise?');
             if (!ok) return;
 
@@ -61088,6 +62624,8 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
                 let nice;
                 if      (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
                 else if (rc === 'client_unresolved')            nice = 'Client unmatched';
+                else if (rc === 'role_unresolved')              nice = 'Role/target unresolved';
+                else if (rc === 'timesheet_target_unresolved')  nice = 'Role/target unresolved';
                 else if (rc === 'actual_hours_mismatch')       nice = 'Hours mismatch';
                 else if (rc === 'start_end_mismatch')          nice = 'Start/end mismatch';
                 else if (rc === 'break_minutes_mismatch')      nice = 'Break mismatch';
@@ -61111,7 +62649,6 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
 
   return markup;
 }
-
 
 async function switchContractWeekToManual(weekId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][CW-SWITCH-MANUAL]');
