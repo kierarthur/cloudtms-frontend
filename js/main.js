@@ -49967,13 +49967,11 @@ async function openWeeklyClientResolveModal(importType, importId, rowIdx) {
 
 async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
   const type = String(importType || '').toUpperCase();
-  const enc  = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s);
 
   const st   = window.__importSummaryState && window.__importSummaryState[type];
   const rows = st && Array.isArray(st.rows) ? st.rows : [];
   const row  = (rowIdx >= 0 && rowIdx < rows.length) ? rows[rowIdx] : null;
+
   if (!row) {
     alert('Row not found for candidate resolve.');
     return;
@@ -49982,286 +49980,94 @@ async function openWeeklyCandidateResolveModal(importType, importId, rowIdx) {
   const staffRaw = row.staff_name || row.staff_raw || '';
   const unitRaw  = row.unit || row.hospital_or_trust || row.hospital_norm || '';
 
-  window.__weeklyResolveCandidateState = {
-    type,
-    importId,
-    rowIdx,
-    term: staffRaw,
-    results: [],
-    selectedCandidateId: null
-  };
-
-  const state = () => window.__weeklyResolveCandidateState || {};
-
-  const renderTab = (key) => {
-    if (key !== 'main') return '';
-    const s = state();
-    const term = s.term || '';
-
-    return html(`
-      <div class="form" id="weeklyResolveCandidate">
-        <div class="card">
-          <div class="row">
-            <label>Assign candidate</label>
-            <div class="controls">
-              <div class="mini">
-                Import: <span class="mono">${enc(importId || '')}</span><br/>
-                Staff (from import): <strong>${enc(staffRaw || '—')}</strong><br/>
-                Unit / Site: <span class="mini">${enc(unitRaw || '—')}</span>
-              </div>
-              <div class="hint mini" style="margin-top:6px;">
-                Select the correct candidate. This will be saved via resolve-conflicts and the import will reclassify immediately.
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Candidate name</label>
-            <div class="controls">
-              <input id="weeklyCandSearch"
-                     class="input"
-                     type="text"
-                     placeholder="Type to search by first or surname"
-                     value="${enc(term)}" />
-              <div class="hint mini" style="margin-top:4px;">
-                Start typing the candidate's name. Results will filter as you type.
-              </div>
-            </div>
-          </div>
-
-          <div class="row">
-            <label>Matches</label>
-            <div class="controls" id="weeklyCandResults">
-              <span class="mini">Type a name to search for candidates.</span>
-            </div>
-          </div>
-
-          <div class="row" style="margin-top:8px;">
-            <label></label>
-            <div class="controls">
-              <button type="button"
-                      class="btn btn-primary"
-                      data-act="weekly-cand-link">
-                Link to this candidate
-              </button>
-              <button type="button"
-                      class="btn"
-                      style="margin-left:8px;"
-                      data-act="weekly-cand-cancel">
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  showModal(
-    'Assign candidate (weekly import)',
-    [{ key: 'main', label: 'Assign candidate' }],
-    renderTab,
-    null,
-    false,
-    null,
-    {
-      kind: 'import-summary-weekly-resolve-candidate',
-      noParentGate: true,
-      stayOpenOnSave: false
-    }
-  );
-
-  function renderCandidateResults() {
-    const s = state();
-    const results    = Array.isArray(s.results) ? s.results : [];
-    const selectedId = s.selectedCandidateId || '';
-
-    const root = document.getElementById('modalBody');
-    if (!root) return;
-    const host = root.querySelector('#weeklyCandResults');
-    if (!host) return;
-
-    if (!results.length) {
-      host.innerHTML = '<span class="mini">No candidates matched. Try typing a different name.</span>';
-      return;
-    }
-
-    const rowsHtml = results.map(c => {
-      const id   = c.id;
-      const name =
-        c.display_name ||
-        c.name ||
-        ((c.first_name || '') + ' ' + (c.last_name || '')).trim();
-
-      const isActive = String(id) === String(selectedId);
-
-      return `
-        <tr class="${isActive ? 'active' : ''}"
-            style="cursor:pointer;"
-            data-act="weekly-cand-select"
-            data-candidate-id="${enc(id)}">
-          <td class="mini" style="white-space:normal;word-break:break-word;">
-            <strong>${enc(name || '—')}</strong>
-          </td>
-          <td class="mini" style="width:160px;white-space:nowrap;">
-            ${c.tms_ref ? `<span class="mono">${enc(c.tms_ref)}</span>` : `<span class="mini" style="opacity:.7;">—</span>`}
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    host.innerHTML = `
-      <div class="picker-table-wrap" style="max-height:260px; overflow:auto; border:1px solid var(--line); border-radius:10px; padding:6px;">
-        <table class="grid" style="table-layout:auto; width:100%;">
-          <thead>
-            <tr>
-              <th style="width:auto;">Candidate</th>
-              <th style="width:160px;">Ref</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rowsHtml}
-          </tbody>
-        </table>
-      </div>
-      <div class="hint mini" style="margin-top:6px;">
-        Click a row to select it, then click “Link to this candidate”.
-      </div>
-    `;
+  if (typeof openCandidatePicker !== 'function') {
+    alert('Candidate picker is not available (openCandidatePicker is missing).');
+    return;
+  }
+  if (typeof postWeeklyResolveMappings !== 'function') {
+    alert('postWeeklyResolveMappings is not defined.');
+    return;
+  }
+  if (typeof refreshWeeklyImportSummary !== 'function') {
+    alert('refreshWeeklyImportSummary is not defined.');
+    return;
   }
 
-  async function searchAndRender(term) {
-    const q = String(term || '').trim();
-    window.__weeklyResolveCandidateState = state();
-    window.__weeklyResolveCandidateState.term = q;
+  // Seed hint for suggestions (openCandidatePicker already supports seed_hint + ignoreMembership)
+  const parts = String(staffRaw || '').trim().split(/\s+/).filter(Boolean);
+  const first = parts.length ? parts[0] : '';
+  const sur   = parts.length > 1 ? parts[parts.length - 1] : '';
 
-    if (!q) {
-      window.__weeklyResolveCandidateState.results = [];
-      window.__weeklyResolveCandidateState.selectedCandidateId = null;
-      renderCandidateResults();
-      return;
-    }
+  const seedHint = {
+    source: 'weekly_import',
+    display_name: String(staffRaw || '').trim(),
+    first_name: first || '',
+    surname: sur || ''
+  };
 
+  // Context block shown above picker search
+  const ctx = {
+    staffName: staffRaw || '(unknown)',
+    unit: unitRaw || '',
+    hospital: unitRaw || '',
+    importId: String(importId || ''),
+    dateYmd: row.work_date || row.date_local || row.week_ending_date || ''
+  };
+
+  // Open canonical picker and persist mapping via resolve-conflicts
+  await openCandidatePicker(async ({ id, label }) => {
+    const selectedId = String(id || '').trim();
+    if (!selectedId) throw new Error('No candidate selected.');
+
+    const staffNorm =
+      row.staff_norm ||
+      String(staffRaw || '').trim().toLowerCase();
+
+    const hospRaw =
+      row.hospital_or_trust ||
+      row.unit ||
+      row.hospital_norm ||
+      unitRaw ||
+      '';
+
+    const hospNorm = String(hospRaw || '').trim().toLowerCase() || null;
+
+    const mapping = {
+      staff_norm: staffNorm || '',
+      hospital_or_trust: hospNorm,
+      candidate_id: selectedId,
+
+      // extra context (safe / helpful for backend validation paths)
+      client_id: row.client_id || null,
+      work_date: row.work_date || row.date_local || row.date || row.week_ending_date || null
+    };
+
+    // Persist immediately
+    await postWeeklyResolveMappings(importId, type, {
+      candidate_mappings: [mapping],
+      client_aliases: []
+    });
+
+    // Keep local per-import mapping queue consistent (existing behaviour)
     try {
-      const results = await searchCandidatesForResolve(q);
-      window.__weeklyResolveCandidateState.results = Array.isArray(results) ? results : [];
-      if (results && results.length === 1) {
-        window.__weeklyResolveCandidateState.selectedCandidateId = results[0].id;
+      const mappings = (typeof ensureWeeklyImportMappings === 'function')
+        ? ensureWeeklyImportMappings(type, importId)
+        : null;
+      if (mappings && Array.isArray(mappings.candidate_mappings)) {
+        mappings.candidate_mappings.push(mapping);
       }
-    } catch (err) {
-      console.error('[WEEKLY][RESOLVE] candidate search failed', err);
-      alert(err?.message || 'Candidate search failed.');
-      window.__weeklyResolveCandidateState.results = [];
-      window.__weeklyResolveCandidateState.selectedCandidateId = null;
-    }
+    } catch {}
 
-    renderCandidateResults();
-  }
+    window.__toast && window.__toast(`Candidate ${label || ''} linked. Reclassifying…`);
 
-  setTimeout(() => {
-    const root = document.getElementById('modalBody');
-    if (!root) return;
-
-    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-    if (!fr || fr.kind !== 'import-summary-weekly-resolve-candidate') return;
-
-    const input = root.querySelector('#weeklyCandSearch');
-    if (input && !input.__weeklyCandInputWired) {
-      input.__weeklyCandInputWired = true;
-      input.addEventListener('input', () => {
-        const term = (input.value || '').trim();
-        searchAndRender(term);
-      });
-      searchAndRender(input.value || '');
-    }
-
-    const resultsHost = root.querySelector('#weeklyCandResults');
-    if (resultsHost && !resultsHost.__weeklyCandSelectWired) {
-      resultsHost.__weeklyCandSelectWired = true;
-      resultsHost.addEventListener('click', (ev) => {
-        const tr = ev.target.closest('tr[data-act="weekly-cand-select"]');
-        if (!tr) return;
-        const candId = tr.getAttribute('data-candidate-id') || '';
-        if (!candId) return;
-        window.__weeklyResolveCandidateState = state();
-        window.__weeklyResolveCandidateState.selectedCandidateId = candId;
-        renderCandidateResults();
-      });
-    }
-
-    // ✅ FIX: guard against stacking duplicate click listeners on #modalBody
-    root.__wkResolveActionsWired ||= new Set();
-    if (!root.__wkResolveActionsWired.has('import-summary-weekly-resolve-candidate')) {
-      root.__wkResolveActionsWired.add('import-summary-weekly-resolve-candidate');
-
-      root.addEventListener('click', async (ev) => {
-        const frNow = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-        if (!frNow || frNow.kind !== 'import-summary-weekly-resolve-candidate') return;
-
-        const btn = ev.target.closest('button[data-act]');
-        if (!btn) return;
-
-        const act = btn.getAttribute('data-act');
-        const s   = state();
-
-        if (act === 'weekly-cand-cancel') {
-          const closeBtn = document.getElementById('btnCloseModal');
-          if (closeBtn) closeBtn.click();
-          return;
-        }
-
-        if (act === 'weekly-cand-link') {
-          const selectedId = s.selectedCandidateId;
-          if (!selectedId) {
-            alert('Select a candidate from the list first.');
-            return;
-          }
-
-          if (typeof postWeeklyResolveMappings !== 'function') {
-            alert('postWeeklyResolveMappings is not defined.');
-            return;
-          }
-          if (typeof refreshWeeklyImportSummary !== 'function') {
-            alert('refreshWeeklyImportSummary is not defined.');
-            return;
-          }
-
-          const mappings = ensureWeeklyImportMappings(type, importId);
-
-          const staffNorm = row.staff_norm || String(staffRaw || '').trim().toLowerCase();
-          const hospRaw   = row.hospital_or_trust || row.unit || row.hospital_norm || '';
-          const hospNorm  = String(hospRaw || '').trim().toLowerCase();
-
-          // Include fields required by backend resolve path:
-          // - staff_norm / hospital_or_trust for hr_name_mappings
-          // - candidate_id / client_id / work_date for contract validation
-          const mapping = {
-            staff_norm: staffNorm || '',
-            hospital_or_trust: hospNorm || null,
-            candidate_id: selectedId,
-            client_id: row.client_id || null,
-            work_date: row.work_date || row.date_local || row.date || row.week_ending_date || null
-          };
-
-          try {
-            await postWeeklyResolveMappings(importId, type, { candidate_mappings: [mapping], client_aliases: [] });
-            mappings.candidate_mappings.push(mapping);
-
-            window.__toast && window.__toast('Candidate linked. Reclassifying…');
-            await refreshWeeklyImportSummary(type, importId);
-
-            const closeBtn = document.getElementById('btnCloseModal');
-            if (closeBtn) closeBtn.click();
-          } catch (err) {
-            console.error('[WEEKLY][RESOLVE] candidate resolve-conflicts failed', err);
-            alert(err?.message || 'Failed to resolve candidate.');
-          }
-        }
-      });
-    }
-  }, 0);
+    // Reclassify/refresh the weekly preview
+    await refreshWeeklyImportSummary(type, importId);
+  }, {
+    context: ctx,
+    seed_hint: seedHint,
+    // Weekly imports should be able to pick from all candidates, not just “membership”
+    ignoreMembership: true
+  });
 }
 
 
@@ -50281,271 +50087,6 @@ function ensureWeeklyImportMappings(type, importId) {
     window.__weeklyImportMappings[t][id] = m;
   }
   return m;
-}
-
-function wireHrWeeklyValidationSummaryActions(type, importId) {
-  const T = String(type || '').toUpperCase();
-  const impId = String(importId || '').trim();
-  if (T !== 'HR_WEEKLY') return;
-  if (!impId) return;
-
-  // Only wire when the validation summary is actually present.
-  // (This function must NOT touch Mode-B wiring.)
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('modalBody');
-      if (!root) return;
-
-      const host = root.querySelector('#hrWeeklyValidationSummary');
-      if (!host) return;
-
-      // De-dupe wiring per importId
-      root.__hrWeeklyValSummaryWired = root.__hrWeeklyValSummaryWired || new Set();
-      const wiredKey = `hr-weekly-val-summary:${impId}`;
-      if (root.__hrWeeklyValSummaryWired.has(wiredKey)) return;
-      root.__hrWeeklyValSummaryWired.add(wiredKey);
-
-      // Ensure weekly UI store exists and has emailSelection Set
-      const ensureUi = () => {
-        window.__weeklyImportUi = window.__weeklyImportUi || {};
-        window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
-
-        let ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
-
-        // Try to use existing initializer if available (preferred)
-        if (!ui && typeof ensureWeeklyUiStore === 'function') {
-          try {
-            const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
-              ? window.__importSummaryState.HR_WEEKLY
-              : null;
-            ensureWeeklyUiStore('HR_WEEKLY', impId, p || {});
-          } catch {}
-          ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
-        }
-
-        // Absolute fallback: minimal UI store shape (only what we need here)
-        if (!ui || typeof ui !== 'object') {
-          ui = {
-            options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
-            actionSelection: new Set(),
-            emailSelection: new Set(),
-            filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
-            hydratedFlags: { didInitDefaultActionChecks: true }
-          };
-          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
-        }
-
-        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
-        if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
-
-        // Enforce HR_WEEKLY invariant (does not touch Mode-B logic)
-        if (!ui.options || typeof ui.options !== 'object') ui.options = {};
-        ui.options.missingShiftsEnabled = true;
-
-        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
-        return ui;
-      };
-
-      const getPreview = () => {
-        const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
-          ? window.__importSummaryState.HR_WEEKLY
-          : null;
-        return (p && typeof p === 'object') ? p : {};
-      };
-
-      const getMode = (p) => {
-        const sum = (p && p.summary && typeof p.summary === 'object') ? p.summary : {};
-        const raw = (p && (p.mode_summary || p.modeSummary)) || sum.mode_summary || sum.modeSummary || '';
-        const ms = String(raw || '').trim().toUpperCase();
-        if (ms === 'MODE_A_ONLY' || ms === 'MODE_B_ONLY' || ms === 'MIXED') return ms;
-
-        // Safe fallback: never assume Mode-B if unsure
-        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups.length : 0;
-        const ag = Array.isArray(p?.action_groups) ? p.action_groups.length : 0;
-        const acts = Array.isArray(p?.actions) ? p.actions.length : 0;
-        if (vg > 0 && (ag > 0 || acts > 0)) return 'MIXED';
-        if (vg > 0) return 'MODE_A_ONLY';
-        if (ag > 0 || acts > 0) return 'MODE_B_ONLY';
-        return 'MODE_A_ONLY';
-      };
-
-      const parseKey = (k) => {
-        const s = String(k || '');
-        const i = s.indexOf('|');
-        if (i <= 0) return null;
-        const ts = s.slice(0, i).trim();
-        const fp = s.slice(i + 1).trim();
-        if (!ts || !fp) return null;
-        return { ts, fp };
-      };
-
-      const buildEmailActions = () => {
-        const ui = ensureUi();
-        const sel = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
-        const out = [];
-        for (const k of sel) {
-          const it = parseKey(k);
-          if (!it) continue;
-          out.push({ timesheet_id: it.ts, issue_fingerprint: it.fp });
-        }
-        return out;
-      };
-
-      // Checkbox state: persist in ui.emailSelection
-      host.addEventListener('change', (ev) => {
-        const cb = ev.target && ev.target.closest
-          ? ev.target.closest('input[data-act="hr-weekly-val-email-toggle"]')
-          : null;
-        if (!cb) return;
-
-        const tsid = String(cb.getAttribute('data-timesheet-id') || '').trim();
-        const fp   = String(cb.getAttribute('data-issue-fingerprint') || '').trim();
-        if (!tsid || !fp) return;
-
-        const ui = ensureUi();
-        const key = `${tsid}|${fp}`;
-        if (cb.checked) ui.emailSelection.add(key);
-        else ui.emailSelection.delete(key);
-
-        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
-      });
-
-      // Button wiring: Reclassify + Finalise + Resolve candidate + Fix band mapping
-      host.addEventListener('click', async (ev) => {
-        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
-        if (!btn) return;
-
-        const act = String(btn.getAttribute('data-act') || '');
-
-        if (act === 'hr-weekly-val-resolve-candidate') {
-          try {
-            const idxRaw = btn.getAttribute('data-row-idx');
-            const idx = Number(idxRaw);
-            if (!Number.isFinite(idx) || idx < 0) throw new Error('Invalid row index for Assign candidate.');
-            if (typeof openWeeklyCandidateResolveModal !== 'function') throw new Error('openWeeklyCandidateResolveModal is not defined.');
-            await openWeeklyCandidateResolveModal('HR_WEEKLY', impId, idx);
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] resolve-candidate failed', e);
-            alert(e?.message || 'Assign candidate failed.');
-          }
-          return;
-        }
-
-        if (act === 'hr-weekly-val-fix-band') {
-          try {
-            if (typeof openAssignmentBandMappingsModal !== 'function') throw new Error('openAssignmentBandMappingsModal is not defined.');
-
-            const incoming_code = String(btn.getAttribute('data-incoming-code') || '').trim();
-            const client_id_raw = String(btn.getAttribute('data-client-id') || '').trim();
-            const cand_id_raw   = String(btn.getAttribute('data-candidate-id') || '').trim();
-
-            openAssignmentBandMappingsModal({
-              system_type: 'HR_WEEKLY',
-              incoming_code: incoming_code || '',
-              client_id: client_id_raw || null,
-              candidate_id: cand_id_raw || null,
-              import_id: impId
-            });
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] fix-band failed', e);
-            alert(e?.message || 'Fix band mapping failed.');
-          }
-          return;
-        }
-
-        if (act === 'hr-weekly-val-reclassify') {
-          try {
-            if (typeof refreshWeeklyImportSummary !== 'function') {
-              throw new Error('refreshWeeklyImportSummary is not defined.');
-            }
-            await refreshWeeklyImportSummary('HR_WEEKLY', impId);
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] reclassify failed', e);
-            alert(e?.message || 'Reclassify failed.');
-          }
-          return;
-        }
-
-        if (act === 'hr-weekly-val-finalise') {
-          try {
-            const ok = window.confirm('Are you sure you want to finalise now?');
-            if (!ok) return;
-
-            if (typeof applyWeeklyImportTransactional !== 'function') {
-              throw new Error('applyWeeklyImportTransactional is not defined.');
-            }
-
-            const ui = ensureUi();
-            const p = getPreview();
-            const mode = getMode(p);
-
-            const auto_apply_action_ids =
-              Array.isArray(p?.auto_apply_action_ids) ? p.auto_apply_action_ids :
-              Array.isArray(p?.autoApplyActionIds) ? p.autoApplyActionIds :
-              (p?.summary && Array.isArray(p.summary.auto_apply_action_ids)) ? p.summary.auto_apply_action_ids :
-              [];
-
-            const email_actions = buildEmailActions();
-
-            let selected_action_ids = [];
-            let decisions = {};
-
-            if (mode === 'MIXED') {
-              // selected_action_ids = ui.actionSelection ∪ auto_apply_action_ids
-              const seen = new Set();
-              const out = [];
-
-              for (const v of Array.from(ui.actionSelection || [])) {
-                const s = String(v || '').trim();
-                if (!s || seen.has(s)) continue;
-                seen.add(s);
-                out.push(s);
-              }
-              for (const v of (auto_apply_action_ids || [])) {
-                const s = String(v || '').trim();
-                if (!s || seen.has(s)) continue;
-                seen.add(s);
-                out.push(s);
-              }
-              selected_action_ids = out;
-
-              // decisions as normal (serialize against current preview to avoid unknown-key rejection)
-              if (typeof getOrInitWeeklyImportDecisionsStore === 'function') {
-                try {
-                  const ds = getOrInitWeeklyImportDecisionsStore('HR_WEEKLY', impId, p);
-                  if (ds && typeof ds.serialize === 'function') {
-                    decisions = ds.serialize(p) || {};
-                  }
-                } catch {
-                  decisions = {};
-                }
-              }
-            } else {
-              // Mode-A-only
-              selected_action_ids = [];
-              decisions = {};
-            }
-
-            const result = await applyWeeklyImportTransactional('HR_WEEKLY', impId, {
-              selected_action_ids,
-              decisions,
-              email_actions
-            }) || {};
-
-            alert(`Import ${result.import_id || impId} has been finalised.`);
-            if (typeof refreshWeeklyImportSummary === 'function') {
-              await refreshWeeklyImportSummary('HR_WEEKLY', impId);
-            }
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] finalise failed', e);
-            alert(e?.message || 'Finalise failed.');
-          }
-        }
-      });
-    } catch (e) {
-      console.warn('[IMPORTS][HR_WEEKLY][VAL] wiring failed (non-fatal)', e);
-    }
-  }, 0);
 }
 
 
@@ -61207,7 +60748,6 @@ function renderTimesheetOverviewTab(ctx) {
     </div>
   `;
 }
-
 function renderHrWeeklyValidationSummary(type, importId, preview) {
   const T = String(type || '').toUpperCase();
   const impId = (importId != null) ? String(importId) : '';
@@ -61275,7 +60815,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     const v = String(s || '').toUpperCase();
     if (v === 'OK' || v === 'PASS' || v === 'VALIDATION_OK') return 'pill-ok';
     if (v === 'AMBIGUOUS' || v === 'WARN' || v === 'WARNING') return 'pill-warn';
-    if (v === 'FAIL' || v === 'ERROR' || v === 'VALIDATION_ERROR' || v === 'MISSING_TIMESHEET') return 'pill-bad';
+    if (v === 'FAIL' || v === 'ERROR' || v === 'VALIDATION_ERROR' || v === 'MISSING_TIMESHEET' || v === 'AWAITING_AUTHORISATION') return 'pill-bad';
     return 'pill-info';
   };
 
@@ -61283,7 +60823,6 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     const a = String(raw || '').trim().toUpperCase();
     if (!a) return 'Unknown';
 
-    // Friendly REJECT labels (extend as needed)
     if (a === 'REJECT_NO_CANDIDATE') return 'Reject – Candidate not found';
     if (a === 'REJECT_NO_CLIENT') return 'Reject – Client/site not found';
     if (a === 'REJECT_NO_CONTRACT') return 'Reject – No matching contract';
@@ -61298,9 +60837,8 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     return a.replace(/_/g, ' ');
   };
 
-  // Flatten validation comparisons:
-  // days[].pairings[] => rows with date + TS + HR + tick/cross
-  const flattenComparisons = (days) => {
+  // Fallback: Flatten legacy days[].pairings[] => rows with date + TS + HR + tick/cross
+  const flattenComparisonsFromDays = (days) => {
     const out = [];
     const arr = Array.isArray(days) ? days : [];
     for (const d of arr) {
@@ -61322,7 +60860,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
           (bd == null || Number(bd) === 0);
 
         const isMatch =
-          (matchStatus === 'MATCH' || matchStatus === 'OK' || matchStatus === 'PASS' || matchStatus === 'SAME') ||
+          (matchStatus === 'MATCH' || matchStatus === 'OK' || matchStatus === 'PASS' || matchStatus === 'SAME' || matchStatus === 'MATCHED') ||
           (matchStatus === '' && diffsAllZero);
 
         const tsStart = wk?.start_local || wk?.start || wk?.start_utc || '';
@@ -61334,18 +60872,54 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
         const hrBreak = (hr?.break_mins ?? hr?.break_minutes ?? hr?.break ?? '');
 
         out.push({
-          ymd,
-          isMatch,
-          tsStart: String(tsStart || '').trim(),
-          tsEnd: String(tsEnd || '').trim(),
-          tsBreak: (tsBreak == null ? '' : String(tsBreak).trim()),
-          hrStart: String(hrStart || '').trim(),
-          hrEnd: String(hrEnd || '').trim(),
-          hrBreak: (hrBreak == null ? '' : String(hrBreak).trim()),
+          work_date: ymd,
+          match: !!isMatch,
+          match_status: matchStatus || (isMatch ? 'MATCH' : 'MISMATCH'),
+          timesheet_start: String(tsStart || '').trim(),
+          timesheet_end: String(tsEnd || '').trim(),
+          timesheet_break_mins: (tsBreak == null ? null : Number(tsBreak)),
+          healthroster_start: String(hrStart || '').trim(),
+          healthroster_end: String(hrEnd || '').trim(),
+          healthroster_break_mins: (hrBreak == null ? null : Number(hrBreak))
         });
       }
     }
     return out;
+  };
+
+  // New contract: g.comparisons[] (preferred)
+  const normaliseComparisons = (arr) => {
+    const a = Array.isArray(arr) ? arr : [];
+    return a.map((c0) => {
+      const c = c0 && typeof c0 === 'object' ? c0 : {};
+      const wd = String(c.work_date || c.workDate || c.date || c.ymd || '').trim();
+
+      const matchVal = (c.match != null) ? c.match : (c.is_match != null ? c.is_match : c.isMatch);
+      const match = (matchVal === true || matchVal === 'true' || matchVal === 1 || matchVal === '1');
+
+      const tsStart = String(c.timesheet_start || c.timesheetStart || c.ts_start_hhmm || c.tsStart || '').trim();
+      const tsEnd   = String(c.timesheet_end || c.timesheetEnd || c.ts_end_hhmm || c.tsEnd || '').trim();
+
+      const hrStart = String(c.healthroster_start || c.healthrosterStart || c.hr_start_hhmm || c.hrStart || '').trim();
+      const hrEnd   = String(c.healthroster_end || c.healthrosterEnd || c.hr_end_hhmm || c.hrEnd || '').trim();
+
+      const tsBr = (c.timesheet_break_mins ?? c.timesheetBreakMins ?? c.ts_break_mins ?? c.tsBreakMins ?? null);
+      const hrBr = (c.healthroster_break_mins ?? c.healthrosterBreakMins ?? c.hr_break_mins ?? c.hrBreakMins ?? null);
+
+      const ms = String(c.match_status || c.matchStatus || '').trim().toUpperCase();
+
+      return {
+        work_date: wd,
+        match: !!match,
+        match_status: ms || (match ? 'MATCH' : 'MISMATCH'),
+        timesheet_start: tsStart,
+        timesheet_end: tsEnd,
+        timesheet_break_mins: (tsBr == null || tsBr === '' ? null : Number(tsBr)),
+        healthroster_start: hrStart,
+        healthroster_end: hrEnd,
+        healthroster_break_mins: (hrBr == null || hrBr === '' ? null : Number(hrBr))
+      };
+    }).filter(x => x.work_date || x.timesheet_start || x.healthroster_start);
   };
 
   // Unresolved / rejected items (derive from preview.rows)
@@ -61453,31 +61027,40 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
         const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
 
         const failureReasons = g?.failure_reasons || g?.failureReasons || [];
-        const days = g?.days || [];
 
-        // Email controls
-        const tsid = g?.timesheet_id || g?.timesheetId || null; // used only for wiring (not displayed)
+        // Email controls (kept for wiring only; never displayed as IDs)
+        const tsid = g?.timesheet_id || g?.timesheetId || null;
         const recip = String(g?.recipient_email || g?.recipientEmail || '').trim();
         const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
         const canEmail = (g?.can_email === true) || (g?.canEmail === true);
-        const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim(); // used only for wiring (not displayed)
+        const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim();
 
         const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
 
-        // Comparisons list
-        const comps = flattenComparisons(days);
+        // ✅ NEW: Prefer comparisons[] from backend. Fallback to legacy days/pairings.
+        const comparisonsNew = normaliseComparisons(g?.comparisons || g?.comparison_rows || g?.comparisonRows || []);
+        const comparisonsFallback = (comparisonsNew.length === 0)
+          ? flattenComparisonsFromDays(g?.days || [])
+          : [];
+
+        const comps = comparisonsNew.length ? comparisonsNew : comparisonsFallback;
+
         const compTable = (() => {
           if (!comps.length) {
             return html(`<div class="mini">No detailed comparisons returned for this candidate/week.</div>`);
           }
+
           const body = comps.map((c) => {
-            const icon = c.isMatch ? '✅' : '❌';
-            const tsTxt = `${c.tsStart || '—'} → ${c.tsEnd || '—'} (break ${c.tsBreak || '—'})`;
-            const hrTxt = `${c.hrStart || '—'} → ${c.hrEnd || '—'} (break ${c.hrBreak || '—'})`;
+            const isMatch = (c.match === true);
+            const icon = isMatch ? '✅' : '❌';
+
+            const tsTxt = `${c.timesheet_start || '—'} → ${c.timesheet_end || '—'} (break ${c.timesheet_break_mins == null ? '—' : c.timesheet_break_mins})`;
+            const hrTxt = `${c.healthroster_start || '—'} → ${c.healthroster_end || '—'} (break ${c.healthroster_break_mins == null ? '—' : c.healthroster_break_mins})`;
+
             return html(`
               <tr>
                 <td class="mini" style="width:80px; text-align:center;">${enc(icon)}</td>
-                <td class="mini" style="width:140px;">${enc(niceYmd(c.ymd) || c.ymd || '—')}</td>
+                <td class="mini" style="width:140px;">${enc(niceYmd(c.work_date) || c.work_date || '—')}</td>
                 <td class="mini" style="white-space:normal;word-break:break-word;">${enc(tsTxt)}</td>
                 <td class="mini" style="white-space:normal;word-break:break-word;">${enc(hrTxt)}</td>
               </tr>
@@ -61501,16 +61084,48 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
           `);
         })();
 
-        // Email checkbox state
-        const k = keyFor(tsid, fp);
-        const checked = (k && selSet.has(k)) ? 'checked' : '';
+        // ✅ Email UI must only exist when mismatch exists
+        const emailBlock = (() => {
+          if (!hasMismatch) return ''; // <- your rule: no email option for perfect match
 
-        const emailLabel = (() => {
-          if (!canEmail) return 'Email not available for this row.';
-          return emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
+          // If mismatch exists but can_email is false, show a short explanation (no checkbox)
+          if (!canEmail) {
+            const why =
+              !tsid ? 'Email unavailable (timesheet missing).' :
+              !String(recip || '').trim() ? 'Email unavailable (recipient email missing for this client).' :
+              !fp ? 'Email unavailable (issue fingerprint missing).' :
+              'Email unavailable.';
+            return html(`
+              <div class="mini" style="margin-top:10px;">
+                <span class="pill pill-warn" style="padding:2px 8px;">Email</span>
+                <span class="mini" style="margin-left:8px;">${enc(why)}</span>
+              </div>
+            `);
+          }
+
+          const k = keyFor(tsid, fp);
+          const checked = (k && selSet.has(k)) ? 'checked' : '';
+
+          const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
+
+          return html(`
+            <div class="mini" style="margin-top:10px;">
+              <label class="inline mini" style="gap:6px;">
+                <input type="checkbox"
+                       data-act="hr-weekly-val-email-toggle"
+                       data-timesheet-id="${enc(String(tsid || ''))}"
+                       data-issue-fingerprint="${enc(String(fp || ''))}"
+                       ${checked ? 'checked' : ''}/>
+                <span>${enc(label)}</span>
+              </label>
+              <span class="mini" style="margin-left:10px;">
+                Recipient: <span class="mono">${enc(recip || '—')}</span>
+                ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
+              </span>
+            </div>
+          `);
         })();
 
-        // Do not show fingerprint to user; keep in data attributes only
         return html(`
           <details style="margin:8px 0;">
             <summary style="cursor:pointer;">
@@ -61537,21 +61152,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
                 ${compTable}
               </div>
 
-              <div class="mini" style="margin-top:10px;">
-                <label class="inline mini" style="gap:6px;">
-                  <input type="checkbox"
-                         data-act="hr-weekly-val-email-toggle"
-                         data-timesheet-id="${enc(String(tsid || ''))}"
-                         data-issue-fingerprint="${enc(String(fp || ''))}"
-                         ${canEmail ? '' : 'disabled'}
-                         ${canEmail && checked ? 'checked' : ''}/>
-                  <span>${enc(emailLabel)}</span>
-                </label>
-                <span class="mini" style="margin-left:10px;">
-                  Recipient: <span class="mono">${enc(recip || '—')}</span>
-                  ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
-                </span>
-              </div>
+              ${emailBlock}
             </div>
           </details>
         `);
@@ -61559,7 +61160,6 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     : html(`<div class="mini">No validation groups were returned by the preview.</div>`);
 
   const headerTitle = (() => {
-    // user-facing title; never show MODE_A_ONLY / MODE_B_ONLY
     if (mode === 'MIXED') return 'HealthRoster hours check + apply actions';
     return 'HealthRoster hours check';
   })();
@@ -61613,6 +61213,277 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     </div>
   `);
 }
+
+function wireHrWeeklyValidationSummaryActions(type, importId) {
+  const T = String(type || '').toUpperCase();
+  const impId = String(importId || '').trim();
+  if (T !== 'HR_WEEKLY') return;
+  if (!impId) return;
+
+  // ✅ Resilient wiring: delegate off modal container so it survives re-renders.
+  // This function must NOT touch Mode-B wiring.
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('modalBody');
+      if (!root) return;
+
+      // De-dupe wiring per importId (delegated wiring can be attached once)
+      root.__hrWeeklyValSummaryWired = root.__hrWeeklyValSummaryWired || new Set();
+      const wiredKey = `hr-weekly-val-summary:${impId}`;
+      if (root.__hrWeeklyValSummaryWired.has(wiredKey)) return;
+      root.__hrWeeklyValSummaryWired.add(wiredKey);
+
+      const ensureUi = () => {
+        window.__weeklyImportUi = window.__weeklyImportUi || {};
+        window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
+
+        let ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
+
+        // Preferred: use existing initializer if available
+        if (!ui && typeof ensureWeeklyUiStore === 'function') {
+          try {
+            const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+              ? window.__importSummaryState.HR_WEEKLY
+              : null;
+            ensureWeeklyUiStore('HR_WEEKLY', impId, p || {});
+          } catch {}
+          ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
+        }
+
+        // Absolute fallback
+        if (!ui || typeof ui !== 'object') {
+          ui = {
+            options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+            actionSelection: new Set(),
+            emailSelection: new Set(),
+            filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+            hydratedFlags: { didInitDefaultActionChecks: true }
+          };
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        }
+
+        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+        if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+
+        // HR_WEEKLY invariant
+        if (!ui.options || typeof ui.options !== 'object') ui.options = {};
+        ui.options.missingShiftsEnabled = true;
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        return ui;
+      };
+
+      const getPreview = () => {
+        const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+          ? window.__importSummaryState.HR_WEEKLY
+          : null;
+        return (p && typeof p === 'object') ? p : {};
+      };
+
+      const getMode = (p) => {
+        const sum = (p && p.summary && typeof p.summary === 'object') ? p.summary : {};
+        const raw = (p && (p.mode_summary || p.modeSummary)) || sum.mode_summary || sum.modeSummary || '';
+        const ms = String(raw || '').trim().toUpperCase();
+        if (ms === 'MODE_A_ONLY' || ms === 'MODE_B_ONLY' || ms === 'MIXED') return ms;
+
+        // Safe fallback
+        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups.length : 0;
+        const ag = Array.isArray(p?.action_groups) ? p.action_groups.length : 0;
+        const acts = Array.isArray(p?.actions) ? p.actions.length : 0;
+        if (vg > 0 && (ag > 0 || acts > 0)) return 'MIXED';
+        if (vg > 0) return 'MODE_A_ONLY';
+        if (ag > 0 || acts > 0) return 'MODE_B_ONLY';
+        return 'MODE_A_ONLY';
+      };
+
+      const parseKey = (k) => {
+        const s = String(k || '');
+        const i = s.indexOf('|');
+        if (i <= 0) return null;
+        const ts = s.slice(0, i).trim();
+        const fp = s.slice(i + 1).trim();
+        if (!ts || !fp) return null;
+        return { ts, fp };
+      };
+
+      const buildEmailActions = () => {
+        const ui = ensureUi();
+        const sel = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+        const out = [];
+        for (const k of sel) {
+          const it = parseKey(k);
+          if (!it) continue;
+          out.push({ timesheet_id: it.ts, issue_fingerprint: it.fp });
+        }
+        return out;
+      };
+
+      // Delegated change handler (survives re-render)
+      root.addEventListener('change', (ev) => {
+        const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
+        if (!container) return;
+
+        const containerImp = String(container.getAttribute('data-import-id') || '').trim();
+        if (containerImp && containerImp !== impId) return;
+
+        const cb = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-email-toggle"]')
+          : null;
+        if (!cb) return;
+
+        const tsid = String(cb.getAttribute('data-timesheet-id') || '').trim();
+        const fp   = String(cb.getAttribute('data-issue-fingerprint') || '').trim();
+        if (!tsid || !fp) return;
+
+        const ui = ensureUi();
+        const key = `${tsid}|${fp}`;
+        if (cb.checked) ui.emailSelection.add(key);
+        else ui.emailSelection.delete(key);
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+      });
+
+      // Delegated click handler (survives re-render)
+      root.addEventListener('click', async (ev) => {
+        const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
+        if (!container) return;
+
+        const containerImp = String(container.getAttribute('data-import-id') || '').trim();
+        if (containerImp && containerImp !== impId) return;
+
+        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+        if (!btn) return;
+
+        const act = String(btn.getAttribute('data-act') || '').trim();
+
+        if (act === 'hr-weekly-val-resolve-candidate') {
+          try {
+            const idxRaw = btn.getAttribute('data-row-idx');
+            const idx = Number(idxRaw);
+            if (!Number.isFinite(idx) || idx < 0) throw new Error('Invalid row index for Assign candidate.');
+            if (typeof openWeeklyCandidateResolveModal !== 'function') throw new Error('openWeeklyCandidateResolveModal is not defined.');
+            await openWeeklyCandidateResolveModal('HR_WEEKLY', impId, idx);
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] resolve-candidate failed', e);
+            alert(e?.message || 'Assign candidate failed.');
+          }
+          return;
+        }
+
+        if (act === 'hr-weekly-val-fix-band') {
+          try {
+            if (typeof openAssignmentBandMappingsModal !== 'function') throw new Error('openAssignmentBandMappingsModal is not defined.');
+
+            const incoming_code = String(btn.getAttribute('data-incoming-code') || '').trim();
+            const client_id_raw = String(btn.getAttribute('data-client-id') || '').trim();
+            const cand_id_raw   = String(btn.getAttribute('data-candidate-id') || '').trim();
+
+            openAssignmentBandMappingsModal({
+              system_type: 'HR_WEEKLY',
+              incoming_code: incoming_code || '',
+              client_id: client_id_raw || null,
+              candidate_id: cand_id_raw || null,
+              import_id: impId
+            });
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] fix-band failed', e);
+            alert(e?.message || 'Fix band mapping failed.');
+          }
+          return;
+        }
+
+        if (act === 'hr-weekly-val-reclassify') {
+          try {
+            if (typeof refreshWeeklyImportSummary !== 'function') {
+              throw new Error('refreshWeeklyImportSummary is not defined.');
+            }
+            await refreshWeeklyImportSummary('HR_WEEKLY', impId);
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] reclassify failed', e);
+            alert(e?.message || 'Reclassify failed.');
+          }
+          return;
+        }
+
+        if (act === 'hr-weekly-val-finalise') {
+          try {
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
+            if (typeof applyWeeklyImportTransactional !== 'function') {
+              throw new Error('applyWeeklyImportTransactional is not defined.');
+            }
+
+            const ui = ensureUi();
+            const p = getPreview();
+            const mode = getMode(p);
+
+            const auto_apply_action_ids =
+              Array.isArray(p?.auto_apply_action_ids) ? p.auto_apply_action_ids :
+              Array.isArray(p?.autoApplyActionIds) ? p.autoApplyActionIds :
+              (p?.summary && Array.isArray(p.summary.auto_apply_action_ids)) ? p.summary.auto_apply_action_ids :
+              [];
+
+            const email_actions = buildEmailActions();
+
+            let selected_action_ids = [];
+            let decisions = {};
+
+            if (mode === 'MIXED') {
+              const seen = new Set();
+              const out = [];
+
+              for (const v of Array.from(ui.actionSelection || [])) {
+                const s = String(v || '').trim();
+                if (!s || seen.has(s)) continue;
+                seen.add(s);
+                out.push(s);
+              }
+              for (const v of (auto_apply_action_ids || [])) {
+                const s = String(v || '').trim();
+                if (!s || seen.has(s)) continue;
+                seen.add(s);
+                out.push(s);
+              }
+              selected_action_ids = out;
+
+              if (typeof getOrInitWeeklyImportDecisionsStore === 'function') {
+                try {
+                  const ds = getOrInitWeeklyImportDecisionsStore('HR_WEEKLY', impId, p);
+                  if (ds && typeof ds.serialize === 'function') {
+                    decisions = ds.serialize(p) || {};
+                  }
+                } catch {
+                  decisions = {};
+                }
+              }
+            } else {
+              selected_action_ids = [];
+              decisions = {};
+            }
+
+            const result = await applyWeeklyImportTransactional('HR_WEEKLY', impId, {
+              selected_action_ids,
+              decisions,
+              email_actions
+            }) || {};
+
+            alert(`Import ${result.import_id || impId} has been finalised.`);
+            if (typeof refreshWeeklyImportSummary === 'function') {
+              await refreshWeeklyImportSummary('HR_WEEKLY', impId);
+            }
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] finalise failed', e);
+            alert(e?.message || 'Finalise failed.');
+          }
+        }
+      });
+    } catch (e) {
+      console.warn('[IMPORTS][HR_WEEKLY][VAL] wiring failed (non-fatal)', e);
+    }
+  }, 0);
+}
+
 
 async function openHrRotaAssignRoleModal(importId, rowIndex) {
   const impId = String(importId || '').trim();
