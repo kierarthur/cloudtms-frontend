@@ -49559,8 +49559,11 @@ async function openHrWeeklyBandResolveModal(opts) {
   const incomingCode = String(seed.incoming_code || seed.incomingCode || '').trim();
 
   // Scope date (used to list contracts "active in scope")
-  const scopeYmd =
-    String(seed.work_date || seed.workDate || seed.week_ending_date || seed.weekEndingDate || seed.active_on || seed.activeOn || '').trim() || null;
+  const scopeYmdRaw =
+    seed.work_date || seed.workDate ||
+    seed.week_ending_date || seed.weekEndingDate ||
+    seed.active_on || seed.activeOn ||
+    null;
 
   if (!importId) throw new Error('openHrWeeklyBandResolveModal: import_id is required');
   if (!candidateId) throw new Error('openHrWeeklyBandResolveModal: candidate_id is required');
@@ -49586,16 +49589,33 @@ async function openHrWeeklyBandResolveModal(opts) {
     candidate_id: candidateId,
     client_id: clientId,
     incoming_code: incomingCode,
-    scope_ymd: toYmd(scopeYmd) || null,
+    scope_ymd: toYmd(scopeYmdRaw) || null,
 
     loading: false,
     error: '',
     contracts: [],
     selected_contract_id: null,
 
-    // derived display
+    // derived display (best-effort)
     candidate_display: '',
     client_name: ''
+  };
+
+  const safeBand = (c) => String(c?.band || c?.band_snapshot || c?.band_label || '').trim();
+  const safeRole = (c) => String(c?.role || c?.role_snapshot || c?.job_title || c?.job_title_norm || '').trim();
+  const safeSite = (c) => String(
+    c?.display_site ||
+    c?.hospital_norm ||
+    c?.client_site ||
+    c?.site ||
+    c?.ward_hint ||
+    c?.ward_norm ||
+    ''
+  ).trim();
+
+  const safeDate = (d) => {
+    const s = String(d || '').trim();
+    return s ? s : '—';
   };
 
   const repaint = () => {
@@ -49608,35 +49628,6 @@ async function openHrWeeklyBandResolveModal(opts) {
     } catch {}
   };
 
-  const safeBand = (c) => {
-    const b = String(c?.band || c?.band_snapshot || c?.band_label || '').trim();
-    return b || '';
-  };
-
-  const safeRole = (c) => {
-    const r = String(c?.role || c?.role_snapshot || c?.job_title || c?.job_title_norm || '').trim();
-    return r || '';
-  };
-
-  const safeSite = (c) => {
-    const s =
-      String(
-        c?.display_site ||
-        c?.hospital_norm ||
-        c?.client_site ||
-        c?.site ||
-        c?.ward_hint ||
-        c?.ward_norm ||
-        ''
-      ).trim();
-    return s || '';
-  };
-
-  const safeDate = (d) => {
-    const s = String(d || '').trim();
-    return s ? s : '—';
-  };
-
   const loadContracts = async () => {
     state.loading = true;
     state.error = '';
@@ -49645,7 +49636,7 @@ async function openHrWeeklyBandResolveModal(opts) {
     try {
       const activeOn = state.scope_ymd || null;
 
-      // listContracts is already in your frontend and hits /api/contracts
+      // listContracts should return contracts; we request candidate+client scoped + active in range
       const rows = await listContracts({
         client_id: state.client_id,
         candidate_id: state.candidate_id,
@@ -49655,7 +49646,7 @@ async function openHrWeeklyBandResolveModal(opts) {
 
       state.contracts = Array.isArray(rows) ? rows : [];
 
-      // best-effort display labels
+      // Best-effort display labels
       if (!state.candidate_display) {
         const any = state.contracts.find(Boolean) || null;
         const cd = String(any?.candidate_display || any?.candidate_name || '').trim();
@@ -49667,7 +49658,7 @@ async function openHrWeeklyBandResolveModal(opts) {
         if (cn) state.client_name = cn;
       }
 
-      // If only one contract, preselect it
+      // Preselect if only one
       if (!state.selected_contract_id && state.contracts.length === 1) {
         const onlyId = String(state.contracts[0]?.id || '').trim();
         if (onlyId) state.selected_contract_id = onlyId;
@@ -49689,6 +49680,10 @@ async function openHrWeeklyBandResolveModal(opts) {
 
     const headerCandidate = state.candidate_display ? state.candidate_display : 'Selected candidate';
     const headerClient = state.client_name ? state.client_name : state.client_id;
+
+    const scopeLine = state.scope_ymd
+      ? `Active on: <span class="mono">${enc(state.scope_ymd)}</span>`
+      : `Active on: <span class="mini">—</span>`;
 
     const tableBody = contracts.length
       ? contracts.map((c) => {
@@ -49728,13 +49723,11 @@ async function openHrWeeklyBandResolveModal(opts) {
       ? `<div class="hint" style="color:#ffb4b4; margin-top:8px;">${enc(state.error)}</div>`
       : '';
 
-    const scopeLine = state.scope_ymd ? `Active on: <span class="mono">${enc(state.scope_ymd)}</span>` : 'Active on: <span class="mini">—</span>';
-
     return `
       <div id="hrWeeklyBandResolveModal" data-import-id="${enc(state.import_id)}">
         <div class="card">
           <div class="row">
-            <label>Resolve HealthRoster grade to band</label>
+            <label>Resolve HealthRoster grade to contract</label>
             <div class="controls">
               <div class="mini">
                 Incoming HealthRoster code: <span class="mono">${enc(state.incoming_code)}</span><br/>
@@ -49743,7 +49736,8 @@ async function openHrWeeklyBandResolveModal(opts) {
                 ${scopeLine}
               </div>
               <div class="hint" style="margin-top:8px;">
-                Pick the correct contract band for this candidate. We will create a <strong>candidate-specific</strong> mapping for this incoming code.
+                Pick the correct contract for this candidate and client. We will create a <strong>candidate + client</strong> mapping
+                for this incoming code, targeting the chosen contract (most reliable).
               </div>
               ${errHtml}
             </div>
@@ -49771,8 +49765,9 @@ async function openHrWeeklyBandResolveModal(opts) {
               </div>
 
               <div class="hint" style="margin-top:8px;">
-                This creates a candidate-scoped rule: <span class="mono">${enc(state.incoming_code)}</span> → <span class="mono">(selected band)</span>.
-                It will apply whenever this candidate appears with this code in future imports.
+                This creates a candidate+client rule:
+                <span class="mono">${enc(state.incoming_code)}</span> → <span class="mono">(selected contract)</span>.
+                It applies whenever this candidate appears for this client with this code in future HR weekly imports.
               </div>
             </div>
           </div>
@@ -49794,21 +49789,18 @@ async function openHrWeeklyBandResolveModal(opts) {
     const root = document.getElementById('hrWeeklyBandResolveModal');
     if (!root) return;
 
-    // De-dupe wiring
+    // De-dupe per DOM instance (re-render replaces DOM, so this is safe)
     if (root.__hrwbrWired) return;
     root.__hrwbrWired = true;
-
-    const modalBody = document.getElementById('modalBody');
 
     const closeModal = () => {
       const closeBtn = document.getElementById('btnCloseModal');
       if (closeBtn) closeBtn.click();
     };
 
-    // Row click -> select
     root.addEventListener('click', async (ev) => {
-      const btn = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
-      const act = btn ? String(btn.getAttribute('data-act') || '') : '';
+      const btnAny = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+      const act = btnAny ? String(btnAny.getAttribute('data-act') || '') : '';
 
       // Row selection
       const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-act="hrwbr-row"]') : null;
@@ -49822,7 +49814,7 @@ async function openHrWeeklyBandResolveModal(opts) {
       }
 
       if (act === 'hrwbr-select') {
-        const id = String(btn.getAttribute('data-id') || '').trim();
+        const id = String(btnAny.getAttribute('data-id') || '').trim();
         if (id) {
           state.selected_contract_id = id;
           repaint();
@@ -49855,13 +49847,13 @@ async function openHrWeeklyBandResolveModal(opts) {
           }
 
           const band = safeBand(c);
-          if (!band) {
-            alert('Selected contract has no band value. Cannot create mapping.');
-            return;
-          }
+          const role = safeRole(c);
+
+          // band_match_pattern is still required by schema; keep it readable even though contract target is authoritative.
+          const bandPattern = (band || role || 'Contract').trim();
 
           const ok = window.confirm(
-            `Create candidate-specific mapping?\n\nIncoming code: ${state.incoming_code}\nBand: ${band}\n\nThis will affect future HR weekly imports for this candidate.`
+            `Create candidate+client mapping?\n\nIncoming code: ${state.incoming_code}\nTarget: ${bandPattern}\n\nThis will affect future HR weekly imports for this candidate + client.`
           );
           if (!ok) return;
 
@@ -49869,19 +49861,22 @@ async function openHrWeeklyBandResolveModal(opts) {
           state.error = '';
           repaint();
 
-          // IMPORTANT: backend forbids candidate_id + client_id together.
-          // Candidate-scoped mapping is still effective because contract matching already narrows by client + candidate.
+          // ✅ NEW LOGIC:
+          // Create candidate+client scoped row targeting contract_id (most reliable).
           await apiCreateAssignmentBandMapping({
             system_type: 'HR_WEEKLY',
             incoming_code: state.incoming_code,
             candidate_id: state.candidate_id,
-            client_id: null,
-            band_match_pattern: band,
+            client_id: state.client_id,
+            target_contract_id: selId,
+            band_match_pattern: bandPattern,
             active: true,
-            notes: `Resolved via HR_WEEKLY import ${state.import_id} (client ${state.client_id}).`
+            scope_kind: 'CANDIDATE_CLIENT',
+            allow_candidate_client_scope: true,
+            notes: `Resolved via HR_WEEKLY import ${state.import_id} (candidate+client contract-target).`
           });
 
-          if (window.__toast) window.__toast('Band mapping saved.');
+          if (window.__toast) window.__toast('Contract mapping saved.');
 
           state.loading = false;
           repaint();
@@ -49904,7 +49899,7 @@ async function openHrWeeklyBandResolveModal(opts) {
 
   showModal(
     'Resolve HealthRoster grade',
-    [{ key: 'main', label: 'Resolve band' }],
+    [{ key: 'main', label: 'Resolve contract' }],
     renderTab,
     null,
     false,
