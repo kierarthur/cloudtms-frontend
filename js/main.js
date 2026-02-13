@@ -51207,6 +51207,7 @@ function openAssignmentBandMappingsModal(opts) {
   const scopeLabelForRow = (r) => {
     const hasCand = !!r.candidate_id;
     const hasCli  = !!r.client_id;
+    if (hasCand && hasCli) return 'Candidate+Client';
     if (hasCand) return 'Candidate';
     if (hasCli)  return 'Client';
     return 'Global';
@@ -51247,11 +51248,14 @@ function openAssignmentBandMappingsModal(opts) {
 
           const scopeTxt = scopeLabelForRow(r);
 
+          // ✅ Notes: keep compact (2-line clamp + hover title)
+          const notesTitle = notes ? ` title="${enc(notes)}"` : '';
+
           return `
             <tr data-id="${enc(id)}">
               <td><span class="mini mono">${enc(incoming || '—')}</span></td>
               <td>
-                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:280px;">
+                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:260px;">
                   ${enc(patt || '—')}
                 </span>
               </td>
@@ -51265,7 +51269,15 @@ function openAssignmentBandMappingsModal(opts) {
               </td>
               <td><span class="pill ${pill}" style="padding:2px 8px;font-size:12px;">${enc(pillTxt)}</span></td>
               <td>
-                <span class="mini" style="white-space:normal;word-break:break-word;display:inline-block;max-width:380px;">
+                <span class="mini"${notesTitle} style="
+                  display:-webkit-box;
+                  -webkit-line-clamp:2;
+                  -webkit-box-orient:vertical;
+                  overflow:hidden;
+                  max-width:320px;
+                  white-space:normal;
+                  word-break:break-word;
+                ">
                   ${enc(notes || '')}
                 </span>
               </td>
@@ -51345,7 +51357,7 @@ function openAssignmentBandMappingsModal(opts) {
               </div>
 
               <span class="mini" style="opacity:.75;">
-                (Scope filters are optional; they help you narrow the table.)
+                (Scope target is optional; pick one to narrow results further.)
               </span>
             </div>
           </div>
@@ -51479,7 +51491,7 @@ function openAssignmentBandMappingsModal(opts) {
                       <th style="width:260px;">Candidate</th>
                       <th style="width:140px;">Scope</th>
                       <th style="width:90px;">Active</th>
-                      <th>Notes</th>
+                      <th style="width:320px; min-width:320px;">Notes</th>
                       <th style="width:260px;">Actions</th>
                     </tr>
                   </thead>
@@ -51507,26 +51519,49 @@ function openAssignmentBandMappingsModal(opts) {
     } catch {}
   };
 
+  const applyLocalScopeFilterIfNeeded = (rowsIn) => {
+    const rows = Array.isArray(rowsIn) ? rowsIn : [];
+    const sf = String(state.scope_filter || 'ANY').toUpperCase();
+
+    // If the user chose CLIENT/CANDIDATE but didn't pick an id, we still want a useful filter
+    // without relying on backend scope=CLIENT/CANDIDATE (which requires a target id).
+    if (sf === 'CLIENT' && !state.filter_client_id) {
+      return rows.filter(r => (r && r.candidate_id == null && r.client_id != null));
+    }
+    if (sf === 'CANDIDATE' && !state.filter_candidate_id) {
+      return rows.filter(r => (r && r.candidate_id != null));
+    }
+    return rows;
+  };
+
   const loadList = async () => {
     state.loading = true;
     state.error = '';
     try {
       repaint();
 
-      const scope =
-        state.scope_filter === 'ANY' ? null :
-        state.scope_filter;
+      const sf = String(state.scope_filter || 'ANY').toUpperCase();
+
+      // ✅ IMPORTANT:
+      // - scope=GLOBAL works without a target id (backend supported)
+      // - scope=CLIENT/CANDIDATE require a target id (backend enforced)
+      // So only pass those scope values when the target id exists; otherwise fetch ANY and filter locally.
+      const scopeParam =
+        (sf === 'GLOBAL') ? 'GLOBAL' :
+        (sf === 'CLIENT' && state.filter_client_id) ? 'CLIENT' :
+        (sf === 'CANDIDATE' && state.filter_candidate_id) ? 'CANDIDATE' :
+        null;
 
       const rows = await apiListAssignmentBandMappings({
         system_type: state.system_type,
         incoming_like: state.filter_incoming_like || null,
-        scope: scope || null,
-        candidate_id: (state.scope_filter === 'CANDIDATE') ? (state.filter_candidate_id || null) : null,
-        client_id:    (state.scope_filter === 'CLIENT')    ? (state.filter_client_id || null)    : null,
+        scope: scopeParam,
+        candidate_id: (scopeParam === 'CANDIDATE') ? (state.filter_candidate_id || null) : null,
+        client_id:    (scopeParam === 'CLIENT')    ? (state.filter_client_id || null)    : null,
         include_inactive: state.include_inactive
       });
 
-      state.rows = Array.isArray(rows) ? rows : [];
+      state.rows = applyLocalScopeFilterIfNeeded(rows);
     } catch (e) {
       state.rows = [];
       state.error = e?.message || String(e);
@@ -51595,7 +51630,9 @@ function openAssignmentBandMappingsModal(opts) {
         if (state.scope_filter !== 'CANDIDATE') { state.filter_candidate_id = null; state.filter_candidate_label = ''; }
         if (state.scope_filter !== 'CLIENT')    { state.filter_client_id = null; state.filter_client_label = ''; }
         cancelEdit();
-        repaint();
+
+        // ✅ FIX: changing scope must actually refresh the list (not just repaint)
+        loadList();
       });
     }
     if (inpLike && !inpLike.__abmWired) {
@@ -51903,6 +51940,7 @@ function openAssignmentBandMappingsModal(opts) {
     }
   }, 0);
 }
+
 
 
 function renderWeeklyImportSummary(type, importId, rows, ss) {
