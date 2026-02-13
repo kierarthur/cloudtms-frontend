@@ -7759,6 +7759,577 @@ function buildSummaryFilterQSForIdList(section, filters){
   return sp.toString();
 }
 
+function renderHrWeeklyValidationSummary(type, importId, preview) {
+  const T = String(type || '').toUpperCase();
+  const impId = (importId != null) ? String(importId) : '';
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  const p = (preview && typeof preview === 'object') ? preview : {};
+  const sum = (p.summary && typeof p.summary === 'object') ? p.summary : {};
+
+  const modeRaw = (p.mode_summary || p.modeSummary || sum.mode_summary || sum.modeSummary || '');
+  let mode = String(modeRaw || '').trim().toUpperCase();
+
+  // Safety fallback: never default to "apply" semantics if backend didn't provide mode.
+  if (mode !== 'MODE_A_ONLY' && mode !== 'MODE_B_ONLY' && mode !== 'MIXED') {
+    const vgN = Array.isArray(p.validation_groups) ? p.validation_groups.length : 0;
+    const agN = Array.isArray(p.action_groups) ? p.action_groups.length : 0;
+    const aN  = Array.isArray(p.actions) ? p.actions.length : 0;
+    if (vgN > 0 && (agN > 0 || aN > 0)) mode = 'MIXED';
+    else if (vgN > 0) mode = 'MODE_A_ONLY';
+    else if (agN > 0 || aN > 0) mode = 'MODE_B_ONLY';
+    else mode = 'MODE_A_ONLY';
+  }
+
+  const niceYmd = (ymd) => {
+    const s = String(ymd || '').trim();
+    if (!s) return '';
+    if (typeof formatYmdToNiceDate === 'function' && /^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      try { return formatYmdToNiceDate(s); } catch {}
+    }
+    return s;
+  };
+
+  // Weekly preview payload fields
+  const vg = Array.isArray(p.validation_groups) ? p.validation_groups : [];
+  const allRows = Array.isArray(p.rows) ? p.rows : [];
+
+  // Resolve import-level client_id fallback for mapping modal seeding
+  const importClientId =
+    String(
+      (p.client_id || sum.client_id || p?.truth_meta?.client_id || sum?.truth_meta?.client_id || '') || ''
+    ).trim();
+
+  // Email selection state (Set of "timesheet_id|issue_fingerprint")
+  const ui = (window.__weeklyImportUi &&
+              window.__weeklyImportUi.HR_WEEKLY &&
+              window.__weeklyImportUi.HR_WEEKLY[impId] &&
+              window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Set)
+    ? window.__weeklyImportUi.HR_WEEKLY[impId]
+    : null;
+
+  const selSet = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+
+  const keyFor = (tsid, fp) => {
+    const a = String(tsid || '').trim();
+    const b = String(fp || '').trim();
+    if (!a || !b) return '';
+    return `${a}|${b}`;
+  };
+
+  const pillForStatus = (s) => {
+    const v = String(s || '').toUpperCase();
+    if (v === 'OK' || v === 'PASS' || v === 'VALIDATION_OK') return 'pill-ok';
+    if (v === 'AMBIGUOUS' || v === 'WARN' || v === 'WARNING') return 'pill-warn';
+    if (v === 'FAIL' || v === 'ERROR' || v === 'VALIDATION_ERROR' || v === 'MISSING_TIMESHEET' || v === 'AWAITING_AUTHORISATION') return 'pill-bad';
+    return 'pill-info';
+  };
+
+  const statusTextNice = (raw) => {
+    const a = String(raw || '').trim().toUpperCase();
+    if (!a) return 'Unknown';
+
+    if (a === 'REJECT_NO_CANDIDATE') return 'Reject – Candidate not found';
+    if (a === 'REJECT_NO_CLIENT') return 'Reject – Client/site not found';
+    if (a === 'REJECT_NO_CONTRACT') return 'Reject – No matching contract';
+    if (a === 'REJECT_NO_CONTRACT_BAND_MISMATCH') return 'Reject – Grade/band mapping missing';
+    if (a === 'REJECT_MISSING_EXTERNAL_ROW_KEY') return 'Reject – Missing row key';
+    if (a.startsWith('REJECT_')) return `Reject – ${a.replace(/^REJECT_/, '').replace(/_/g, ' ').toLowerCase()}`;
+
+    if (a === 'NO_CANDIDATE') return 'Reject – Candidate not found';
+    if (a === 'NO_CLIENT') return 'Reject – Client/site not found';
+    if (a === 'BAD_ROW') return 'Reject – Invalid row';
+
+    return a.replace(/_/g, ' ');
+  };
+
+  const normaliseComparisons = (arr) => {
+    const a = Array.isArray(arr) ? arr : [];
+
+    const normBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
+
+    const pick = (...vals) => {
+      for (const v of vals) {
+        if (v == null) continue;
+        const s = String(v).trim();
+        if (s) return s;
+      }
+      return '';
+    };
+
+    const pickNum = (...vals) => {
+      for (const v of vals) {
+        if (v == null || v === '') continue;
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+      return null;
+    };
+
+    const buildDiffLines = (c) => {
+      const out = [];
+
+      // Supports multiple possible payload shapes:
+      // - ref_before/ref_after etc
+      // - before:{ref_num,start,end,break_mins,ward} and after:{...}
+      // - timesheet_* and healthroster_* (already shown) plus *_diff_mins
+      const before = (c.before && typeof c.before === 'object') ? c.before : null;
+      const after  = (c.after  && typeof c.after  === 'object') ? c.after  : null;
+
+      const refBefore = pick(c.ref_before, c.refBefore, before?.ref_num, before?.ref, before?.reference, before?.request_id);
+      const refAfter  = pick(c.ref_after,  c.refAfter,  after?.ref_num,  after?.ref,  after?.reference,  after?.request_id);
+
+      if (refBefore || refAfter) {
+        const b = refBefore || '—';
+        const a2 = refAfter || '—';
+        if (b !== a2) out.push(`Ref: ${b} → ${a2}`);
+      }
+
+      const tsBeforeStart = pick(c.timesheet_start_before, before?.timesheet_start, before?.ts_start, before?.start, before?.start_hhmm);
+      const tsBeforeEnd   = pick(c.timesheet_end_before,   before?.timesheet_end,   before?.ts_end,   before?.end,   before?.end_hhmm);
+      const tsBeforeBr    = pickNum(c.timesheet_break_before, before?.timesheet_break_mins, before?.break_mins, before?.break_minutes);
+
+      const tsAfterStart = pick(c.timesheet_start_after, after?.timesheet_start, after?.ts_start, after?.start, after?.start_hhmm);
+      const tsAfterEnd   = pick(c.timesheet_end_after,   after?.timesheet_end,   after?.ts_end,   after?.end,   after?.end_hhmm);
+      const tsAfterBr    = pickNum(c.timesheet_break_after, after?.timesheet_break_mins, after?.break_mins, after?.break_minutes);
+
+      if ((tsBeforeStart || tsBeforeEnd || tsBeforeBr != null) || (tsAfterStart || tsAfterEnd || tsAfterBr != null)) {
+        const b = `${tsBeforeStart || '—'} → ${tsBeforeEnd || '—'} (break ${tsBeforeBr == null ? '—' : tsBeforeBr})`;
+        const a2 = `${tsAfterStart || '—'} → ${tsAfterEnd || '—'} (break ${tsAfterBr == null ? '—' : tsAfterBr})`;
+        if (b !== a2) out.push(`Timesheet: ${b} → ${a2}`);
+      }
+
+      const hrBeforeStart = pick(c.healthroster_start_before, before?.healthroster_start, before?.hr_start, before?.hr_start_hhmm);
+      const hrBeforeEnd   = pick(c.healthroster_end_before,   before?.healthroster_end,   before?.hr_end,   before?.hr_end_hhmm);
+      const hrBeforeBr    = pickNum(c.healthroster_break_before, before?.healthroster_break_mins, before?.hr_break_mins);
+
+      const hrAfterStart = pick(c.healthroster_start_after, after?.healthroster_start, after?.hr_start, after?.hr_start_hhmm);
+      const hrAfterEnd   = pick(c.healthroster_end_after,   after?.healthroster_end,   after?.hr_end,   after?.hr_end_hhmm);
+      const hrAfterBr    = pickNum(c.healthroster_break_after, after?.healthroster_break_mins, after?.hr_break_mins);
+
+      if ((hrBeforeStart || hrBeforeEnd || hrBeforeBr != null) || (hrAfterStart || hrAfterEnd || hrAfterBr != null)) {
+        const b = `${hrBeforeStart || '—'} → ${hrBeforeEnd || '—'} (break ${hrBeforeBr == null ? '—' : hrBeforeBr})`;
+        const a2 = `${hrAfterStart || '—'} → ${hrAfterEnd || '—'} (break ${hrAfterBr == null ? '—' : hrAfterBr})`;
+        if (b !== a2) out.push(`HealthRoster: ${b} → ${a2}`);
+      }
+
+      const locBefore = pick(c.location_before, c.ward_before, before?.ward, before?.unit, before?.site);
+      const locAfter  = pick(c.location_after,  c.ward_after,  after?.ward,  after?.unit,  after?.site);
+
+      if (locBefore || locAfter) {
+        const b = locBefore || '—';
+        const a2 = locAfter || '—';
+        if (b !== a2) out.push(`Location: ${b} → ${a2}`);
+      }
+
+      // If backend provides explicit “changed fields” array, show that too (nice fallback)
+      const changedFields = Array.isArray(c.changed_fields) ? c.changed_fields : (Array.isArray(c.changedFields) ? c.changedFields : []);
+      if (changedFields.length) {
+        out.push(`Changed: ${changedFields.map(x => String(x)).join(', ')}`);
+      }
+
+      return out;
+    };
+
+    const niceStatus = (ms) => {
+      const v = String(ms || '').trim().toUpperCase();
+      if (!v) return '';
+      if (v === 'MATCH') return 'Match';
+      if (v === 'MISMATCH') return 'Mismatch';
+      if (v === 'UNMATCHED') return 'Unmatched';
+      if (v === 'AMBIGUOUS') return 'Ambiguous';
+      if (v === 'TS_ONLY') return 'Missing from HealthRoster import';
+      if (v === 'HR_ONLY') return 'Extra HealthRoster row';
+      return v.replace(/_/g, ' ');
+    };
+
+    return a.map((c0) => {
+      const c = c0 && typeof c0 === 'object' ? c0 : {};
+
+      const wd = String(c.work_date || c.workDate || c.date || c.ymd || '').trim();
+      const ms = String(c.match_status || c.matchStatus || '').trim().toUpperCase();
+
+      const matchVal = (c.match != null) ? c.match : (c.is_match != null ? c.is_match : c.isMatch);
+      const match = normBool(matchVal);
+
+      const tsStart = String(c.timesheet_start || c.timesheetStart || c.ts_start_hhmm || c.tsStart || '').trim();
+      const tsEnd   = String(c.timesheet_end || c.timesheetEnd || c.ts_end_hhmm || c.tsEnd || '').trim();
+
+      const hrStart = String(c.healthroster_start || c.healthrosterStart || c.hr_start_hhmm || c.hrStart || '').trim();
+      const hrEnd   = String(c.healthroster_end || c.healthrosterEnd || c.hr_end_hhmm || c.hrEnd || '').trim();
+
+      const tsBr = (c.timesheet_break_mins ?? c.timesheetBreakMins ?? c.ts_break_mins ?? c.tsBreakMins ?? null);
+      const hrBr = (c.healthroster_break_mins ?? c.healthrosterBreakMins ?? c.hr_break_mins ?? c.hrBreakMins ?? null);
+
+      const isInvoiceLocked = normBool(c.is_invoice_locked ?? c.isInvoiceLocked ?? c.invoice_locked ?? c.invoiceLocked);
+      const diffLines = buildDiffLines(c);
+
+      return {
+        work_date: wd,
+        match: !!match,
+        match_status: ms || (match ? 'MATCH' : 'MISMATCH'),
+        match_status_nice: niceStatus(ms || (match ? 'MATCH' : 'MISMATCH')),
+        timesheet_start: tsStart,
+        timesheet_end: tsEnd,
+        timesheet_break_mins: (tsBr == null || tsBr === '' ? null : Number(tsBr)),
+        healthroster_start: hrStart,
+        healthroster_end: hrEnd,
+        healthroster_break_mins: (hrBr == null || hrBr === '' ? null : Number(hrBr)),
+        is_invoice_locked: !!isInvoiceLocked,
+        diff_lines: diffLines
+      };
+    }).filter(x => x.work_date || x.timesheet_start || x.healthroster_start || x.match_status);
+  };
+
+  // Unresolved / rejected items (derive from preview.rows)
+  const unresolved = [];
+  for (let i = 0; i < allRows.length; i++) {
+    const r = allRows[i];
+    if (!r || typeof r !== 'object') continue;
+
+    const act = String(r.action || r.resolution_status || r.status || '').toUpperCase();
+    if (!act) continue;
+
+    const unresolvedHere =
+      act.startsWith('REJECT_') ||
+      act === 'NO_CANDIDATE' ||
+      act === 'NO_CLIENT' ||
+      act === 'BAD_ROW';
+
+    if (!unresolvedHere) continue;
+
+    unresolved.push({ idx: i, row: r, act });
+  }
+
+  const unresolvedTableFullWidth = () => {
+    if (!unresolved.length) return '';
+
+    const rowsHtml = unresolved.map(({ idx, row, act }) => {
+      const staff = row.staff_name || row.staff_raw || row.staff_norm || '';
+      const unit  = row.ward || row.unit || row.hospital_or_trust || row.trust_raw || row.unit_raw || '';
+      const wd    = row.work_date || row.date_local || row.date || '';
+      const we    = row.week_ending_date || row.weekEndingDate || '';
+      const code  = row.incoming_code || row.grade_raw || row.assignment_code || row.assignment_grade_norm || '';
+      const reason = row.reason || row.reason_text || row.reason_code || '';
+
+      const actNice = statusTextNice(act);
+
+      const canAssignCand = (act === 'NO_CANDIDATE' || act === 'REJECT_NO_CANDIDATE');
+      const needsBandMap =
+        (act === 'REJECT_NO_CONTRACT' || act === 'REJECT_NO_CONTRACT_BAND_MISMATCH');
+
+      const btnCand = canAssignCand
+        ? `<button type="button" class="btn mini" data-act="hr-weekly-val-resolve-candidate" data-row-idx="${enc(String(idx))}">Assign candidate…</button>`
+        : '';
+
+      // ✅ Pass full context needed by candidate-specific band resolver modal
+      const btnBand = needsBandMap
+        ? `<button type="button"
+                   class="btn mini"
+                   data-act="hr-weekly-val-fix-band"
+                   data-incoming-code="${enc(String(code || '').trim())}"
+                   data-client-id="${enc(String(row.client_id || importClientId || '').trim())}"
+                   data-candidate-id="${enc(String(row.candidate_id || '').trim())}"
+                   data-work-date="${enc(String(wd || '').trim())}"
+                   data-week-ending-date="${enc(String(we || '').trim())}"
+                   data-import-id="${enc(impId)}">
+             Fix band mapping…
+           </button>`
+        : '';
+
+      const btns = (btnCand || btnBand)
+        ? `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;">${btnCand}${btnBand}</div>`
+        : `<span class="mini">—</span>`;
+
+      const statusPill = `<span class="pill pill-bad" style="white-space:normal;word-break:break-word;display:inline-block;">${enc(actNice)}</span>`;
+
+      return `
+        <tr data-row-idx="${enc(String(idx))}">
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(staff || '—')}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(unit || '—')}</td>
+          <td class="mini">${enc(niceYmd(wd) || wd || '—')}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(code || '—')}</td>
+          <td class="mini">${statusPill}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(String(reason || '').replace(/_/g,' '))}</td>
+          <td>${btns}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return html(`
+      <div class="card" style="margin-top:10px;">
+        <div class="mini" style="margin-bottom:8px;">
+          Cannot validate yet — resolve these items then click <strong>Reclassify</strong>.
+        </div>
+
+        <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
+          <table class="grid" style="table-layout:auto; width:100%; min-width:1100px;">
+            <thead>
+              <tr>
+                <th style="width:180px;">Staff</th>
+                <th style="width:320px;">Unit / Site</th>
+                <th style="width:140px;">Date</th>
+                <th style="width:160px;">Grade / Code</th>
+                <th style="width:240px;">Status</th>
+                <th style="min-width:420px;">Reason</th>
+                <th style="width:260px;">Resolve</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+
+        <div class="hint" style="margin-top:8px;">
+          Candidate mapping teaches the system which person a rota name refers to. Band mapping teaches which contracts/bands a Grade code should match.
+        </div>
+      </div>
+    `);
+  };
+
+  const groupsHtml = vg.length
+    ? vg.map((g) => {
+        const we = g?.week_ending_date || g?.weekEndingDate || null;
+        const candName = String(g?.candidate_name || g?.candidateName || '').trim();
+
+        const overall = g?.overall_status || g?.overallStatus || g?.status || 'UNKNOWN';
+        const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
+
+        const failureReasons = g?.failure_reasons || g?.failureReasons || [];
+
+        // Email controls (used for wiring only)
+        const tsid = g?.timesheet_id || g?.timesheetId || null;
+        const recip = String(g?.recipient_email || g?.recipientEmail || '').trim();
+        const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
+        const canEmail = (g?.can_email === true) || (g?.canEmail === true);
+        const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim();
+
+        const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
+
+        // ✅ Preferred: comparisons[] from backend.
+        // Also accept a few aliases so we don't break if payload naming shifts.
+        const comps = normaliseComparisons(
+          g?.comparisons ||
+          g?.comparison_rows ||
+          g?.comparisonRows ||
+          g?.comparisons_json ||
+          []
+        );
+
+        // Detect invoice-locked conflicts if backend provides flags either at group level or per-row
+        const groupInvoiceLocked =
+          (g?.is_invoice_locked === true) ||
+          (g?.isInvoiceLocked === true) ||
+          (g?.invoice_locked === true) ||
+          (g?.invoiceLocked === true);
+
+        const anyRowInvoiceLocked = comps.some(c => c.is_invoice_locked === true);
+
+        const invoiceLockedBanner = (() => {
+          if (!(groupInvoiceLocked || anyRowInvoiceLocked)) return '';
+          return html(`
+            <div class="hint" style="margin-top:8px; color:#ffb4b4;">
+              <strong>Invalid shift already invoiced — cannot change.</strong>
+              If you need to change this, you must uninvoice the relevant segment first, then rerun the import.
+            </div>
+          `);
+        })();
+
+        const compTable = (() => {
+          if (!comps.length) {
+            return html(`<div class="mini">No detailed comparisons returned for this candidate/week.</div>`);
+          }
+
+          const body = comps.map((c) => {
+            const ms = String(c.match_status || '').toUpperCase();
+
+            // ✅ TS_ONLY missing rows should be shown as mismatch rows (email option comes from has_mismatch)
+            const isMatch = (c.match === true) && (ms === 'MATCH' || ms === '' || ms === 'OK' || ms === 'PASS');
+            const icon = isMatch ? '✅' : '❌';
+
+            const tsTxt = `${c.timesheet_start || '—'} → ${c.timesheet_end || '—'} (break ${c.timesheet_break_mins == null ? '—' : c.timesheet_break_mins})`;
+            const hrTxt = `${c.healthroster_start || '—'} → ${c.healthroster_end || '—'} (break ${c.healthroster_break_mins == null ? '—' : c.healthroster_break_mins})`;
+
+            const statusNice = c.match_status_nice ? String(c.match_status_nice) : '';
+
+            const diffHtml = (Array.isArray(c.diff_lines) && c.diff_lines.length)
+              ? `<div class="mini" style="margin-top:4px; opacity:.9;">
+                   ${c.diff_lines.map(x => `<div>${enc(String(x))}</div>`).join('')}
+                 </div>`
+              : '';
+
+            const statusBit = statusNice
+              ? `<div class="mini" style="margin-top:4px; opacity:.85;">
+                   <span class="pill pill-weekly" style="padding:2px 8px;">${enc(statusNice)}</span>
+                 </div>`
+              : '';
+
+            return html(`
+              <tr>
+                <td class="mini" style="width:80px; text-align:center;">${enc(icon)}</td>
+                <td class="mini" style="width:140px;">${enc(niceYmd(c.work_date) || c.work_date || '—')}</td>
+                <td class="mini" style="white-space:normal;word-break:break-word;">
+                  ${enc(tsTxt)}
+                  ${statusBit}
+                </td>
+                <td class="mini" style="white-space:normal;word-break:break-word;">
+                  ${enc(hrTxt)}
+                  ${diffHtml}
+                </td>
+              </tr>
+            `);
+          }).join('');
+
+          return html(`
+            <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
+              <table class="grid" style="table-layout:auto; width:100%; min-width:980px;">
+                <thead>
+                  <tr>
+                    <th style="width:80px;">Match</th>
+                    <th style="width:140px;">Date</th>
+                    <th>Timesheet start/finish/break</th>
+                    <th>HealthRoster start/finish/break</th>
+                  </tr>
+                </thead>
+                <tbody>${body}</tbody>
+              </table>
+            </div>
+          `);
+        })();
+
+        // ✅ Email UI must only exist when mismatch exists (your rule)
+        const emailBlock = (() => {
+          if (!hasMismatch) return '';
+
+          if (!canEmail) {
+            const why =
+              !tsid ? 'Email unavailable (timesheet missing).' :
+              !String(recip || '').trim() ? 'Email unavailable (recipient email missing for this client).' :
+              !fp ? 'Email unavailable (issue fingerprint missing).' :
+              'Email unavailable.';
+            return html(`
+              <div class="mini" style="margin-top:10px;">
+                <span class="pill pill-warn" style="padding:2px 8px;">Email</span>
+                <span class="mini" style="margin-left:8px;">${enc(why)}</span>
+              </div>
+            `);
+          }
+
+          const k = keyFor(tsid, fp);
+          const checked = (k && selSet.has(k)) ? 'checked' : '';
+
+          const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
+
+          return html(`
+            <div class="mini" style="margin-top:10px;">
+              <label class="inline mini" style="gap:6px;">
+                <input type="checkbox"
+                       data-act="hr-weekly-val-email-toggle"
+                       data-timesheet-id="${enc(String(tsid || ''))}"
+                       data-issue-fingerprint="${enc(String(fp || ''))}"
+                       ${checked ? 'checked' : ''}/>
+                <span>${enc(label)}</span>
+              </label>
+              <span class="mini" style="margin-left:10px;">
+                Recipient: <span class="mono">${enc(recip || '—')}</span>
+                ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
+              </span>
+            </div>
+          `);
+        })();
+
+        return html(`
+          <details style="margin:8px 0;">
+            <summary style="cursor:pointer;">
+              <span class="mini">${statusPill}</span>
+              <span class="mini" style="margin-left:8px;">
+                ${enc(candName || 'Unknown candidate')}
+                ${we ? ` • W/E ${enc(niceYmd(we))}` : ''}
+                ${hasMismatch ? ` • ${enc('Mismatch')}` : ''}
+              </span>
+            </summary>
+
+            <div style="margin-top:8px; padding-left:10px;">
+              ${Array.isArray(failureReasons) && failureReasons.length
+                ? html(`
+                    <div class="mini" style="margin-bottom:6px;">Notes</div>
+                    <ul class="mini" style="margin:0; padding-left:18px;">
+                      ${failureReasons.filter(Boolean).map(r => html(`<li>${enc(String(r))}</li>`)).join('')}
+                    </ul>
+                  `)
+                : html(`<div class="mini" style="margin-bottom:6px;">No mismatch notes.</div>`)
+              }
+
+              ${invoiceLockedBanner}
+
+              <div style="margin-top:10px;">
+                ${compTable}
+              </div>
+
+              ${emailBlock}
+            </div>
+          </details>
+        `);
+      }).join('')
+    : html(`<div class="mini">No validation groups were returned by the preview.</div>`);
+
+  const headerTitle = (() => {
+    if (mode === 'MIXED') return 'HealthRoster hours check + apply actions';
+    return 'HealthRoster hours check';
+  })();
+
+  const headerBlurb =
+    'This screen shows mismatches and allows optional emails to Temporary Staffing with a copy of the candidate timesheet to request hours are amended.';
+
+  const finaliseLabel = (mode === 'MIXED')
+    ? 'Finalise (apply actions + emails)'
+    : 'Finalise validations';
+
+  return html(`
+    <div id="hrWeeklyValidationSummary" data-import-id="${enc(impId)}" data-mode="${enc(mode)}">
+      <div class="card">
+        <div class="row">
+          <label>${enc(headerTitle)}</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(impId || '—')}</span><br/>
+              Validation groups: <span class="mono">${enc(String(vg.length))}</span>
+            </div>
+            <div class="hint" style="margin-top:8px;">
+              ${enc(headerBlurb)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Groups</label>
+          <div class="controls">
+            ${groupsHtml}
+          </div>
+        </div>
+      </div>
+
+      ${unresolvedTableFullWidth()}
+
+      <div class="row" style="margin-top:10px;">
+        <label></label>
+        <div class="controls">
+          <button type="button" class="btn" data-act="hr-weekly-val-reclassify">Reclassify</button>
+          <button type="button" class="btn btn-primary" style="margin-left:8px;" data-act="hr-weekly-val-finalise">${enc(finaliseLabel)}</button>
+          <span class="mini" style="margin-left:8px;">
+            Reclassify refreshes validation after mapping changes. Finalise sends selected emails (and applies actions if mixed).
+          </span>
+        </div>
+      </div>
+    </div>
+  `);
+}
 
 
 // ─────────────────────────────────────────────────────────────────────────────
