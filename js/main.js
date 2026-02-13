@@ -8186,9 +8186,17 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
           const k = keyFor(tsid, fp);
 
-          // ✅ Default ticked unless user has explicitly unticked before (persisted in selSet)
-          // If selection set is empty but this is a mismatch + canEmail, render as checked (wire will hydrate defaults once).
-          const checked = (k && selSet.has(k)) ? 'checked' : (!selSet.size ? 'checked' : '');
+          // ✅ Default selection rules:
+          // - If user explicitly toggled this key before: use that (selSet.has(k))
+          // - Else (no explicit user toggle):
+          //     - if emailedAlready=true (re-email) => default UNCHECKED
+          //     - else => default CHECKED
+          const checked = (() => {
+            if (!k) return '';
+            if (selSet.has(k)) return 'checked';                // explicit user selection
+            if (emailedAlready) return '';                      // re-email defaults unticked
+            return 'checked';                                   // first-time email defaults ticked
+          })();
 
           const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
 
