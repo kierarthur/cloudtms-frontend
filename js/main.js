@@ -7805,19 +7805,28 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
       (p.client_id || sum.client_id || p?.truth_meta?.client_id || sum?.truth_meta?.client_id || '') || ''
     ).trim();
 
-  // Email selection state (Set of "timesheet_id|issue_fingerprint")
+  // UI store (emailSelection + invalidationSelection) used for checkbox state
   const ui = (window.__weeklyImportUi &&
               window.__weeklyImportUi.HR_WEEKLY &&
               window.__weeklyImportUi.HR_WEEKLY[impId] &&
-              window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Set)
+              (window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Set
+                || window.__weeklyImportUi.HR_WEEKLY[impId].invalidationSelection instanceof Map))
     ? window.__weeklyImportUi.HR_WEEKLY[impId]
     : null;
 
   const selSet = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+  const invMap = (ui && ui.invalidationSelection instanceof Map) ? ui.invalidationSelection : new Map();
 
   const keyFor = (tsid, fp) => {
     const a = String(tsid || '').trim();
     const b = String(fp || '').trim();
+    if (!a || !b) return '';
+    return `${a}|${b}`;
+  };
+
+  const invKeyFor = (tsid, comparisonKey) => {
+    const a = String(tsid || '').trim();
+    const b = String(comparisonKey || '').trim();
     if (!a || !b) return '';
     return `${a}|${b}`;
   };
@@ -7848,114 +7857,70 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     return a.replace(/_/g, ' ');
   };
 
+  // Fallback: Flatten legacy days[].pairings[] => comparisons-like rows
+  const flattenComparisonsFromDays = (days) => {
+    const out = [];
+    const arr = Array.isArray(days) ? days : [];
+    for (const d of arr) {
+      const ymd = String(d?.work_date || d?.ymd || d?.date_local || d?.date || '').trim();
+      const pairings = Array.isArray(d?.pairings) ? d.pairings : [];
+      for (const p0 of pairings) {
+        const p = p0 || {};
+        const hr = p?.hr || p?.hr_entry || p?.hrEntry || null;
+        const wk = p?.worker || p?.worker_entry || p?.workerEntry || null;
+
+        const sd = p?.start_diff_mins ?? p?.startDiffMins ?? null;
+        const ed = p?.end_diff_mins ?? p?.endDiffMins ?? null;
+        const bd = p?.break_diff_mins ?? p?.breakDiffMins ?? null;
+
+        const matchStatus = String(p?.match_status || p?.matchStatus || '').trim().toUpperCase();
+        const diffsAllZero =
+          (sd == null || Number(sd) === 0) &&
+          (ed == null || Number(ed) === 0) &&
+          (bd == null || Number(bd) === 0);
+
+        const isMatch =
+          (matchStatus === 'MATCH' || matchStatus === 'OK' || matchStatus === 'PASS' || matchStatus === 'SAME' || matchStatus === 'MATCHED') ||
+          (matchStatus === '' && diffsAllZero);
+
+        const tsStart = wk?.start_local || wk?.start || wk?.start_utc || '';
+        const tsEnd   = wk?.end_local || wk?.end || wk?.end_utc || '';
+        const tsBreak = (wk?.break_mins ?? wk?.break_minutes ?? wk?.break ?? '');
+
+        const hrStart = hr?.start_local || hr?.start || hr?.start_utc || '';
+        const hrEnd   = hr?.end_local || hr?.end || hr?.end_utc || '';
+        const hrBreak = (hr?.break_mins ?? hr?.break_minutes ?? hr?.break ?? '');
+
+        out.push({
+          comparison_key: `${String(ymd || '').trim()}|${String(tsStart || '').trim()}|${String(tsEnd || '').trim()}|${String(tsBreak == null ? 0 : tsBreak)}`,
+          work_date: ymd,
+          match: !!isMatch,
+          match_status: matchStatus || (isMatch ? 'MATCH' : 'MISMATCH'),
+          timesheet_start: String(tsStart || '').trim(),
+          timesheet_end: String(tsEnd || '').trim(),
+          timesheet_break_mins: (tsBreak == null || tsBreak === '' ? null : Number(tsBreak)),
+          healthroster_start: String(hrStart || '').trim(),
+          healthroster_end: String(hrEnd || '').trim(),
+          healthroster_break_mins: (hrBreak == null || hrBreak === '' ? null : Number(hrBreak)),
+          invoice_locked: false,
+          invoice_locked_invoice_id: null,
+          is_destructive_invalidation: false,
+          default_invalidate_checked: false
+        });
+      }
+    }
+    return out;
+  };
+
+  // New contract: g.comparisons[] (preferred)
   const normaliseComparisons = (arr) => {
     const a = Array.isArray(arr) ? arr : [];
-
-    const normBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
-
-    const pick = (...vals) => {
-      for (const v of vals) {
-        if (v == null) continue;
-        const s = String(v).trim();
-        if (s) return s;
-      }
-      return '';
-    };
-
-    const pickNum = (...vals) => {
-      for (const v of vals) {
-        if (v == null || v === '') continue;
-        const n = Number(v);
-        if (Number.isFinite(n)) return n;
-      }
-      return null;
-    };
-
-    const buildDiffLines = (c) => {
-      const out = [];
-
-      // Supports multiple possible payload shapes:
-      // - ref_before/ref_after etc
-      // - before:{ref_num,start,end,break_mins,ward} and after:{...}
-      // - timesheet_* and healthroster_* (already shown) plus *_diff_mins
-      const before = (c.before && typeof c.before === 'object') ? c.before : null;
-      const after  = (c.after  && typeof c.after  === 'object') ? c.after  : null;
-
-      const refBefore = pick(c.ref_before, c.refBefore, before?.ref_num, before?.ref, before?.reference, before?.request_id);
-      const refAfter  = pick(c.ref_after,  c.refAfter,  after?.ref_num,  after?.ref,  after?.reference,  after?.request_id);
-
-      if (refBefore || refAfter) {
-        const b = refBefore || '—';
-        const a2 = refAfter || '—';
-        if (b !== a2) out.push(`Ref: ${b} → ${a2}`);
-      }
-
-      const tsBeforeStart = pick(c.timesheet_start_before, before?.timesheet_start, before?.ts_start, before?.start, before?.start_hhmm);
-      const tsBeforeEnd   = pick(c.timesheet_end_before,   before?.timesheet_end,   before?.ts_end,   before?.end,   before?.end_hhmm);
-      const tsBeforeBr    = pickNum(c.timesheet_break_before, before?.timesheet_break_mins, before?.break_mins, before?.break_minutes);
-
-      const tsAfterStart = pick(c.timesheet_start_after, after?.timesheet_start, after?.ts_start, after?.start, after?.start_hhmm);
-      const tsAfterEnd   = pick(c.timesheet_end_after,   after?.timesheet_end,   after?.ts_end,   after?.end,   after?.end_hhmm);
-      const tsAfterBr    = pickNum(c.timesheet_break_after, after?.timesheet_break_mins, after?.break_mins, after?.break_minutes);
-
-      if ((tsBeforeStart || tsBeforeEnd || tsBeforeBr != null) || (tsAfterStart || tsAfterEnd || tsAfterBr != null)) {
-        const b = `${tsBeforeStart || '—'} → ${tsBeforeEnd || '—'} (break ${tsBeforeBr == null ? '—' : tsBeforeBr})`;
-        const a2 = `${tsAfterStart || '—'} → ${tsAfterEnd || '—'} (break ${tsAfterBr == null ? '—' : tsAfterBr})`;
-        if (b !== a2) out.push(`Timesheet: ${b} → ${a2}`);
-      }
-
-      const hrBeforeStart = pick(c.healthroster_start_before, before?.healthroster_start, before?.hr_start, before?.hr_start_hhmm);
-      const hrBeforeEnd   = pick(c.healthroster_end_before,   before?.healthroster_end,   before?.hr_end,   before?.hr_end_hhmm);
-      const hrBeforeBr    = pickNum(c.healthroster_break_before, before?.healthroster_break_mins, before?.hr_break_mins);
-
-      const hrAfterStart = pick(c.healthroster_start_after, after?.healthroster_start, after?.hr_start, after?.hr_start_hhmm);
-      const hrAfterEnd   = pick(c.healthroster_end_after,   after?.healthroster_end,   after?.hr_end,   after?.hr_end_hhmm);
-      const hrAfterBr    = pickNum(c.healthroster_break_after, after?.healthroster_break_mins, after?.hr_break_mins);
-
-      if ((hrBeforeStart || hrBeforeEnd || hrBeforeBr != null) || (hrAfterStart || hrAfterEnd || hrAfterBr != null)) {
-        const b = `${hrBeforeStart || '—'} → ${hrBeforeEnd || '—'} (break ${hrBeforeBr == null ? '—' : hrBeforeBr})`;
-        const a2 = `${hrAfterStart || '—'} → ${hrAfterEnd || '—'} (break ${hrAfterBr == null ? '—' : hrAfterBr})`;
-        if (b !== a2) out.push(`HealthRoster: ${b} → ${a2}`);
-      }
-
-      const locBefore = pick(c.location_before, c.ward_before, before?.ward, before?.unit, before?.site);
-      const locAfter  = pick(c.location_after,  c.ward_after,  after?.ward,  after?.unit,  after?.site);
-
-      if (locBefore || locAfter) {
-        const b = locBefore || '—';
-        const a2 = locAfter || '—';
-        if (b !== a2) out.push(`Location: ${b} → ${a2}`);
-      }
-
-      // If backend provides explicit “changed fields” array, show that too (nice fallback)
-      const changedFields = Array.isArray(c.changed_fields) ? c.changed_fields : (Array.isArray(c.changedFields) ? c.changedFields : []);
-      if (changedFields.length) {
-        out.push(`Changed: ${changedFields.map(x => String(x)).join(', ')}`);
-      }
-
-      return out;
-    };
-
-    const niceStatus = (ms) => {
-      const v = String(ms || '').trim().toUpperCase();
-      if (!v) return '';
-      if (v === 'MATCH') return 'Match';
-      if (v === 'MISMATCH') return 'Mismatch';
-      if (v === 'UNMATCHED') return 'Unmatched';
-      if (v === 'AMBIGUOUS') return 'Ambiguous';
-      if (v === 'TS_ONLY') return 'Missing from HealthRoster import';
-      if (v === 'HR_ONLY') return 'Extra HealthRoster row';
-      return v.replace(/_/g, ' ');
-    };
-
     return a.map((c0) => {
       const c = c0 && typeof c0 === 'object' ? c0 : {};
-
       const wd = String(c.work_date || c.workDate || c.date || c.ymd || '').trim();
-      const ms = String(c.match_status || c.matchStatus || '').trim().toUpperCase();
 
       const matchVal = (c.match != null) ? c.match : (c.is_match != null ? c.is_match : c.isMatch);
-      const match = normBool(matchVal);
+      const match = (matchVal === true || matchVal === 'true' || matchVal === 1 || matchVal === '1');
 
       const tsStart = String(c.timesheet_start || c.timesheetStart || c.ts_start_hhmm || c.tsStart || '').trim();
       const tsEnd   = String(c.timesheet_end || c.timesheetEnd || c.ts_end_hhmm || c.tsEnd || '').trim();
@@ -7966,24 +7931,36 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
       const tsBr = (c.timesheet_break_mins ?? c.timesheetBreakMins ?? c.ts_break_mins ?? c.tsBreakMins ?? null);
       const hrBr = (c.healthroster_break_mins ?? c.healthrosterBreakMins ?? c.hr_break_mins ?? c.hrBreakMins ?? null);
 
-      const isInvoiceLocked = normBool(c.is_invoice_locked ?? c.isInvoiceLocked ?? c.invoice_locked ?? c.invoiceLocked);
-      const diffLines = buildDiffLines(c);
+      const ms = String(c.match_status || c.matchStatus || '').trim().toUpperCase();
+
+      const ck = String(c.comparison_key || c.comparisonKey || '').trim();
+      const invoiceLockedVal = (c.invoice_locked != null) ? c.invoice_locked : (c.invoiceLocked != null ? c.invoiceLocked : null);
+      const invoiceLocked = (invoiceLockedVal === true || invoiceLockedVal === 'true' || invoiceLockedVal === 1 || invoiceLockedVal === '1');
+      const invoiceLockedId = String(c.invoice_locked_invoice_id || c.invoiceLockedInvoiceId || '').trim() || null;
+
+      const destrVal = (c.is_destructive_invalidation != null) ? c.is_destructive_invalidation : (c.isDestructiveInvalidation != null ? c.isDestructiveInvalidation : null);
+      const isDestructive = (destrVal === true || destrVal === 'true' || destrVal === 1 || destrVal === '1');
+
+      const defInvVal = (c.default_invalidate_checked != null) ? c.default_invalidate_checked : (c.defaultInvalidateChecked != null ? c.defaultInvalidateChecked : null);
+      const defaultInv = (defInvVal === true || defInvVal === 'true' || defInvVal === 1 || defInvVal === '1');
 
       return {
+        comparison_key: ck || (wd ? `${wd}|${tsStart}|${tsEnd}|${String(tsBr == null ? 0 : tsBr)}` : ''),
         work_date: wd,
         match: !!match,
         match_status: ms || (match ? 'MATCH' : 'MISMATCH'),
-        match_status_nice: niceStatus(ms || (match ? 'MATCH' : 'MISMATCH')),
         timesheet_start: tsStart,
         timesheet_end: tsEnd,
         timesheet_break_mins: (tsBr == null || tsBr === '' ? null : Number(tsBr)),
         healthroster_start: hrStart,
         healthroster_end: hrEnd,
         healthroster_break_mins: (hrBr == null || hrBr === '' ? null : Number(hrBr)),
-        is_invoice_locked: !!isInvoiceLocked,
-        diff_lines: diffLines
+        invoice_locked: !!invoiceLocked || !!invoiceLockedId,
+        invoice_locked_invoice_id: invoiceLockedId,
+        is_destructive_invalidation: !!isDestructive,
+        default_invalidate_checked: !!defaultInv
       };
-    }).filter(x => x.work_date || x.timesheet_start || x.healthroster_start || x.match_status);
+    }).filter(x => x.work_date || x.timesheet_start || x.healthroster_start);
   };
 
   // Unresolved / rejected items (derive from preview.rows)
@@ -8110,34 +8087,12 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
         const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
 
-        // ✅ Preferred: comparisons[] from backend.
-        // Also accept a few aliases so we don't break if payload naming shifts.
-        const comps = normaliseComparisons(
-          g?.comparisons ||
-          g?.comparison_rows ||
-          g?.comparisonRows ||
-          g?.comparisons_json ||
-          []
-        );
-
-        // Detect invoice-locked conflicts if backend provides flags either at group level or per-row
-        const groupInvoiceLocked =
-          (g?.is_invoice_locked === true) ||
-          (g?.isInvoiceLocked === true) ||
-          (g?.invoice_locked === true) ||
-          (g?.invoiceLocked === true);
-
-        const anyRowInvoiceLocked = comps.some(c => c.is_invoice_locked === true);
-
-        const invoiceLockedBanner = (() => {
-          if (!(groupInvoiceLocked || anyRowInvoiceLocked)) return '';
-          return html(`
-            <div class="hint" style="margin-top:8px; color:#ffb4b4;">
-              <strong>Invalid shift already invoiced — cannot change.</strong>
-              If you need to change this, you must uninvoice the relevant segment first, then rerun the import.
-            </div>
-          `);
-        })();
+        // ✅ Prefer comparisons[] from backend. Fallback to legacy days/pairings.
+        const comparisonsNew = normaliseComparisons(g?.comparisons || g?.comparison_rows || g?.comparisonRows || []);
+        const comparisonsFallback = (comparisonsNew.length === 0)
+          ? flattenComparisonsFromDays(g?.days || [])
+          : [];
+        const comps = comparisonsNew.length ? comparisonsNew : comparisonsFallback;
 
         const compTable = (() => {
           if (!comps.length) {
@@ -8145,41 +8100,45 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
           }
 
           const body = comps.map((c) => {
-            const ms = String(c.match_status || '').toUpperCase();
-
-            // ✅ TS_ONLY missing rows should be shown as mismatch rows (email option comes from has_mismatch)
-            const isMatch = (c.match === true) && (ms === 'MATCH' || ms === '' || ms === 'OK' || ms === 'PASS');
+            const isMatch = (c.match === true);
             const icon = isMatch ? '✅' : '❌';
 
             const tsTxt = `${c.timesheet_start || '—'} → ${c.timesheet_end || '—'} (break ${c.timesheet_break_mins == null ? '—' : c.timesheet_break_mins})`;
             const hrTxt = `${c.healthroster_start || '—'} → ${c.healthroster_end || '—'} (break ${c.healthroster_break_mins == null ? '—' : c.healthroster_break_mins})`;
 
-            const statusNice = c.match_status_nice ? String(c.match_status_nice) : '';
+            const isDestructive = (c.is_destructive_invalidation === true);
+            const invoiceLocked = (c.invoice_locked === true);
 
-            const diffHtml = (Array.isArray(c.diff_lines) && c.diff_lines.length)
-              ? `<div class="mini" style="margin-top:4px; opacity:.9;">
-                   ${c.diff_lines.map(x => `<div>${enc(String(x))}</div>`).join('')}
-                 </div>`
+            const ck = String(c.comparison_key || '').trim();
+            const invKey = (tsid && ck) ? invKeyFor(tsid, ck) : '';
+            const invChecked = invKey ? (invMap.has(invKey) ? (invMap.get(invKey) === true) : true) : true;
+
+            const showInvalidateCheckbox = !!(isDestructive && !invoiceLocked && tsid && ck);
+
+            const rowStyle = isDestructive
+              ? 'background:rgba(255,0,0,0.06);'
               : '';
 
-            const statusBit = statusNice
-              ? `<div class="mini" style="margin-top:4px; opacity:.85;">
-                   <span class="pill pill-weekly" style="padding:2px 8px;">${enc(statusNice)}</span>
-                 </div>`
-              : '';
+            const cbHtml = showInvalidateCheckbox
+              ? `<label class="inline mini" style="gap:6px; white-space:nowrap;">
+                   <input type="checkbox"
+                          data-act="hr-weekly-val-invalidate-toggle"
+                          data-timesheet-id="${enc(String(tsid || ''))}"
+                          data-comparison-key="${enc(String(ck || ''))}"
+                          ${invChecked ? 'checked' : ''}/>
+                   <span class="mini">Invalidate</span>
+                 </label>`
+              : (invoiceLocked && isDestructive
+                  ? `<span class="mini" title="Invoice locked: informative only">—</span>`
+                  : `<span class="mini">—</span>`);
 
             return html(`
-              <tr>
+              <tr style="${rowStyle}">
+                <td class="mini" style="width:90px; text-align:center;">${cbHtml}</td>
                 <td class="mini" style="width:80px; text-align:center;">${enc(icon)}</td>
                 <td class="mini" style="width:140px;">${enc(niceYmd(c.work_date) || c.work_date || '—')}</td>
-                <td class="mini" style="white-space:normal;word-break:break-word;">
-                  ${enc(tsTxt)}
-                  ${statusBit}
-                </td>
-                <td class="mini" style="white-space:normal;word-break:break-word;">
-                  ${enc(hrTxt)}
-                  ${diffHtml}
-                </td>
+                <td class="mini" style="white-space:normal;word-break:break-word;">${enc(tsTxt)}</td>
+                <td class="mini" style="white-space:normal;word-break:break-word;">${enc(hrTxt)}</td>
               </tr>
             `);
           }).join('');
@@ -8189,6 +8148,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
               <table class="grid" style="table-layout:auto; width:100%; min-width:980px;">
                 <thead>
                   <tr>
+                    <th style="width:90px;">Invalidate</th>
                     <th style="width:80px;">Match</th>
                     <th style="width:140px;">Date</th>
                     <th>Timesheet start/finish/break</th>
@@ -8198,13 +8158,18 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
                 <tbody>${body}</tbody>
               </table>
             </div>
+            <div class="hint" style="margin-top:6px;">
+              Red rows with “Invalidate” will remove previously stored reference numbers for missing shifts when you finalise.
+              Invoice-locked rows are informative only.
+            </div>
           `);
         })();
 
-        // ✅ Email UI must only exist when mismatch exists (your rule)
+        // ✅ Email UI must only exist when mismatch exists
         const emailBlock = (() => {
           if (!hasMismatch) return '';
 
+          // If mismatch exists but can_email is false, show a short explanation (no checkbox)
           if (!canEmail) {
             const why =
               !tsid ? 'Email unavailable (timesheet missing).' :
@@ -8220,7 +8185,10 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
           }
 
           const k = keyFor(tsid, fp);
-          const checked = (k && selSet.has(k)) ? 'checked' : '';
+
+          // ✅ Default ticked unless user has explicitly unticked before (persisted in selSet)
+          // If selection set is empty but this is a mismatch + canEmail, render as checked (wire will hydrate defaults once).
+          const checked = (k && selSet.has(k)) ? 'checked' : (!selSet.size ? 'checked' : '');
 
           const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
 
@@ -8231,7 +8199,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
                        data-act="hr-weekly-val-email-toggle"
                        data-timesheet-id="${enc(String(tsid || ''))}"
                        data-issue-fingerprint="${enc(String(fp || ''))}"
-                       ${checked ? 'checked' : ''}/>
+                       ${checked}/>
                 <span>${enc(label)}</span>
               </label>
               <span class="mini" style="margin-left:10px;">
@@ -8263,8 +8231,6 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
                   `)
                 : html(`<div class="mini" style="margin-bottom:6px;">No mismatch notes.</div>`)
               }
-
-              ${invoiceLockedBanner}
 
               <div style="margin-top:10px;">
                 ${compTable}
@@ -8329,6 +8295,376 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
       </div>
     </div>
   `);
+}
+
+function wireHrWeeklyValidationSummaryActions(type, importId) {
+  const T = String(type || '').toUpperCase();
+  const impId = String(importId || '').trim();
+  if (T !== 'HR_WEEKLY') return;
+  if (!impId) return;
+
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('modalBody');
+      if (!root) return;
+
+      root.__hrWeeklyValSummaryWired = root.__hrWeeklyValSummaryWired || new Set();
+      const wiredKey = `hr-weekly-val-summary:${impId}`;
+      if (root.__hrWeeklyValSummaryWired.has(wiredKey)) return;
+      root.__hrWeeklyValSummaryWired.add(wiredKey);
+
+      const ensureUi = () => {
+        window.__weeklyImportUi = window.__weeklyImportUi || {};
+        window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
+
+        let ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
+
+        if (!ui && typeof ensureWeeklyUiStore === 'function') {
+          try {
+            const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+              ? window.__importSummaryState.HR_WEEKLY
+              : null;
+            ensureWeeklyUiStore('HR_WEEKLY', impId, p || {});
+          } catch {}
+          ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
+        }
+
+        if (!ui || typeof ui !== 'object') {
+          ui = {
+            options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+            actionSelection: new Set(),
+            emailSelection: new Set(),
+            invalidationSelection: new Map(), // ✅ key: `${timesheet_id}|${comparison_key}` -> boolean
+            filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+            hydratedFlags: { didInitDefaultActionChecks: true, didInitDefaultEmailChecks: false, didInitDefaultInvalidationChecks: false }
+          };
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        }
+
+        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+        if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+        if (!(ui.invalidationSelection instanceof Map)) ui.invalidationSelection = new Map();
+
+        if (!ui.hydratedFlags || typeof ui.hydratedFlags !== 'object') ui.hydratedFlags = {};
+        if (typeof ui.hydratedFlags.didInitDefaultEmailChecks !== 'boolean') ui.hydratedFlags.didInitDefaultEmailChecks = false;
+        if (typeof ui.hydratedFlags.didInitDefaultInvalidationChecks !== 'boolean') ui.hydratedFlags.didInitDefaultInvalidationChecks = false;
+
+        if (!ui.options || typeof ui.options !== 'object') ui.options = {};
+        ui.options.missingShiftsEnabled = true;
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        return ui;
+      };
+
+      const getPreview = () => {
+        const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+          ? window.__importSummaryState.HR_WEEKLY
+          : null;
+        return (p && typeof p === 'object') ? p : {};
+      };
+
+      const getMode = (p) => {
+        const sum = (p && p.summary && typeof p.summary === 'object') ? p.summary : {};
+        const raw = (p && (p.mode_summary || p.modeSummary)) || sum.mode_summary || sum.modeSummary || '';
+        const ms = String(raw || '').trim().toUpperCase();
+        if (ms === 'MODE_A_ONLY' || ms === 'MODE_B_ONLY' || ms === 'MIXED') return ms;
+
+        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups.length : 0;
+        const ag = Array.isArray(p?.action_groups) ? p.action_groups.length : 0;
+        const acts = Array.isArray(p?.actions) ? p.actions.length : 0;
+        if (vg > 0 && (ag > 0 || acts > 0)) return 'MIXED';
+        if (vg > 0) return 'MODE_A_ONLY';
+        if (ag > 0 || acts > 0) return 'MODE_B_ONLY';
+        return 'MODE_A_ONLY';
+      };
+
+      const parseKey = (k) => {
+        const s = String(k || '');
+        const i = s.indexOf('|');
+        if (i <= 0) return null;
+        const ts = s.slice(0, i).trim();
+        const fp = s.slice(i + 1).trim();
+        if (!ts || !fp) return null;
+        return { ts, fp };
+      };
+
+      const buildEmailActions = () => {
+        const ui = ensureUi();
+        const sel = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+        const out = [];
+        for (const k of sel) {
+          const it = parseKey(k);
+          if (!it) continue;
+          out.push({ timesheet_id: it.ts, issue_fingerprint: it.fp });
+        }
+        return out;
+      };
+
+      const buildInvalidationActions = () => {
+        const ui = ensureUi();
+        const m = (ui && ui.invalidationSelection instanceof Map) ? ui.invalidationSelection : new Map();
+        const out = [];
+        for (const [k, v] of m.entries()) {
+          const s = String(k || '');
+          const i = s.indexOf('|');
+          if (i <= 0) continue;
+          const tsid = s.slice(0, i).trim();
+          const ckey = s.slice(i + 1).trim();
+          if (!tsid || !ckey) continue;
+          out.push({ timesheet_id: tsid, comparison_key: ckey, invalidate: (v === true) });
+        }
+        return out;
+      };
+
+      // ✅ Hydrate defaults exactly once per import:
+      // - Email ticked by default for all failing groups (that can_email)
+      // - Invalidation ticked by default for destructive invalidations
+      const hydrateDefaultsOnce = () => {
+        const ui = ensureUi();
+        const p = getPreview();
+        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups : [];
+
+        if (ui.hydratedFlags.didInitDefaultEmailChecks !== true) {
+          for (const g of vg) {
+            const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
+            const canEmail = (g?.can_email === true) || (g?.canEmail === true);
+            const tsid = g?.timesheet_id || g?.timesheetId || null;
+            const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim();
+            if (!hasMismatch || !canEmail) continue;
+            if (!tsid || !fp) continue;
+            const k = `${String(tsid).trim()}|${fp}`;
+            ui.emailSelection.add(k); // default checked
+          }
+          ui.hydratedFlags.didInitDefaultEmailChecks = true;
+        }
+
+        if (ui.hydratedFlags.didInitDefaultInvalidationChecks !== true) {
+          for (const g of vg) {
+            const tsid = g?.timesheet_id || g?.timesheetId || null;
+            if (!tsid) continue;
+
+            const comps = Array.isArray(g?.comparisons) ? g.comparisons
+              : (Array.isArray(g?.comparison_rows) ? g.comparison_rows : []);
+            for (const c of comps) {
+              const isDestr = (c?.is_destructive_invalidation === true) || (c?.isDestructiveInvalidation === true) || (c?.is_destructive_invalidation === 'true');
+              if (!isDestr) continue;
+
+              const invoiceLocked = (c?.invoice_locked === true) || (c?.invoiceLocked === true) || (String(c?.invoice_locked_invoice_id || c?.invoiceLockedInvoiceId || '').trim().length > 0);
+              if (invoiceLocked) continue;
+
+              const ck = String(c?.comparison_key || c?.comparisonKey || '').trim();
+              if (!ck) continue;
+
+              const key = `${String(tsid).trim()}|${ck}`;
+              // default checked
+              ui.invalidationSelection.set(key, true);
+            }
+          }
+          ui.hydratedFlags.didInitDefaultInvalidationChecks = true;
+        }
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+      };
+
+      hydrateDefaultsOnce();
+
+      // Delegated change handler
+      root.addEventListener('change', (ev) => {
+        const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
+        if (!container) return;
+
+        const containerImp = String(container.getAttribute('data-import-id') || '').trim();
+        if (containerImp && containerImp !== impId) return;
+
+        // email toggle
+        const cbEmail = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-email-toggle"]')
+          : null;
+        if (cbEmail) {
+          const tsid = String(cbEmail.getAttribute('data-timesheet-id') || '').trim();
+          const fp   = String(cbEmail.getAttribute('data-issue-fingerprint') || '').trim();
+          if (!tsid || !fp) return;
+
+          const ui = ensureUi();
+          const key = `${tsid}|${fp}`;
+          if (cbEmail.checked) ui.emailSelection.add(key);
+          else ui.emailSelection.delete(key);
+
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+          return;
+        }
+
+        // invalidation toggle
+        const cbInv = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-invalidate-toggle"]')
+          : null;
+        if (cbInv) {
+          const tsid = String(cbInv.getAttribute('data-timesheet-id') || '').trim();
+          const ck   = String(cbInv.getAttribute('data-comparison-key') || '').trim();
+          if (!tsid || !ck) return;
+
+          const ui = ensureUi();
+          const key = `${tsid}|${ck}`;
+          ui.invalidationSelection.set(key, !!cbInv.checked);
+
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+          return;
+        }
+      });
+
+      // Delegated click handler
+      root.addEventListener('click', async (ev) => {
+        const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
+        if (!container) return;
+
+        const containerImp = String(container.getAttribute('data-import-id') || '').trim();
+        if (containerImp && containerImp !== impId) return;
+
+        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+        if (!btn) return;
+
+        const act = String(btn.getAttribute('data-act') || '').trim();
+
+        if (act === 'hr-weekly-val-resolve-candidate') {
+          try {
+            const idxRaw = btn.getAttribute('data-row-idx');
+            const idx = Number(idxRaw);
+            if (!Number.isFinite(idx) || idx < 0) throw new Error('Invalid row index for Assign candidate.');
+            if (typeof openWeeklyCandidateResolveModal !== 'function') throw new Error('openWeeklyCandidateResolveModal is not defined.');
+            await openWeeklyCandidateResolveModal('HR_WEEKLY', impId, idx);
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] resolve-candidate failed', e);
+            alert(e?.message || 'Assign candidate failed.');
+          }
+          return;
+        }
+
+        if (act === 'hr-weekly-val-fix-band') {
+          try {
+            const incoming_code = String(btn.getAttribute('data-incoming-code') || '').trim();
+            const client_id_raw = String(btn.getAttribute('data-client-id') || '').trim();
+            const cand_id_raw   = String(btn.getAttribute('data-candidate-id') || '').trim();
+            const work_date_raw = String(btn.getAttribute('data-work-date') || '').trim();
+            const we_raw        = String(btn.getAttribute('data-week-ending-date') || '').trim();
+
+            if (!incoming_code) throw new Error('Missing incoming code for band resolver.');
+            if (!client_id_raw) throw new Error('Missing client_id for band resolver.');
+
+            if (typeof openHrWeeklyBandResolveModal !== 'function') {
+              throw new Error('openHrWeeklyBandResolveModal is not defined.');
+            }
+
+            await openHrWeeklyBandResolveModal({
+              import_id: impId,
+              client_id: client_id_raw || null,
+              candidate_id: cand_id_raw || null,
+              incoming_code: incoming_code,
+              work_date: work_date_raw || null,
+              week_ending_date: we_raw || null
+            });
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] fix-band failed', e);
+            alert(e?.message || 'Fix band mapping failed.');
+          }
+          return;
+        }
+
+        if (act === 'hr-weekly-val-reclassify') {
+          try {
+            if (typeof refreshWeeklyImportSummary !== 'function') {
+              throw new Error('refreshWeeklyImportSummary is not defined.');
+            }
+            await refreshWeeklyImportSummary('HR_WEEKLY', impId);
+            // hydrate defaults again only if not yet initialised; do NOT clobber user changes
+            hydrateDefaultsOnce();
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] reclassify failed', e);
+            alert(e?.message || 'Reclassify failed.');
+          }
+          return;
+        }
+
+        if (act === 'hr-weekly-val-finalise') {
+          try {
+            const ok = window.confirm('Are you sure you want to finalise now?');
+            if (!ok) return;
+
+            if (typeof applyWeeklyImportTransactional !== 'function') {
+              throw new Error('applyWeeklyImportTransactional is not defined.');
+            }
+
+            const ui = ensureUi();
+            const p = getPreview();
+            const mode = getMode(p);
+
+            const auto_apply_action_ids =
+              Array.isArray(p?.auto_apply_action_ids) ? p.auto_apply_action_ids :
+              Array.isArray(p?.autoApplyActionIds) ? p.autoApplyActionIds :
+              (p?.summary && Array.isArray(p.summary.auto_apply_action_ids)) ? p.summary.auto_apply_action_ids :
+              [];
+
+            const email_actions = buildEmailActions();
+            const invalidation_actions = buildInvalidationActions();
+
+            let selected_action_ids = [];
+            let decisions = {};
+
+            if (mode === 'MIXED') {
+              const seen = new Set();
+              const out = [];
+
+              for (const v of Array.from(ui.actionSelection || [])) {
+                const s = String(v || '').trim();
+                if (!s || seen.has(s)) continue;
+                seen.add(s);
+                out.push(s);
+              }
+              for (const v of (auto_apply_action_ids || [])) {
+                const s = String(v || '').trim();
+                if (!s || seen.has(s)) continue;
+                seen.add(s);
+                out.push(s);
+              }
+              selected_action_ids = out;
+
+              if (typeof getOrInitWeeklyImportDecisionsStore === 'function') {
+                try {
+                  const ds = getOrInitWeeklyImportDecisionsStore('HR_WEEKLY', impId, p);
+                  if (ds && typeof ds.serialize === 'function') {
+                    decisions = ds.serialize(p) || {};
+                  }
+                } catch {
+                  decisions = {};
+                }
+              }
+            } else {
+              selected_action_ids = [];
+              decisions = {};
+            }
+
+            const result = await applyWeeklyImportTransactional('HR_WEEKLY', impId, {
+              selected_action_ids,
+              decisions,
+              email_actions,
+              invalidation_actions,
+              include_missing_shifts: true
+            }) || {};
+
+            alert(`Import ${result.import_id || impId} has been finalised.`);
+            if (typeof refreshWeeklyImportSummary === 'function') {
+              await refreshWeeklyImportSummary('HR_WEEKLY', impId);
+              // do not re-init defaults after finalise; keep whatever user set until refresh overwrites state
+            }
+          } catch (e) {
+            console.error('[IMPORTS][HR_WEEKLY][VAL] finalise failed', e);
+            alert(e?.message || 'Finalise failed.');
+          }
+        }
+      });
+    } catch (e) {
+      console.warn('[IMPORTS][HR_WEEKLY][VAL] wiring failed (non-fatal)', e);
+    }
+  }, 0);
 }
 
 
@@ -15863,76 +16199,6 @@ async function upsertCandidate(payload, id){
 
 // ===== UPDATED: upsertClient — normalize server response so we always return the created/updated object with an id
 
-async function upsertClient(payload, id){
-  // Never allow CLI to be sent from UI
-  if ('cli_ref' in payload) delete payload.cli_ref;
-
-  // Strip empty-string fields so we don't overwrite existing values with ''
-  const clean = {};
-  for (const [k, v] of Object.entries(payload || {})) {
-    if (v === '' || v === undefined) continue;
-    clean[k] = v;
-  }
-
-  const url    = id ? `/api/clients/${id}` : '/api/clients';
-  const method = id ? 'PUT' : 'POST';
-  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
-  if (APILOG) console.log('[upsertClient] →', { method, url: API(url), body: clean });
-
-  const r = await authFetch(API(url), {
-    method,
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(clean)
-  });
-
-  if (APILOG) console.log('[upsertClient] ←', r.status, r.ok);
-  if (!r.ok) {
-    const msg = await r.text().catch(()=> '');
-    if (APILOG) console.error('[upsertClient] error body', msg);
-    throw new Error(msg || 'Save failed');
-  }
-
-  // Try to parse a full client row from the response
-  try {
-    const data = await r.json();
-    if (APILOG) console.log('[upsertClient] parsed', data);
-    let obj = null;
-    if (Array.isArray(data)) obj = data[0] || null;
-    else if (data && data.client) obj = data.client;
-    else if (data && typeof data === 'object') obj = data;
-    if (obj) return obj;
-  } catch (_) { /* fall through to Location/GET fallback */ }
-
-  // Fallbacks: try to extract id from Location, then GET the full row (to get cli_ref/name/etc.)
-  let clientId = id || null;
-  try {
-    const loc = r.headers && r.headers.get('Location');
-    if (!clientId && loc) {
-      const m = loc.match(/\/api\/clients\/([^/?#]+)/i) || loc.match(/\/clients\/([^/?#]+)/i);
-      if (m) clientId = m[1];
-    }
-  } catch (_) {}
-
-  if (clientId) {
-    try {
-      const rr = await authFetch(API(`/api/clients/${encodeURIComponent(clientId)}`));
-      if (rr.ok) {
-        const dd = await rr.json().catch(()=> ({}));
-        const obj = (dd && dd.client) ? dd.client : dd;
-        if (obj && typeof obj === 'object') {
-          if (APILOG) console.log('[upsertClient] GET backfill', obj);
-          return obj;
-        }
-      }
-    } catch (_) {}
-  }
-
-  // Last resort: return what we know
-  const fallback = clientId ? { id: clientId, ...clean } : (id ? { id, ...clean } : { ...clean });
-  if (APILOG) console.log('[upsertClient] fallback', fallback);
-  return fallback;
-}
-
 // ================== FRONTEND: upsertUmbrella (UPDATED to return saved object) ==================
 // ===== UPDATED: upsertUmbrella — normalize server response so we always return the created/updated object with an id
 async function upsertUmbrella(payload, id){
@@ -20678,27 +20944,26 @@ async function openClient(row) {
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
 
- window.modalCtx = {
-  entity: 'clients',
-  data: deep(full),
-  formState: { __forId: full?.id || null, main: {} },
-  ratesState: [],
-  ratesBaseline: [],
-  hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
+  window.modalCtx = {
+    entity: 'clients',
+    data: deep(full),
+    formState: { __forId: full?.id || null, main: {} },
+    ratesState: [],
+    ratesBaseline: [],
+    hospitalsState: { existing: [], stagedNew: [], stagedEdits: {}, stagedDeletes: new Set() },
 
-  // ✅ NEW: keep an immutable DB baseline (used for comparisons / “snap back” safety)
-  clientSettingsBaseline: settingsSeed ? deep(settingsSeed) : {},
+    // ✅ NEW: keep an immutable DB baseline (used for comparisons / “snap back” safety)
+    clientSettingsBaseline: settingsSeed ? deep(settingsSeed) : {},
 
-  // ✅ State used by UI for edits (starts as DB snapshot)
-  clientSettingsState: settingsSeed ? deep(settingsSeed) : {},
+    // ✅ State used by UI for edits (starts as DB snapshot)
+    clientSettingsState: settingsSeed ? deep(settingsSeed) : {},
 
-  openToken: ((full?.id) || 'new') + ':' + Date.now(),
-  // NEW: persistent set for staged client-rate deletes (survives refresh/merge)
-  ratesStagedDeletes: (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set)
-    ? window.modalCtx.ratesStagedDeletes
-    : new Set()
-};
-
+    openToken: ((full?.id) || 'new') + ':' + Date.now(),
+    // NEW: persistent set for staged client-rate deletes (survives refresh/merge)
+    ratesStagedDeletes: (window.modalCtx && window.modalCtx.ratesStagedDeletes instanceof Set)
+      ? window.modalCtx.ratesStagedDeletes
+      : new Set()
+  };
 
   // Canonicalise immediately so UI always starts in a consistent state
   // ✅ Preserve manual-invoice routing + auto-invoice + new invoicing/ref-to-issue fields
@@ -20709,7 +20974,7 @@ async function openClient(row) {
     const keepManualFlag  = !!cs0.send_manual_invoices_to_different_email;
     const keepManualEmail = String(cs0.manual_invoices_alt_email_address || '').trim();
 
-    // ✅ NEW: preserve these fields even if canonicalize strips unknown keys
+    // ✅ preserve these fields even if canonicalize strips unknown keys
     const keepInvConsol =
       (cs0.invoice_consolidation_mode != null) ? String(cs0.invoice_consolidation_mode) : '';
     const keepRefToIssue = (() => {
@@ -20794,6 +21059,20 @@ async function openClient(row) {
       const shouldValidateSettings = hasFormMounted || hasFullBaseline || hasClientSettingsKeys;
 
       let pendingSettings = null;
+
+      // ✅ NEW: capture client-level ts_queries_email from settings tab if present (HealthRoster VERIFY)
+      // Do NOT overwrite unless the field is present in the mounted form.
+      if (hasFormMounted) {
+        try {
+          const liveSettingsPeek = collectForm('#clientSettingsForm', false);
+          if (liveSettingsPeek && Object.prototype.hasOwnProperty.call(liveSettingsPeek, 'ts_queries_email')) {
+            const v = String(liveSettingsPeek.ts_queries_email ?? '').trim();
+            // keep as '' if blank => upsertClient will translate to null and clear
+            payload.ts_queries_email = v;
+          }
+        } catch {}
+      }
+
       if (shouldValidateSettings) {
         let csMerged = { ...(baseline || {}) };
 
@@ -20835,7 +21114,7 @@ async function openClient(row) {
             if (wm) csMerged.weekly_mode = String(wm.value || '').trim();
             if (hp) csMerged.hr_weekly_behaviour = String(hp.value || '').trim();
 
-            // ✅ NEW: invoice consolidation mode radio (DB-backed)
+            // ✅ invoice consolidation mode radio (DB-backed)
             const icm = formEl.querySelector('input[type="radio"][name="invoice_consolidation_mode"]:checked');
             if (icm) csMerged.invoice_consolidation_mode = String(icm.value || '').trim();
 
@@ -20850,8 +21129,6 @@ async function openClient(row) {
               'hr_attach_to_invoice',
               'ts_attach_to_invoice',
               'send_manual_invoices_to_different_email',
-
-              // ✅ NEW: ref-to-issue (DB-backed)
               'reference_number_required_to_issue_invoice'
             ];
             csMerged.__from_ui = true;
@@ -20860,7 +21137,7 @@ async function openClient(row) {
               if (el) csMerged[key] = !!el.checked;
             }
 
-            // ✅ NEW: manual invoices alt email input (only meaningful if the checkbox is enabled)
+            // manual invoices alt email input
             if (Object.prototype.hasOwnProperty.call(liveSettings, 'manual_invoices_alt_email_address')) {
               csMerged.manual_invoices_alt_email_address = String(liveSettings.manual_invoices_alt_email_address || '').trim();
             }
@@ -20870,12 +21147,10 @@ async function openClient(row) {
           }
         }
 
-        // ✅ Canonicalise gated settings so they are consistent even if saved from another tab
         const keepManualFlag  = !!csMerged.send_manual_invoices_to_different_email;
         const keepManualEmail = String(csMerged.manual_invoices_alt_email_address || '').trim();
         const keepAutoInv     = !!csMerged.auto_invoice_default;
 
-        // ✅ NEW: preserve invoicing/ref-to-issue fields across canonicalize
         const keepInvConsol = (csMerged.invoice_consolidation_mode != null) ? String(csMerged.invoice_consolidation_mode) : '';
         const keepRefToIssue = !!csMerged.reference_number_required_to_issue_invoice;
 
@@ -20883,18 +21158,15 @@ async function openClient(row) {
           csMerged = canonicalizeClientSettings(csMerged);
         } catch {}
 
-        // ✅ restore preserved keys
         csMerged.auto_invoice_default = keepAutoInv;
         csMerged.send_manual_invoices_to_different_email = keepManualFlag;
         csMerged.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
 
-        // ✅ restore new fields
         if (keepInvConsol != null && String(keepInvConsol).trim() !== '') {
           csMerged.invoice_consolidation_mode = String(keepInvConsol).trim();
         }
         csMerged.reference_number_required_to_issue_invoice = !!keepRefToIssue;
 
-        // ✅ Save-time validation (prevent roundtrip)
         if (csMerged.send_manual_invoices_to_different_email) {
           const em = String(csMerged.manual_invoices_alt_email_address || '').trim();
           if (!em) {
@@ -20906,42 +21178,35 @@ async function openClient(row) {
           csMerged.manual_invoices_alt_email_address = '';
         }
 
-        // ✅ NORMALISE server times like "06:00:00" → "06:00" so validation won't fail
         const toHHMM = (v) => {
           if (v == null) return '';
           const s = String(v).trim();
-          const m = s.match(/^(\d{2}:\d{2})/);   // accepts "06:00:00", "06:00:00+00", etc
+          const m = s.match(/^(\d{2}:\d{2})/);
           return m ? m[1] : s;
         };
         const TIME_KEYS = ['day_start','day_end','night_start','night_end','sat_start','sat_end','sun_start','sun_end','bh_start','bh_end'];
         TIME_KEYS.forEach(k => {
           if (!Object.prototype.hasOwnProperty.call(csMerged, k)) return;
           const raw = csMerged[k];
-          if (raw === '' || raw == null) return;     // preserve blanks
+          if (raw === '' || raw == null) return;
           csMerged[k] = toHHMM(raw);
         });
 
-        // Clean + validate HH:MM etc (existing)
         const { cleaned: csCleanRaw, invalid: csInvalid } = normalizeClientSettingsForSave(csMerged);
 
-        // Ensure we never send UI helper fields to DB
         const csClean = { ...(csCleanRaw || {}) };
         delete csClean.weekly_mode;
         delete csClean.hr_weekly_behaviour;
         delete csClean.__from_ui;
 
-        // ✅ Ensure manual invoice routing keys are ALWAYS sent (including false),
-        // so backend does not keep stale values when user toggles off.
         csClean.send_manual_invoices_to_different_email = !!csMerged.send_manual_invoices_to_different_email;
         csClean.manual_invoices_alt_email_address =
           csClean.send_manual_invoices_to_different_email
             ? (String(csMerged.manual_invoices_alt_email_address || '').trim() || null)
             : null;
 
-        // (keep auto-invoice stable too)
         csClean.auto_invoice_default = !!csMerged.auto_invoice_default;
 
-        // ✅ NEW: always send these client settings fields (round-trip, no special endpoints)
         csClean.invoice_consolidation_mode = String(csMerged.invoice_consolidation_mode || '').trim() || 'NONE';
         csClean.reference_number_required_to_issue_invoice = !!csMerged.reference_number_required_to_issue_invoice;
 
@@ -20950,13 +21215,13 @@ async function openClient(row) {
 
         if (Object.keys(csClean).length) pendingSettings = csClean;
 
-        // Keep staged state canonical in memory too
         try { window.modalCtx.clientSettingsState = { ...(window.modalCtx.clientSettingsState || {}), ...csMerged }; } catch {}
       }
 
       // 3) Upsert client
       const idForUpdate = window.modalCtx?.data?.id || full?.id || null;
       if (APILOG) console.log('[OPEN_CLIENT] upsertClient → request', { idForUpdate, payload });
+
       delete payload.client_settings;
 
       const clientResp  = await upsertClient(payload, idForUpdate).catch(err => { E('upsertClient failed', err); return null; });
@@ -21114,7 +21379,6 @@ async function openClient(row) {
 
       // 8) Negative-margin guard
       const erniMultForWindow = await (async ()=> {
-        // Pick today's date (Europe/London)
         const todayIso = (() => {
           try {
             const s = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
@@ -21132,7 +21396,6 @@ async function openClient(row) {
           return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
         };
 
-        // Load finance windows once (no extra network calls beyond existing cache)
         let fws = [];
         try {
           if (typeof getSettingsCached === 'function') {
@@ -21143,14 +21406,12 @@ async function openClient(row) {
           fws = [];
         }
 
-        // Cache ERNI multipliers by date
         const multByYmd = Object.create(null);
 
         const multForYmd = (ymd) => {
           const key = asYmd(ymd) || todayIso;
           if (multByYmd[key] != null) return multByYmd[key];
 
-          // Pick finance window in-scope for key, prefer latest date_from
           let chosen = null;
           for (const w of fws) {
             const df = asYmd(w?.date_from);
@@ -21169,7 +21430,7 @@ async function openClient(row) {
 
           let p = chosen?.erni_pct ?? 0;
           p = Number(p) || 0;
-          if (p > 1) p = p / 100; // support 15 vs 0.15
+          if (p > 1) p = p / 100;
 
           let mult = 1 + p;
           if (!Number.isFinite(mult) || mult <= 0) mult = 1;
@@ -21178,10 +21439,8 @@ async function openClient(row) {
           return mult;
         };
 
-        // Keep legacy cache aligned (best-effort) for other parts of UI
         try { window.__ERNI_MULT__ = multForYmd(todayIso); } catch {}
 
-        // Return a function: (client default rate window) -> ERNI_MULT
         return (rateWindow) => {
           const endIso   = asYmd(rateWindow?.date_to) || null;
           const startIso = asYmd(rateWindow?.date_from) || null;
@@ -21196,8 +21455,6 @@ async function openClient(row) {
       for (const w of windows) {
         if (w.disabled_at_utc) continue;
 
-        // ✅ Per-window ERNI multiplier:
-        // ongoing -> today, finished -> date_from
         const mult = erniMultForWindow(w);
 
         for (const b of ['day','night','sat','sun','bh']) {
@@ -21238,7 +21495,6 @@ async function openClient(row) {
         umb_bh       : w.umb_bh       ?? null
       });
 
-      // PUT updates
       for (const w of toUpdate) {
         if (!w.id) continue;
         try {
@@ -21259,7 +21515,6 @@ async function openClient(row) {
         }
       }
 
-      // POST creates
       for (const w of toCreate) {
         try {
           if (APILOG) console.log('[OPEN_CLIENT] POST client-default window →', w);
@@ -21273,7 +21528,7 @@ async function openClient(row) {
 
       // 10) Refresh & rebuild baseline
       try {
-        const refreshed = await listClientRates(clientId /* all incl. disabled */);
+        const refreshed = await listClientRates(clientId);
         const stagedDelIds = (window.modalCtx.ratesStagedDeletes instanceof Set) ? window.modalCtx.ratesStagedDeletes : new Set();
         window.modalCtx.ratesState = (Array.isArray(refreshed) ? refreshed.map(x => ({ ...x })) : []).map(x => {
           if (stagedDelIds.has(String(x.id))) x.__delete = true;
@@ -53954,24 +54209,25 @@ function renderClientHospitalsTable() {
     addBtn.onclick = () => openClientHospitalModal(ctx.data?.id);
   }
 }
+
+
 async function renderClientSettingsUI(settingsObj){
   const div = byId('clientSettings'); if (!div) return;
 
   const ctx = window.modalCtx;
 
-const initial = (ctx.clientSettingsState && typeof ctx.clientSettingsState === 'object')
-  ? ctx.clientSettingsState
-  : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
+  const initial = (ctx.clientSettingsState && typeof ctx.clientSettingsState === 'object')
+    ? ctx.clientSettingsState
+    : (settingsObj && typeof settingsObj === 'object' ? settingsObj : {});
 
-// ✅ Ensure we always have a baseline available (DB snapshot) if caller didn’t seed it
-try {
-  const hasBaseline =
-    (ctx.clientSettingsBaseline && typeof ctx.clientSettingsBaseline === 'object' && Object.keys(ctx.clientSettingsBaseline).length > 0);
-  if (!hasBaseline) {
-    ctx.clientSettingsBaseline = { ...(settingsObj && typeof settingsObj === 'object' ? settingsObj : {}) };
-  }
-} catch {}
-
+  // ✅ Ensure we always have a baseline available (DB snapshot) if caller didn’t seed it
+  try {
+    const hasBaseline =
+      (ctx.clientSettingsBaseline && typeof ctx.clientSettingsBaseline === 'object' && Object.keys(ctx.clientSettingsBaseline).length > 0);
+    if (!hasBaseline) {
+      ctx.clientSettingsBaseline = { ...(settingsObj && typeof settingsObj === 'object' ? settingsObj : {}) };
+    }
+  } catch {}
 
   // ✅ Robust: accepts "06:00", "06:00:00", "06:00:00+00", etc
   const _toHHMM = (v) => {
@@ -53981,7 +54237,6 @@ try {
     return m ? m[1] : s;
   };
 
-  // ✅ Time keys (used for all-or-nothing rule + clear-to-global behaviour)
   const TIME_KEYS = [
     'day_start','day_end',
     'night_start','night_end',
@@ -53998,6 +54253,14 @@ try {
   };
 
   const up = (v) => String(v || '').trim().toUpperCase();
+
+  // ✅ NEW: client-level temp staffing email (stored on clients.ts_queries_email)
+  const clientTsQueriesEmail = (() => {
+    try {
+      const v = ctx?.data?.ts_queries_email;
+      return (v == null) ? '' : String(v).trim();
+    } catch { return ''; }
+  })();
 
   // ✅ Seed WITHOUT forcing defaults. Blank means “inherit global”.
   const seed = {
@@ -54023,10 +54286,8 @@ try {
 
     default_submission_mode: String(initial.default_submission_mode || 'ELECTRONIC').toUpperCase(),
 
-    // NEW: Auto-invoice by default (client-level). Default FALSE for new clients.
     auto_invoice_default: (typeof initial.auto_invoice_default === 'boolean') ? initial.auto_invoice_default : false,
 
-    // ✅ NEW: manual invoice routing (client-level)
     send_manual_invoices_to_different_email:
       (typeof initial.send_manual_invoices_to_different_email === 'boolean')
         ? initial.send_manual_invoices_to_different_email
@@ -54038,37 +54299,30 @@ try {
     weekly_mode: initial.weekly_mode || '',
     hr_weekly_behaviour: initial.hr_weekly_behaviour || '',
 
-    // ✅ NEW (DB-backed): invoice consolidation mode + ref-to-issue flag
     invoice_consolidation_mode: up(initial.invoice_consolidation_mode || 'NONE'),
     reference_number_required_to_issue_invoice: toBool(initial.reference_number_required_to_issue_invoice, false)
   };
 
-  // ✅ Preserve blanks through canonicalise (so UI can represent “inherit global”)
   const seedBlankTimeKeys = TIME_KEYS.filter(k => String(seed[k] ?? '').trim() === '');
   const keepAutoInvSeed   = !!seed.auto_invoice_default;
   const keepManualFlagSeed= !!seed.send_manual_invoices_to_different_email;
   const keepManualEmailSeed = String(seed.manual_invoices_alt_email_address || '').trim();
 
-  // ✅ NEW: preserve DB-backed invoicing keys across canonicalizeClientSettings()
   const keepInvConsolSeed = up(seed.invoice_consolidation_mode || 'NONE');
   const keepRefToIssueSeed = !!seed.reference_number_required_to_issue_invoice;
 
   let s = canonicalizeClientSettings(seed);
 
-  // Ensure keys survive canonicalizeClientSettings()
   s.auto_invoice_default = keepAutoInvSeed;
   s.send_manual_invoices_to_different_email = keepManualFlagSeed;
   s.manual_invoices_alt_email_address = keepManualFlagSeed ? keepManualEmailSeed : '';
 
-  // ✅ restore DB-backed keys after canonicalize
   s.invoice_consolidation_mode = keepInvConsolSeed;
   s.reference_number_required_to_issue_invoice = keepRefToIssueSeed;
 
-  // ✅ restore blanks (so they inherit global)
   seedBlankTimeKeys.forEach(k => { s[k] = ''; });
 
   ctx.clientSettingsState = { ...initial, ...s };
-
 
   const pairTimeRow = (label, aName, aVal, bName, bVal) => `
     <div class="row">
@@ -54089,10 +54343,6 @@ try {
   const weekEndingAndDefaultRow = () => {
     const mode = String(s.weekly_mode || 'NONE').toUpperCase();
     const beh  = String(s.hr_weekly_behaviour || 'VERIFY').toUpperCase();
-
-    // Requirement: hide Default submission mode when:
-    // - weekly_mode === NHSP
-    // - OR weekly_mode === HEALTHROSTER AND hr_weekly_behaviour === CREATE (no timesheets)
     const hideDSM = (mode === 'NHSP') || (mode === 'HEALTHROSTER' && beh === 'CREATE');
 
     const opts = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
@@ -54208,6 +54458,21 @@ try {
     const beh = String(st.hr_weekly_behaviour || 'VERIFY').toUpperCase();
     const isVerify = (beh !== 'CREATE');
 
+    // ✅ NEW: Temp Staffing Email Address only for HealthRoster VERIFY
+    const tsEmailBlock = (isVerify)
+      ? `
+        <div class="row" style="margin-top:12px;">
+          <label style="white-space:normal">Temporary Staffing Email Address</label>
+          <div class="controls" style="display:flex;flex-direction:column;gap:6px;min-width:0;">
+            <input class="input" name="ts_queries_email" value="${String(clientTsQueriesEmail || '')}" placeholder="name@trust.nhs.uk" />
+            <div class="mini" style="opacity:0.85;line-height:1.25;white-space:normal;overflow-wrap:break-word;">
+              Used when emailing Temporary Staffing about weekly HealthRoster validation mismatches.
+            </div>
+          </div>
+        </div>
+      `
+      : ``;
+
     return `
       <div class="row" style="margin-top:12px;">
         <label style="white-space:normal">Weekly HealthRoster behaviour</label>
@@ -54228,6 +54493,7 @@ try {
           )}
         </div>
       </div>
+      ${tsEmailBlock}
     `;
   };
 
@@ -54277,7 +54543,6 @@ try {
       }
     `;
 
-    // ✅ NEW checkbox (DB-backed) shown in all modes
     const refToIssueBlock = `
       ${checkChoiceWithDesc(
         'reference_number_required_to_issue_invoice',
@@ -54369,7 +54634,6 @@ try {
             <div class="controls"><input class="input" name="timezone_id" value="${String(s.timezone_id||'')}" /></div>
           </div>
 
-          <!-- ✅ NEW: clear-to-global button -->
           <div class="row">
             <label>Shift times</label>
             <div class="controls">
@@ -54453,7 +54717,15 @@ try {
     const vals = collectForm('#clientSettingsForm', false);
     let next = { ...prev, ...vals };
 
-    // Validate time formats for non-blank values only
+    // ✅ NEW: stage client-level ts_queries_email in ctx.data (NOT in client_settings payload)
+    if (Object.prototype.hasOwnProperty.call(vals, 'ts_queries_email')) {
+      try {
+        const v = String(vals.ts_queries_email ?? '').trim();
+        ctx.data = ctx.data || {};
+        ctx.data.ts_queries_email = v;
+      } catch {}
+    }
+
     TIME_KEYS.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
       if (v && !hhmm.test(v)) {
@@ -54465,7 +54737,6 @@ try {
       }
     });
 
-    // ✅ All-or-nothing rule (enforced on validate, not while typing)
     const blankTimeKeys = TIME_KEYS.filter(k => String(next[k] ?? '').trim() === '');
     const hasSomeBlank = (blankTimeKeys.length > 0 && blankTimeKeys.length < TIME_KEYS.length);
 
@@ -54492,25 +54763,21 @@ try {
       ? String(Math.min(6, Math.max(0, w)))
       : lastValid.week_ending_weekday;
 
-    // Only read default_submission_mode if it exists in the DOM (it will be hidden for NHSP / HR CREATE)
     const dsmDom = root.querySelector('select[name="default_submission_mode"]');
     if (dsmDom) {
       const dsm = String(vals.default_submission_mode || next.default_submission_mode || 'ELECTRONIC').toUpperCase();
       next.default_submission_mode = (dsm === 'ELECTRONIC' || dsm === 'MANUAL') ? dsm : 'ELECTRONIC';
     }
 
-    // Weekly mode / HR behaviour
     const wm = getRadio('weekly_mode');
     if (wm) next.weekly_mode = wm;
 
     const hb = getRadio('hr_weekly_behaviour');
     if (hb) next.hr_weekly_behaviour = hb;
 
-    // ✅ NEW: invoice consolidation mode (radio)
     const icm = getRadio('invoice_consolidation_mode');
     if (icm) next.invoice_consolidation_mode = icm;
 
-    // Checkboxes
     const cbKeys = [
       'pay_reference_required',
       'invoice_reference_required',
@@ -54521,8 +54788,6 @@ try {
       'hr_attach_to_invoice',
       'ts_attach_to_invoice',
       'send_manual_invoices_to_different_email',
-
-      // ✅ NEW: ref-to-issue checkbox
       'reference_number_required_to_issue_invoice'
     ];
     cbKeys.forEach(k=>{
@@ -54530,11 +54795,11 @@ try {
       if (v !== null) next[k] = v;
     });
 
-    // Always normalise the email string (even if hidden)
     next.manual_invoices_alt_email_address = String(next.manual_invoices_alt_email_address || '').trim();
     if (!next.send_manual_invoices_to_different_email) {
       next.manual_invoices_alt_email_address = '';
     }
+
     const keepAutoInv =
       (typeof next.auto_invoice_default === 'boolean')
         ? next.auto_invoice_default
@@ -54548,30 +54813,24 @@ try {
     const keepManualEmail =
       String(next.manual_invoices_alt_email_address || '').trim();
 
-    // ✅ NEW: preserve DB-backed invoicing keys across canonicalizeClientSettings()
     const keepInvConsol = up(next.invoice_consolidation_mode || prev.invoice_consolidation_mode || 'NONE');
     const keepRefToIssue =
       (typeof next.reference_number_required_to_issue_invoice === 'boolean')
         ? next.reference_number_required_to_issue_invoice
         : !!prev.reference_number_required_to_issue_invoice;
 
-    // ✅ Preserve blanks through canonicalise
     const blankKeysNow = TIME_KEYS.filter(k => String(next[k] ?? '').trim() === '');
 
     next = canonicalizeClientSettings(next);
 
-    // Ensure keys survive canonicalisation for existing UI toggles
     next.auto_invoice_default = keepAutoInv;
     next.send_manual_invoices_to_different_email = keepManualFlag;
     next.manual_invoices_alt_email_address = keepManualFlag ? keepManualEmail : '';
 
-    // ✅ restore DB-backed keys after canonicalize
     next.invoice_consolidation_mode = keepInvConsol;
     next.reference_number_required_to_issue_invoice = !!keepRefToIssue;
 
-    // ✅ restore blanks (so they inherit global)
     blankKeysNow.forEach(k => { next[k] = ''; });
-
 
     const gatePrev = `${String(prev.weekly_mode||'').toUpperCase()}|${String(prev.hr_weekly_behaviour||'').toUpperCase()}`;
     const gateNext = `${String(next.weekly_mode||'').toUpperCase()}|${String(next.hr_weekly_behaviour||'').toUpperCase()}`;
@@ -54585,10 +54844,6 @@ try {
     ctx.clientSettingsState = next;
     lastValid = { ...next };
 
-    // Repaint panels when:
-    // - Invoice consolidation mode changes (inv panel only)
-    // - Weekly mode / HR behaviour changes (weekly + flags)
-    // - Manual invoices toggle changes (flags panel only)
     if (invModePrev !== invModeNext) {
       paintRightPanels('inv');
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
@@ -54605,7 +54860,6 @@ try {
 
   const syncSoft = ()=> applyFromDOM(true);
 
-  // ✅ Wire clear-to-global button
   const btnClear = root.querySelector('#btnClearClientShiftTimes');
   if (btnClear && !btnClear.__wired) {
     btnClear.__wired = true;
@@ -54618,7 +54872,6 @@ try {
         if (el) el.value = '';
       });
 
-      // Update staged state (blank means inherit global)
       applyFromDOM(false);
       try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
     });
@@ -54626,8 +54879,6 @@ try {
 
   root.__syncSoft = syncSoft;
 
-  // Keep existing validation handler binding if present in your current file.
-  // (Your current code defines syncValidate below; we keep it intact here by reusing root.__syncValidate.)
   const syncValidate = root.__syncValidate || (() => applyFromDOM(false));
 
   root.__syncValidate = syncValidate;
@@ -54644,6 +54895,91 @@ try {
   });
 
   root.__wired = true;
+}
+
+
+async function upsertClient(payload, id){
+  if ('cli_ref' in payload) delete payload.cli_ref;
+
+  // ✅ Allow explicit clearing for specific client fields (e.g., ts_queries_email):
+  // - if provided as '' in UI, send NULL so backend clears it.
+  const CLEAN_NULLABLE_KEYS = new Set(['ts_queries_email']);
+
+  const clean = {};
+  for (const [k, v] of Object.entries(payload || {})) {
+    if (v === undefined) continue;
+
+    if (CLEAN_NULLABLE_KEYS.has(k)) {
+      if (v === '') {
+        clean[k] = null;
+        continue;
+      }
+      if (v === null) {
+        clean[k] = null;
+        continue;
+      }
+      clean[k] = v;
+      continue;
+    }
+
+    if (v === '') continue;
+    clean[k] = v;
+  }
+
+  const url    = id ? `/api/clients/${id}` : '/api/clients';
+  const method = id ? 'PUT' : 'POST';
+  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+  if (APILOG) console.log('[upsertClient] →', { method, url: API(url), body: clean });
+
+  const r = await authFetch(API(url), {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(clean)
+  });
+
+  if (APILOG) console.log('[upsertClient] ←', r.status, r.ok);
+  if (!r.ok) {
+    const msg = await r.text().catch(()=> '');
+    if (APILOG) console.error('[upsertClient] error body', msg);
+    throw new Error(msg || 'Save failed');
+  }
+
+  try {
+    const data = await r.json();
+    if (APILOG) console.log('[upsertClient] parsed', data);
+    let obj = null;
+    if (Array.isArray(data)) obj = data[0] || null;
+    else if (data && data.client) obj = data.client;
+    else if (data && typeof data === 'object') obj = data;
+    if (obj) return obj;
+  } catch (_) {}
+
+  let clientId = id || null;
+  try {
+    const loc = r.headers && r.headers.get('Location');
+    if (!clientId && loc) {
+      const m = loc.match(/\/api\/clients\/([^/?#]+)/i) || loc.match(/\/clients\/([^/?#]+)/i);
+      if (m) clientId = m[1];
+    }
+  } catch (_) {}
+
+  if (clientId) {
+    try {
+      const rr = await authFetch(API(`/api/clients/${encodeURIComponent(clientId)}`));
+      if (rr.ok) {
+        const dd = await rr.json().catch(()=> ({}));
+        const obj = (dd && dd.client) ? dd.client : dd;
+        if (obj && typeof obj === 'object') {
+          if (APILOG) console.log('[upsertClient] GET backfill', obj);
+          return obj;
+        }
+      }
+    } catch (_) {}
+  }
+
+  const fallback = clientId ? { id: clientId, ...clean } : (id ? { id, ...clean } : { ...clean });
+  if (APILOG) console.log('[upsertClient] fallback', fallback);
+  return fallback;
 }
 
 
@@ -61758,758 +62094,6 @@ function renderTimesheetOverviewTab(ctx) {
   `;
 }
 
-
-function renderHrWeeklyValidationSummary(type, importId, preview) {
-  const T = String(type || '').toUpperCase();
-  const impId = (importId != null) ? String(importId) : '';
-
-  const enc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
-        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-      }[c]));
-
-  const p = (preview && typeof preview === 'object') ? preview : {};
-  const sum = (p.summary && typeof p.summary === 'object') ? p.summary : {};
-
-  const modeRaw = (p.mode_summary || p.modeSummary || sum.mode_summary || sum.modeSummary || '');
-  let mode = String(modeRaw || '').trim().toUpperCase();
-
-  // Safety fallback: never default to "apply" semantics if backend didn't provide mode.
-  if (mode !== 'MODE_A_ONLY' && mode !== 'MODE_B_ONLY' && mode !== 'MIXED') {
-    const vgN = Array.isArray(p.validation_groups) ? p.validation_groups.length : 0;
-    const agN = Array.isArray(p.action_groups) ? p.action_groups.length : 0;
-    const aN  = Array.isArray(p.actions) ? p.actions.length : 0;
-    if (vgN > 0 && (agN > 0 || aN > 0)) mode = 'MIXED';
-    else if (vgN > 0) mode = 'MODE_A_ONLY';
-    else if (agN > 0 || aN > 0) mode = 'MODE_B_ONLY';
-    else mode = 'MODE_A_ONLY';
-  }
-
-  const niceYmd = (ymd) => {
-    const s = String(ymd || '').trim();
-    if (!s) return '';
-    if (typeof formatYmdToNiceDate === 'function' && /^\d{4}-\d{2}-\d{2}$/.test(s)) {
-      try { return formatYmdToNiceDate(s); } catch {}
-    }
-    return s;
-  };
-
-  // Weekly preview payload fields
-  const vg = Array.isArray(p.validation_groups) ? p.validation_groups : [];
-  const allRows = Array.isArray(p.rows) ? p.rows : [];
-
-  // Resolve import-level client_id fallback for mapping modal seeding
-  const importClientId =
-    String(
-      (p.client_id || sum.client_id || p?.truth_meta?.client_id || sum?.truth_meta?.client_id || '') || ''
-    ).trim();
-
-  // Email selection state (Set of "timesheet_id|issue_fingerprint")
-  const ui = (window.__weeklyImportUi &&
-              window.__weeklyImportUi.HR_WEEKLY &&
-              window.__weeklyImportUi.HR_WEEKLY[impId] &&
-              window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Set)
-    ? window.__weeklyImportUi.HR_WEEKLY[impId]
-    : null;
-
-  const selSet = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
-
-  const keyFor = (tsid, fp) => {
-    const a = String(tsid || '').trim();
-    const b = String(fp || '').trim();
-    if (!a || !b) return '';
-    return `${a}|${b}`;
-  };
-
-  const pillForStatus = (s) => {
-    const v = String(s || '').toUpperCase();
-    if (v === 'OK' || v === 'PASS' || v === 'VALIDATION_OK') return 'pill-ok';
-    if (v === 'AMBIGUOUS' || v === 'WARN' || v === 'WARNING') return 'pill-warn';
-    if (v === 'FAIL' || v === 'ERROR' || v === 'VALIDATION_ERROR' || v === 'MISSING_TIMESHEET' || v === 'AWAITING_AUTHORISATION') return 'pill-bad';
-    return 'pill-info';
-  };
-
-  const statusTextNice = (raw) => {
-    const a = String(raw || '').trim().toUpperCase();
-    if (!a) return 'Unknown';
-
-    if (a === 'REJECT_NO_CANDIDATE') return 'Reject – Candidate not found';
-    if (a === 'REJECT_NO_CLIENT') return 'Reject – Client/site not found';
-    if (a === 'REJECT_NO_CONTRACT') return 'Reject – No matching contract';
-    if (a === 'REJECT_NO_CONTRACT_BAND_MISMATCH') return 'Reject – Grade/band mapping missing';
-    if (a === 'REJECT_MISSING_EXTERNAL_ROW_KEY') return 'Reject – Missing row key';
-    if (a.startsWith('REJECT_')) return `Reject – ${a.replace(/^REJECT_/, '').replace(/_/g, ' ').toLowerCase()}`;
-
-    if (a === 'NO_CANDIDATE') return 'Reject – Candidate not found';
-    if (a === 'NO_CLIENT') return 'Reject – Client/site not found';
-    if (a === 'BAD_ROW') return 'Reject – Invalid row';
-
-    return a.replace(/_/g, ' ');
-  };
-
-  // Fallback: Flatten legacy days[].pairings[] => comparisons-like rows
-  const flattenComparisonsFromDays = (days) => {
-    const out = [];
-    const arr = Array.isArray(days) ? days : [];
-    for (const d of arr) {
-      const ymd = String(d?.work_date || d?.ymd || d?.date_local || d?.date || '').trim();
-      const pairings = Array.isArray(d?.pairings) ? d.pairings : [];
-      for (const p0 of pairings) {
-        const p = p0 || {};
-        const hr = p?.hr || p?.hr_entry || p?.hrEntry || null;
-        const wk = p?.worker || p?.worker_entry || p?.workerEntry || null;
-
-        const sd = p?.start_diff_mins ?? p?.startDiffMins ?? null;
-        const ed = p?.end_diff_mins ?? p?.endDiffMins ?? null;
-        const bd = p?.break_diff_mins ?? p?.breakDiffMins ?? null;
-
-        const matchStatus = String(p?.match_status || p?.matchStatus || '').trim().toUpperCase();
-        const diffsAllZero =
-          (sd == null || Number(sd) === 0) &&
-          (ed == null || Number(ed) === 0) &&
-          (bd == null || Number(bd) === 0);
-
-        const isMatch =
-          (matchStatus === 'MATCH' || matchStatus === 'OK' || matchStatus === 'PASS' || matchStatus === 'SAME' || matchStatus === 'MATCHED') ||
-          (matchStatus === '' && diffsAllZero);
-
-        const tsStart = wk?.start_local || wk?.start || wk?.start_utc || '';
-        const tsEnd   = wk?.end_local || wk?.end || wk?.end_utc || '';
-        const tsBreak = (wk?.break_mins ?? wk?.break_minutes ?? wk?.break ?? '');
-
-        const hrStart = hr?.start_local || hr?.start || hr?.start_utc || '';
-        const hrEnd   = hr?.end_local || hr?.end || hr?.end_utc || '';
-        const hrBreak = (hr?.break_mins ?? hr?.break_minutes ?? hr?.break ?? '');
-
-        out.push({
-          work_date: ymd,
-          match: !!isMatch,
-          match_status: matchStatus || (isMatch ? 'MATCH' : 'MISMATCH'),
-          timesheet_start: String(tsStart || '').trim(),
-          timesheet_end: String(tsEnd || '').trim(),
-          timesheet_break_mins: (tsBreak == null || tsBreak === '' ? null : Number(tsBreak)),
-          healthroster_start: String(hrStart || '').trim(),
-          healthroster_end: String(hrEnd || '').trim(),
-          healthroster_break_mins: (hrBreak == null || hrBreak === '' ? null : Number(hrBreak))
-        });
-      }
-    }
-    return out;
-  };
-
-  // New contract: g.comparisons[] (preferred)
-  const normaliseComparisons = (arr) => {
-    const a = Array.isArray(arr) ? arr : [];
-    return a.map((c0) => {
-      const c = c0 && typeof c0 === 'object' ? c0 : {};
-      const wd = String(c.work_date || c.workDate || c.date || c.ymd || '').trim();
-
-      const matchVal = (c.match != null) ? c.match : (c.is_match != null ? c.is_match : c.isMatch);
-      const match = (matchVal === true || matchVal === 'true' || matchVal === 1 || matchVal === '1');
-
-      const tsStart = String(c.timesheet_start || c.timesheetStart || c.ts_start_hhmm || c.tsStart || '').trim();
-      const tsEnd   = String(c.timesheet_end || c.timesheetEnd || c.ts_end_hhmm || c.tsEnd || '').trim();
-
-      const hrStart = String(c.healthroster_start || c.healthrosterStart || c.hr_start_hhmm || c.hrStart || '').trim();
-      const hrEnd   = String(c.healthroster_end || c.healthrosterEnd || c.hr_end_hhmm || c.hrEnd || '').trim();
-
-      const tsBr = (c.timesheet_break_mins ?? c.timesheetBreakMins ?? c.ts_break_mins ?? c.tsBreakMins ?? null);
-      const hrBr = (c.healthroster_break_mins ?? c.healthrosterBreakMins ?? c.hr_break_mins ?? c.hrBreakMins ?? null);
-
-      const ms = String(c.match_status || c.matchStatus || '').trim().toUpperCase();
-
-      return {
-        work_date: wd,
-        match: !!match,
-        match_status: ms || (match ? 'MATCH' : 'MISMATCH'),
-        timesheet_start: tsStart,
-        timesheet_end: tsEnd,
-        timesheet_break_mins: (tsBr == null || tsBr === '' ? null : Number(tsBr)),
-        healthroster_start: hrStart,
-        healthroster_end: hrEnd,
-        healthroster_break_mins: (hrBr == null || hrBr === '' ? null : Number(hrBr))
-      };
-    }).filter(x => x.work_date || x.timesheet_start || x.healthroster_start);
-  };
-
-  // Unresolved / rejected items (derive from preview.rows)
-  const unresolved = [];
-  for (let i = 0; i < allRows.length; i++) {
-    const r = allRows[i];
-    if (!r || typeof r !== 'object') continue;
-
-    const act = String(r.action || r.resolution_status || r.status || '').toUpperCase();
-    if (!act) continue;
-
-    const unresolvedHere =
-      act.startsWith('REJECT_') ||
-      act === 'NO_CANDIDATE' ||
-      act === 'NO_CLIENT' ||
-      act === 'BAD_ROW';
-
-    if (!unresolvedHere) continue;
-
-    unresolved.push({ idx: i, row: r, act });
-  }
-
-  const unresolvedTableFullWidth = () => {
-    if (!unresolved.length) return '';
-
-    const rowsHtml = unresolved.map(({ idx, row, act }) => {
-      const staff = row.staff_name || row.staff_raw || row.staff_norm || '';
-      const unit  = row.ward || row.unit || row.hospital_or_trust || row.trust_raw || row.unit_raw || '';
-      const wd    = row.work_date || row.date_local || row.date || '';
-      const we    = row.week_ending_date || row.weekEndingDate || '';
-      const code  = row.incoming_code || row.grade_raw || row.assignment_code || row.assignment_grade_norm || '';
-      const reason = row.reason || row.reason_text || row.reason_code || '';
-
-      const actNice = statusTextNice(act);
-
-      const canAssignCand = (act === 'NO_CANDIDATE' || act === 'REJECT_NO_CANDIDATE');
-      const needsBandMap =
-        (act === 'REJECT_NO_CONTRACT' || act === 'REJECT_NO_CONTRACT_BAND_MISMATCH');
-
-      const btnCand = canAssignCand
-        ? `<button type="button" class="btn mini" data-act="hr-weekly-val-resolve-candidate" data-row-idx="${enc(String(idx))}">Assign candidate…</button>`
-        : '';
-
-      // ✅ Pass full context needed by candidate-specific band resolver modal
-      const btnBand = needsBandMap
-        ? `<button type="button"
-                   class="btn mini"
-                   data-act="hr-weekly-val-fix-band"
-                   data-incoming-code="${enc(String(code || '').trim())}"
-                   data-client-id="${enc(String(row.client_id || importClientId || '').trim())}"
-                   data-candidate-id="${enc(String(row.candidate_id || '').trim())}"
-                   data-work-date="${enc(String(wd || '').trim())}"
-                   data-week-ending-date="${enc(String(we || '').trim())}"
-                   data-import-id="${enc(impId)}">
-             Fix band mapping…
-           </button>`
-        : '';
-
-      const btns = (btnCand || btnBand)
-        ? `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;">${btnCand}${btnBand}</div>`
-        : `<span class="mini">—</span>`;
-
-      const statusPill = `<span class="pill pill-bad" style="white-space:normal;word-break:break-word;display:inline-block;">${enc(actNice)}</span>`;
-
-      return `
-        <tr data-row-idx="${enc(String(idx))}">
-          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(staff || '—')}</td>
-          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(unit || '—')}</td>
-          <td class="mini">${enc(niceYmd(wd) || wd || '—')}</td>
-          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(code || '—')}</td>
-          <td class="mini">${statusPill}</td>
-          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(String(reason || '').replace(/_/g,' '))}</td>
-          <td>${btns}</td>
-        </tr>
-      `;
-    }).join('');
-
-    return html(`
-      <div class="card" style="margin-top:10px;">
-        <div class="mini" style="margin-bottom:8px;">
-          Cannot validate yet — resolve these items then click <strong>Reclassify</strong>.
-        </div>
-
-        <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
-          <table class="grid" style="table-layout:auto; width:100%; min-width:1100px;">
-            <thead>
-              <tr>
-                <th style="width:180px;">Staff</th>
-                <th style="width:320px;">Unit / Site</th>
-                <th style="width:140px;">Date</th>
-                <th style="width:160px;">Grade / Code</th>
-                <th style="width:240px;">Status</th>
-                <th style="min-width:420px;">Reason</th>
-                <th style="width:260px;">Resolve</th>
-              </tr>
-            </thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        </div>
-
-        <div class="hint" style="margin-top:8px;">
-          Candidate mapping teaches the system which person a rota name refers to. Band mapping teaches which contracts/bands a Grade code should match.
-        </div>
-      </div>
-    `);
-  };
-
-  const groupsHtml = vg.length
-    ? vg.map((g) => {
-        const we = g?.week_ending_date || g?.weekEndingDate || null;
-        const candName = String(g?.candidate_name || g?.candidateName || '').trim();
-
-        const overall = g?.overall_status || g?.overallStatus || g?.status || 'UNKNOWN';
-        const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
-
-        const failureReasons = g?.failure_reasons || g?.failureReasons || [];
-
-        // Email controls (used for wiring only)
-        const tsid = g?.timesheet_id || g?.timesheetId || null;
-        const recip = String(g?.recipient_email || g?.recipientEmail || '').trim();
-        const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
-        const canEmail = (g?.can_email === true) || (g?.canEmail === true);
-        const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim();
-
-        const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
-
-        // ✅ Prefer comparisons[] from backend. Fallback to legacy days/pairings.
-        const comparisonsNew = normaliseComparisons(g?.comparisons || g?.comparison_rows || g?.comparisonRows || []);
-        const comparisonsFallback = (comparisonsNew.length === 0)
-          ? flattenComparisonsFromDays(g?.days || [])
-          : [];
-        const comps = comparisonsNew.length ? comparisonsNew : comparisonsFallback;
-
-        const compTable = (() => {
-          if (!comps.length) {
-            return html(`<div class="mini">No detailed comparisons returned for this candidate/week.</div>`);
-          }
-
-          const body = comps.map((c) => {
-            const isMatch = (c.match === true);
-            const icon = isMatch ? '✅' : '❌';
-
-            const tsTxt = `${c.timesheet_start || '—'} → ${c.timesheet_end || '—'} (break ${c.timesheet_break_mins == null ? '—' : c.timesheet_break_mins})`;
-            const hrTxt = `${c.healthroster_start || '—'} → ${c.healthroster_end || '—'} (break ${c.healthroster_break_mins == null ? '—' : c.healthroster_break_mins})`;
-
-            return html(`
-              <tr>
-                <td class="mini" style="width:80px; text-align:center;">${enc(icon)}</td>
-                <td class="mini" style="width:140px;">${enc(niceYmd(c.work_date) || c.work_date || '—')}</td>
-                <td class="mini" style="white-space:normal;word-break:break-word;">${enc(tsTxt)}</td>
-                <td class="mini" style="white-space:normal;word-break:break-word;">${enc(hrTxt)}</td>
-              </tr>
-            `);
-          }).join('');
-
-          return html(`
-            <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
-              <table class="grid" style="table-layout:auto; width:100%; min-width:900px;">
-                <thead>
-                  <tr>
-                    <th style="width:80px;">Match</th>
-                    <th style="width:140px;">Date</th>
-                    <th>Timesheet start/finish/break</th>
-                    <th>HealthRoster start/finish/break</th>
-                  </tr>
-                </thead>
-                <tbody>${body}</tbody>
-              </table>
-            </div>
-          `);
-        })();
-
-        // ✅ Email UI must only exist when mismatch exists
-        const emailBlock = (() => {
-          if (!hasMismatch) return '';
-
-          // If mismatch exists but can_email is false, show a short explanation (no checkbox)
-          if (!canEmail) {
-            const why =
-              !tsid ? 'Email unavailable (timesheet missing).' :
-              !String(recip || '').trim() ? 'Email unavailable (recipient email missing for this client).' :
-              !fp ? 'Email unavailable (issue fingerprint missing).' :
-              'Email unavailable.';
-            return html(`
-              <div class="mini" style="margin-top:10px;">
-                <span class="pill pill-warn" style="padding:2px 8px;">Email</span>
-                <span class="mini" style="margin-left:8px;">${enc(why)}</span>
-              </div>
-            `);
-          }
-
-          const k = keyFor(tsid, fp);
-          const checked = (k && selSet.has(k)) ? 'checked' : '';
-
-          const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
-
-          return html(`
-            <div class="mini" style="margin-top:10px;">
-              <label class="inline mini" style="gap:6px;">
-                <input type="checkbox"
-                       data-act="hr-weekly-val-email-toggle"
-                       data-timesheet-id="${enc(String(tsid || ''))}"
-                       data-issue-fingerprint="${enc(String(fp || ''))}"
-                       ${checked ? 'checked' : ''}/>
-                <span>${enc(label)}</span>
-              </label>
-              <span class="mini" style="margin-left:10px;">
-                Recipient: <span class="mono">${enc(recip || '—')}</span>
-                ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
-              </span>
-            </div>
-          `);
-        })();
-
-        return html(`
-          <details style="margin:8px 0;">
-            <summary style="cursor:pointer;">
-              <span class="mini">${statusPill}</span>
-              <span class="mini" style="margin-left:8px;">
-                ${enc(candName || 'Unknown candidate')}
-                ${we ? ` • W/E ${enc(niceYmd(we))}` : ''}
-                ${hasMismatch ? ` • ${enc('Mismatch')}` : ''}
-              </span>
-            </summary>
-
-            <div style="margin-top:8px; padding-left:10px;">
-              ${Array.isArray(failureReasons) && failureReasons.length
-                ? html(`
-                    <div class="mini" style="margin-bottom:6px;">Notes</div>
-                    <ul class="mini" style="margin:0; padding-left:18px;">
-                      ${failureReasons.filter(Boolean).map(r => html(`<li>${enc(String(r))}</li>`)).join('')}
-                    </ul>
-                  `)
-                : html(`<div class="mini" style="margin-bottom:6px;">No mismatch notes.</div>`)
-              }
-
-              <div style="margin-top:10px;">
-                ${compTable}
-              </div>
-
-              ${emailBlock}
-            </div>
-          </details>
-        `);
-      }).join('')
-    : html(`<div class="mini">No validation groups were returned by the preview.</div>`);
-
-  const headerTitle = (() => {
-    if (mode === 'MIXED') return 'HealthRoster hours check + apply actions';
-    return 'HealthRoster hours check';
-  })();
-
-  const headerBlurb =
-    'This screen shows mismatches and allows optional emails to Temporary Staffing with a copy of the candidate timesheet to request hours are amended.';
-
-  const finaliseLabel = (mode === 'MIXED')
-    ? 'Finalise (apply actions + emails)'
-    : 'Finalise validations';
-
-  return html(`
-    <div id="hrWeeklyValidationSummary" data-import-id="${enc(impId)}" data-mode="${enc(mode)}">
-      <div class="card">
-        <div class="row">
-          <label>${enc(headerTitle)}</label>
-          <div class="controls">
-            <div class="mini">
-              Import ID: <span class="mono">${enc(impId || '—')}</span><br/>
-              Validation groups: <span class="mono">${enc(String(vg.length))}</span>
-            </div>
-            <div class="hint" style="margin-top:8px;">
-              ${enc(headerBlurb)}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Groups</label>
-          <div class="controls">
-            ${groupsHtml}
-          </div>
-        </div>
-      </div>
-
-      ${unresolvedTableFullWidth()}
-
-      <div class="row" style="margin-top:10px;">
-        <label></label>
-        <div class="controls">
-          <button type="button" class="btn" data-act="hr-weekly-val-reclassify">Reclassify</button>
-          <button type="button" class="btn btn-primary" style="margin-left:8px;" data-act="hr-weekly-val-finalise">${enc(finaliseLabel)}</button>
-          <span class="mini" style="margin-left:8px;">
-            Reclassify refreshes validation after mapping changes. Finalise sends selected emails (and applies actions if mixed).
-          </span>
-        </div>
-      </div>
-    </div>
-  `);
-}
-
-function wireHrWeeklyValidationSummaryActions(type, importId) {
-  const T = String(type || '').toUpperCase();
-  const impId = String(importId || '').trim();
-  if (T !== 'HR_WEEKLY') return;
-  if (!impId) return;
-
-  // ✅ Resilient wiring: delegate off modal container so it survives re-renders.
-  // This function must NOT touch Mode-B wiring.
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('modalBody');
-      if (!root) return;
-
-      // De-dupe wiring per importId (delegated wiring can be attached once)
-      root.__hrWeeklyValSummaryWired = root.__hrWeeklyValSummaryWired || new Set();
-      const wiredKey = `hr-weekly-val-summary:${impId}`;
-      if (root.__hrWeeklyValSummaryWired.has(wiredKey)) return;
-      root.__hrWeeklyValSummaryWired.add(wiredKey);
-
-      const ensureUi = () => {
-        window.__weeklyImportUi = window.__weeklyImportUi || {};
-        window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
-
-        let ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
-
-        // Preferred: use existing initializer if available
-        if (!ui && typeof ensureWeeklyUiStore === 'function') {
-          try {
-            const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
-              ? window.__importSummaryState.HR_WEEKLY
-              : null;
-            ensureWeeklyUiStore('HR_WEEKLY', impId, p || {});
-          } catch {}
-          ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
-        }
-
-        // Absolute fallback
-        if (!ui || typeof ui !== 'object') {
-          ui = {
-            options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
-            actionSelection: new Set(),
-            emailSelection: new Set(),
-            filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
-            hydratedFlags: { didInitDefaultActionChecks: true }
-          };
-          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
-        }
-
-        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
-        if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
-
-        // HR_WEEKLY invariant
-        if (!ui.options || typeof ui.options !== 'object') ui.options = {};
-        ui.options.missingShiftsEnabled = true;
-
-        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
-        return ui;
-      };
-
-      const getPreview = () => {
-        const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
-          ? window.__importSummaryState.HR_WEEKLY
-          : null;
-        return (p && typeof p === 'object') ? p : {};
-      };
-
-      const getMode = (p) => {
-        const sum = (p && p.summary && typeof p.summary === 'object') ? p.summary : {};
-        const raw = (p && (p.mode_summary || p.modeSummary)) || sum.mode_summary || sum.modeSummary || '';
-        const ms = String(raw || '').trim().toUpperCase();
-        if (ms === 'MODE_A_ONLY' || ms === 'MODE_B_ONLY' || ms === 'MIXED') return ms;
-
-        // Safe fallback
-        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups.length : 0;
-        const ag = Array.isArray(p?.action_groups) ? p.action_groups.length : 0;
-        const acts = Array.isArray(p?.actions) ? p.actions.length : 0;
-        if (vg > 0 && (ag > 0 || acts > 0)) return 'MIXED';
-        if (vg > 0) return 'MODE_A_ONLY';
-        if (ag > 0 || acts > 0) return 'MODE_B_ONLY';
-        return 'MODE_A_ONLY';
-      };
-
-      const parseKey = (k) => {
-        const s = String(k || '');
-        const i = s.indexOf('|');
-        if (i <= 0) return null;
-        const ts = s.slice(0, i).trim();
-        const fp = s.slice(i + 1).trim();
-        if (!ts || !fp) return null;
-        return { ts, fp };
-      };
-
-      const buildEmailActions = () => {
-        const ui = ensureUi();
-        const sel = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
-        const out = [];
-        for (const k of sel) {
-          const it = parseKey(k);
-          if (!it) continue;
-          out.push({ timesheet_id: it.ts, issue_fingerprint: it.fp });
-        }
-        return out;
-      };
-
-      // Delegated change handler (survives re-render)
-      root.addEventListener('change', (ev) => {
-        const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
-        if (!container) return;
-
-        const containerImp = String(container.getAttribute('data-import-id') || '').trim();
-        if (containerImp && containerImp !== impId) return;
-
-        const cb = ev.target && ev.target.closest
-          ? ev.target.closest('input[data-act="hr-weekly-val-email-toggle"]')
-          : null;
-        if (!cb) return;
-
-        const tsid = String(cb.getAttribute('data-timesheet-id') || '').trim();
-        const fp   = String(cb.getAttribute('data-issue-fingerprint') || '').trim();
-        if (!tsid || !fp) return;
-
-        const ui = ensureUi();
-        const key = `${tsid}|${fp}`;
-        if (cb.checked) ui.emailSelection.add(key);
-        else ui.emailSelection.delete(key);
-
-        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
-      });
-
-      // Delegated click handler (survives re-render)
-      root.addEventListener('click', async (ev) => {
-        const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
-        if (!container) return;
-
-        const containerImp = String(container.getAttribute('data-import-id') || '').trim();
-        if (containerImp && containerImp !== impId) return;
-
-        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
-        if (!btn) return;
-
-        const act = String(btn.getAttribute('data-act') || '').trim();
-
-        if (act === 'hr-weekly-val-resolve-candidate') {
-          try {
-            const idxRaw = btn.getAttribute('data-row-idx');
-            const idx = Number(idxRaw);
-            if (!Number.isFinite(idx) || idx < 0) throw new Error('Invalid row index for Assign candidate.');
-            if (typeof openWeeklyCandidateResolveModal !== 'function') throw new Error('openWeeklyCandidateResolveModal is not defined.');
-            await openWeeklyCandidateResolveModal('HR_WEEKLY', impId, idx);
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] resolve-candidate failed', e);
-            alert(e?.message || 'Assign candidate failed.');
-          }
-          return;
-        }
-
-        if (act === 'hr-weekly-val-fix-band') {
-          // ✅ Candidate-specific band resolver (NOT the global mappings modal)
-          try {
-            const incoming_code = String(btn.getAttribute('data-incoming-code') || '').trim();
-            const client_id_raw = String(btn.getAttribute('data-client-id') || '').trim();
-            const cand_id_raw   = String(btn.getAttribute('data-candidate-id') || '').trim();
-            const work_date_raw = String(btn.getAttribute('data-work-date') || '').trim();
-            const we_raw        = String(btn.getAttribute('data-week-ending-date') || '').trim();
-
-            if (!incoming_code) throw new Error('Missing incoming code for band resolver.');
-            if (!client_id_raw) throw new Error('Missing client_id for band resolver.');
-
-            if (typeof openHrWeeklyBandResolveModal !== 'function') {
-              throw new Error('openHrWeeklyBandResolveModal is not defined.');
-            }
-
-            await openHrWeeklyBandResolveModal({
-              import_id: impId,
-              client_id: client_id_raw || null,
-              candidate_id: cand_id_raw || null,
-              incoming_code: incoming_code,
-              work_date: work_date_raw || null,
-              week_ending_date: we_raw || null
-            });
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] fix-band failed', e);
-            alert(e?.message || 'Fix band mapping failed.');
-          }
-          return;
-        }
-
-        if (act === 'hr-weekly-val-reclassify') {
-          try {
-            if (typeof refreshWeeklyImportSummary !== 'function') {
-              throw new Error('refreshWeeklyImportSummary is not defined.');
-            }
-            await refreshWeeklyImportSummary('HR_WEEKLY', impId);
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] reclassify failed', e);
-            alert(e?.message || 'Reclassify failed.');
-          }
-          return;
-        }
-
-        if (act === 'hr-weekly-val-finalise') {
-          try {
-            const ok = window.confirm('Are you sure you want to finalise now?');
-            if (!ok) return;
-
-            if (typeof applyWeeklyImportTransactional !== 'function') {
-              throw new Error('applyWeeklyImportTransactional is not defined.');
-            }
-
-            const ui = ensureUi();
-            const p = getPreview();
-            const mode = getMode(p);
-
-            const auto_apply_action_ids =
-              Array.isArray(p?.auto_apply_action_ids) ? p.auto_apply_action_ids :
-              Array.isArray(p?.autoApplyActionIds) ? p.autoApplyActionIds :
-              (p?.summary && Array.isArray(p.summary.auto_apply_action_ids)) ? p.summary.auto_apply_action_ids :
-              [];
-
-            const email_actions = buildEmailActions();
-
-            let selected_action_ids = [];
-            let decisions = {};
-
-            if (mode === 'MIXED') {
-              const seen = new Set();
-              const out = [];
-
-              for (const v of Array.from(ui.actionSelection || [])) {
-                const s = String(v || '').trim();
-                if (!s || seen.has(s)) continue;
-                seen.add(s);
-                out.push(s);
-              }
-              for (const v of (auto_apply_action_ids || [])) {
-                const s = String(v || '').trim();
-                if (!s || seen.has(s)) continue;
-                seen.add(s);
-                out.push(s);
-              }
-              selected_action_ids = out;
-
-              if (typeof getOrInitWeeklyImportDecisionsStore === 'function') {
-                try {
-                  const ds = getOrInitWeeklyImportDecisionsStore('HR_WEEKLY', impId, p);
-                  if (ds && typeof ds.serialize === 'function') {
-                    decisions = ds.serialize(p) || {};
-                  }
-                } catch {
-                  decisions = {};
-                }
-              }
-            } else {
-              selected_action_ids = [];
-              decisions = {};
-            }
-
-            const result = await applyWeeklyImportTransactional('HR_WEEKLY', impId, {
-              selected_action_ids,
-              decisions,
-              email_actions
-            }) || {};
-
-            alert(`Import ${result.import_id || impId} has been finalised.`);
-            if (typeof refreshWeeklyImportSummary === 'function') {
-              await refreshWeeklyImportSummary('HR_WEEKLY', impId);
-            }
-          } catch (e) {
-            console.error('[IMPORTS][HR_WEEKLY][VAL] finalise failed', e);
-            alert(e?.message || 'Finalise failed.');
-          }
-        }
-      });
-    } catch (e) {
-      console.warn('[IMPORTS][HR_WEEKLY][VAL] wiring failed (non-fatal)', e);
-    }
-  }, 0);
-}
 
 
 async function openHrRotaAssignRoleModal(importId, rowIndex) {
