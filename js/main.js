@@ -7805,17 +7805,23 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
       (p.client_id || sum.client_id || p?.truth_meta?.client_id || sum?.truth_meta?.client_id || '') || ''
     ).trim();
 
-  // UI store (emailSelection + invalidationSelection) used for checkbox state
+  // UI store (emailSelection + invalidationSelection + altEmail) used for checkbox/input state
   const ui = (window.__weeklyImportUi &&
               window.__weeklyImportUi.HR_WEEKLY &&
               window.__weeklyImportUi.HR_WEEKLY[impId] &&
               (window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Set
-                || window.__weeklyImportUi.HR_WEEKLY[impId].invalidationSelection instanceof Map))
+                || window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Map
+                || window.__weeklyImportUi.HR_WEEKLY[impId].invalidationSelection instanceof Map
+                || window.__weeklyImportUi.HR_WEEKLY[impId].altEmailByKey instanceof Map))
     ? window.__weeklyImportUi.HR_WEEKLY[impId]
     : null;
 
-  const selSet = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+  // Back-compat:
+  // - emailSelection may be Set (historical: presence=checked)
+  // - OR Map (new: key -> boolean, where false means explicitly unticked)
+  const selStore = (ui && (ui.emailSelection instanceof Set || ui.emailSelection instanceof Map)) ? ui.emailSelection : null;
   const invMap = (ui && ui.invalidationSelection instanceof Map) ? ui.invalidationSelection : new Map();
+  const altEmailMap = (ui && ui.altEmailByKey instanceof Map) ? ui.altEmailByKey : new Map();
 
   const keyFor = (tsid, fp) => {
     const a = String(tsid || '').trim();
@@ -7865,15 +7871,15 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
       const ymd = String(d?.work_date || d?.ymd || d?.date_local || d?.date || '').trim();
       const pairings = Array.isArray(d?.pairings) ? d.pairings : [];
       for (const p0 of pairings) {
-        const p = p0 || {};
-        const hr = p?.hr || p?.hr_entry || p?.hrEntry || null;
-        const wk = p?.worker || p?.worker_entry || p?.workerEntry || null;
+        const p2 = p0 || {};
+        const hr = p2?.hr || p2?.hr_entry || p2?.hrEntry || null;
+        const wk = p2?.worker || p2?.worker_entry || p2?.workerEntry || null;
 
-        const sd = p?.start_diff_mins ?? p?.startDiffMins ?? null;
-        const ed = p?.end_diff_mins ?? p?.endDiffMins ?? null;
-        const bd = p?.break_diff_mins ?? p?.breakDiffMins ?? null;
+        const sd = p2?.start_diff_mins ?? p2?.startDiffMins ?? null;
+        const ed = p2?.end_diff_mins ?? p2?.endDiffMins ?? null;
+        const bd = p2?.break_diff_mins ?? p2?.breakDiffMins ?? null;
 
-        const matchStatus = String(p?.match_status || p?.matchStatus || '').trim().toUpperCase();
+        const matchStatus = String(p2?.match_status || p2?.matchStatus || '').trim().toUpperCase();
         const diffsAllZero =
           (sd == null || Number(sd) === 0) &&
           (ed == null || Number(ed) === 0) &&
@@ -8004,7 +8010,6 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
         ? `<button type="button" class="btn mini" data-act="hr-weekly-val-resolve-candidate" data-row-idx="${enc(String(idx))}">Assign candidate…</button>`
         : '';
 
-      // ✅ Pass full context needed by candidate-specific band resolver modal
       const btnBand = needsBandMap
         ? `<button type="button"
                    class="btn mini"
@@ -8068,6 +8073,36 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
     `);
   };
 
+  // Helper: read explicit selection state (supports Set + Map)
+  // Returns: true | false | null (null => not explicitly chosen yet)
+  const getSelectionState = (k) => {
+    if (!k) return null;
+    if (selStore instanceof Map) {
+      if (selStore.has(k)) return !!selStore.get(k);
+      return null;
+    }
+    if (selStore instanceof Set) {
+      // Set cannot represent explicit false; treat missing as null (so we can default)
+      return selStore.has(k) ? true : null;
+    }
+    return null;
+  };
+
+  const getAltEmailValue = (k) => {
+    if (!k) return '';
+    if (altEmailMap instanceof Map && altEmailMap.has(k)) {
+      return String(altEmailMap.get(k) || '').trim();
+    }
+    // Back-compat: some UIs may store this on ui.altEmail (plain object)
+    try {
+      const obj = (ui && ui.altEmail && typeof ui.altEmail === 'object') ? ui.altEmail : null;
+      if (obj && Object.prototype.hasOwnProperty.call(obj, k)) {
+        return String(obj[k] || '').trim();
+      }
+    } catch {}
+    return '';
+  };
+
   const groupsHtml = vg.length
     ? vg.map((g) => {
         const we = g?.week_ending_date || g?.weekEndingDate || null;
@@ -8087,7 +8122,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
         const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
 
-        // ✅ Prefer comparisons[] from backend. Fallback to legacy days/pairings.
+        // Prefer comparisons[] from backend. Fallback to legacy days/pairings.
         const comparisonsNew = normaliseComparisons(g?.comparisons || g?.comparison_rows || g?.comparisonRows || []);
         const comparisonsFallback = (comparisonsNew.length === 0)
           ? flattenComparisonsFromDays(g?.days || [])
@@ -8165,55 +8200,91 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
           `);
         })();
 
-        // ✅ Email UI must only exist when mismatch exists
+        // ✅ Updated Email UI:
+        // - Always show “Alternative Email” textbox for mismatches (even if can_email=false).
+        // - Checkbox is shown whenever we have tsid + fingerprint (selection-driven). It may be ticked even if default recipient missing;
+        //   Finalise/apply will rely on either default recipient or alt email.
         const emailBlock = (() => {
           if (!hasMismatch) return '';
 
-          // If mismatch exists but can_email is false, show a short explanation (no checkbox)
-          if (!canEmail) {
-            const why =
-              !tsid ? 'Email unavailable (timesheet missing).' :
-              !String(recip || '').trim() ? 'Email unavailable (recipient email missing for this client).' :
-              !fp ? 'Email unavailable (issue fingerprint missing).' :
-              'Email unavailable.';
-            return html(`
-              <div class="mini" style="margin-top:10px;">
-                <span class="pill pill-warn" style="padding:2px 8px;">Email</span>
-                <span class="mini" style="margin-left:8px;">${enc(why)}</span>
-              </div>
-            `);
-          }
+          const hasKeyInputs = !!(String(tsid || '').trim() && String(fp || '').trim());
+          const k = hasKeyInputs ? keyFor(tsid, fp) : '';
 
-          const k = keyFor(tsid, fp);
+          const altVal = (k ? getAltEmailValue(k) : '');
 
-          // ✅ Default selection rules:
-          // - If user explicitly toggled this key before: use that (selSet.has(k))
-          // - Else (no explicit user toggle):
-          //     - if emailedAlready=true (re-email) => default UNCHECKED
+          // Default selection rules:
+          // - If user explicitly chose (Map true/false or Set has):
+          //     - true => checked
+          //     - false => unchecked
+          // - Else (no explicit user toggle yet):
+          //     - if emailedAlready=true => default UNCHECKED
           //     - else => default CHECKED
+          const explicit = k ? getSelectionState(k) : null;
           const checked = (() => {
             if (!k) return '';
-            if (selSet.has(k)) return 'checked';                // explicit user selection
-            if (emailedAlready) return '';                      // re-email defaults unticked
-            return 'checked';                                   // first-time email defaults ticked
+            if (explicit === true) return 'checked';
+            if (explicit === false) return '';
+            if (emailedAlready) return '';
+            return 'checked';
           })();
 
           const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
 
+          // Explainability: when canEmail=false, we still allow alternative email entry,
+          // but the default recipient may be missing/unusable.
+          const why =
+            !tsid ? 'Email unavailable (timesheet missing).' :
+            !String(fp || '').trim() ? 'Email unavailable (issue fingerprint missing).' :
+            (!String(recip || '').trim() ? 'Default recipient missing (enter Alternative Email to send).' : 'Email available.');
+
+          const showWhy = (!canEmail || !String(recip || '').trim());
+
+          const recipientDisplay = String(recip || '').trim() ? recip : '—';
+
+          const altId = `hrAltEmail_${impId}_${String(tsid || '').slice(0,8)}_${Math.random().toString(36).slice(2)}`;
+
+          // Note: handler wiring is elsewhere; this renderer emits stable data attrs for collection:
+          // - checkbox: data-act="hr-weekly-val-email-toggle"
+          // - alt input: data-act="hr-weekly-val-alt-email"
           return html(`
             <div class="mini" style="margin-top:10px;">
-              <label class="inline mini" style="gap:6px;">
-                <input type="checkbox"
-                       data-act="hr-weekly-val-email-toggle"
-                       data-timesheet-id="${enc(String(tsid || ''))}"
-                       data-issue-fingerprint="${enc(String(fp || ''))}"
-                       ${checked}/>
-                <span>${enc(label)}</span>
-              </label>
-              <span class="mini" style="margin-left:10px;">
-                Recipient: <span class="mono">${enc(recip || '—')}</span>
-                ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
-              </span>
+              <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+                <label class="inline mini" style="gap:6px; margin-right:6px;">
+                  <input type="checkbox"
+                         data-act="hr-weekly-val-email-toggle"
+                         data-timesheet-id="${enc(String(tsid || ''))}"
+                         data-issue-fingerprint="${enc(String(fp || ''))}"
+                         ${checked}
+                         ${hasKeyInputs ? '' : 'disabled'}/>
+                  <span>${enc(label)}</span>
+                </label>
+
+                <span class="mini" style="margin-left:0;">
+                  Recipient: <span class="mono">${enc(recipientDisplay)}</span>
+                  ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
+                </span>
+
+                <span class="mini" style="margin-left:0;">
+                  &nbsp;•&nbsp; Alternative Email:
+                  <input
+                    id="${enc(altId)}"
+                    type="email"
+                    class="input"
+                    placeholder="name@example.com"
+                    value="${enc(altVal)}"
+                    style="min-width:260px; margin-left:6px;"
+                    data-act="hr-weekly-val-alt-email"
+                    data-timesheet-id="${enc(String(tsid || ''))}"
+                    data-issue-fingerprint="${enc(String(fp || ''))}"
+                  />
+                </span>
+              </div>
+
+              ${showWhy ? html(`
+                <div class="mini" style="margin-top:6px; opacity:.85;">
+                  ${enc(why)}
+                </div>
+              `) : ''}
             </div>
           `);
         })();
@@ -46023,8 +46094,16 @@ await refreshFooter();
               try { await renderAll(); } catch {}
             }
 
-            // Close the timesheet modal after the user confirms OK
-            try { byId('btnCloseModal').click(); } catch {}
+    // Close the timesheet modal after the user confirms OK
+// ✅ Do NOT rely on btnCloseModal.click() here (token-guarded, can no-op after utility child modals).
+// ✅ Hard-close the modal stack (timesheet no longer exists).
+try {
+  discardAllModalsAndState();
+} catch {
+  // fallback: attempt normal close
+  try { byId('btnCloseModal')?.click(); } catch {}
+}
+
 
 
           } catch (e) {
