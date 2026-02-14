@@ -66690,7 +66690,6 @@ function renderTimesheetRelatedTab(ctx) {
   `;
 }
 
-
 function renderTimesheetEvidenceTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE]');
   const { row, details, state } = normaliseTimesheetCtx(ctx);
@@ -66755,12 +66754,31 @@ function renderTimesheetEvidenceTab(ctx) {
     return false;
   };
 
-  // ✅ Prefer display_name so "QR Timesheet (Unsigned/Signed)" and "Electronic submission evidence" show clearly
+  // ✅ Evidence "Type" (uses display_name first; falls back to kind)
   const typeLabel = (ev) => {
     const dn = String(ev?.display_name || '').trim();
     if (dn) return dn;
     const k = String(ev?.kind || '').trim();
     return k ? k : 'Unknown';
+  };
+
+  // ✅ NEW: Filename column (prefer explicit filename; fall back to display_name as legacy)
+  const filenameLabel = (ev) => {
+    const fn = String(ev?.filename || '').trim();
+    if (fn) return fn;
+
+    // Legacy fallback: many existing rows used display_name as filename
+    const dn = String(ev?.display_name || '').trim();
+    if (dn) return dn;
+
+    // Last resort: storage_key basename
+    const sk = String(ev?.storage_key || ev?.download_storage_key || '').trim();
+    if (sk) {
+      const parts = sk.split('/');
+      const base = parts[parts.length - 1] || '';
+      return base || '—';
+    }
+    return '—';
   };
 
   // "Uploaded by" comes from backend enrichment (preferred), otherwise falls back
@@ -66794,6 +66812,7 @@ function renderTimesheetEvidenceTab(ctx) {
         const uploadedDate = escapeHtml(formatEvidenceDate(dt));
         const uploadedTime = escapeHtml(formatEvidenceTime(dt));
 
+        const fileName = escapeHtml(filenameLabel(ev));
         const type = escapeHtml(typeLabel(ev));
         const uploadedBy = escapeHtml(uploadedByLabel(ev));
 
@@ -66832,6 +66851,7 @@ function renderTimesheetEvidenceTab(ctx) {
         return `
           <tr data-evidence-id="${escapeHtml(id)}"
               class="${system ? 'system-evidence' : ''}">
+            <td>${fileName}</td>
             <td>${type}</td>
             <td>${uploadedDate}</td>
             <td>${uploadedTime}</td>
@@ -66846,7 +66866,7 @@ function renderTimesheetEvidenceTab(ctx) {
       }).join('')
     : `
       <tr>
-        <td colspan="5" class="mini" style="opacity:.85;">
+        <td colspan="6" class="mini" style="opacity:.85;">
           No evidence uploaded yet. Drag a file anywhere inside this tab to upload.
         </td>
       </tr>
@@ -66857,7 +66877,8 @@ function renderTimesheetEvidenceTab(ctx) {
       <table class="ts-evidence-table" style="width:100%; border-collapse:collapse;">
         <thead>
           <tr>
-            <th style="text-align:left;">Evidence Type</th>
+            <th style="text-align:left;">Filename</th>
+            <th style="text-align:left;">Type</th>
             <th style="text-align:left;">Date Uploaded</th>
             <th style="text-align:left;">Time</th>
             <th style="text-align:left;">Uploaded by</th>
