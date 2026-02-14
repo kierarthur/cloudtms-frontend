@@ -66931,6 +66931,26 @@ async function openTimesheetEvidenceUploadDialog(file) {
   GC('openTimesheetEvidenceUploadDialog');
 
   const mc = window.modalCtx || {};
+
+  // ✅ NEW: planned-week guard (contract_weeks context => no real timesheet yet)
+  // If the modal is showing a planned contract_week (no timesheet_id), block evidence upload.
+  const hasRealTimesheetId =
+    !!(
+      (mc.timesheetDetails && mc.timesheetDetails.timesheet && mc.timesheetDetails.timesheet.timesheet_id) ||
+      mc.data?.timesheet_id
+    );
+
+  const hasContractWeekContext =
+    !!(
+      mc.timesheetMeta?.isPlannedWeek ||
+      (!hasRealTimesheetId && (mc.data?.contract_week_id || mc.data?.id))
+    );
+
+  if (!hasRealTimesheetId && hasContractWeekContext) {
+    GE();
+    throw new Error('You need to process this timesheet before you can add evidence to this timesheet');
+  }
+
   const tsId =
     mc.data?.timesheet_id ||
     mc.data?.id ||
