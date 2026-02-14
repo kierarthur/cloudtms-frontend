@@ -2123,223 +2123,6 @@ async function postWeeklyResolveMappings(importId, type, payload) {
 }
 
 
-async function refreshWeeklyImportSummary(type, importId) {
-  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
-  const L   = (...a) => { if (LOG) console.log('[IMPORTS][WEEKLY][REFRESH]', ...a); };
-
-  try {
-    if (!type || !importId) {
-      throw new Error('Missing type or importId for refreshWeeklyImportSummary');
-    }
-
-    const t = String(type || '').toUpperCase();
-    let url;
-    if (t === 'NHSP') {
-      url = `/api/nhsp/${encodeURIComponent(importId)}/preview`;
-    } else if (t === 'HR_WEEKLY') {
-      url = `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`;
-    } else {
-      throw new Error(`Unsupported weekly import type: ${t}`);
-    }
-
-    if (typeof authFetch !== 'function' || typeof API !== 'function') {
-      throw new Error('authFetch/API helper missing in refreshWeeklyImportSummary');
-    }
-
-    L('fetching preview', { type: t, importId, url: API(url) });
-    const res  = await authFetch(API(url));
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(text || `Weekly import preview refresh failed (${res.status})`);
-    }
-
-    let preview;
-    try { preview = text ? JSON.parse(text) : {}; } catch { preview = {}; }
-
-    // ─────────────────────────────────────────────────────────────
-    // ✅ NEW: Reconcile weekly UI state BEFORE rendering
-    // - keep options + selections stable
-    // - drop selections that no longer exist
-    // - ensure hidden MISSING_FROM_IMPORT cancellations never stay selected
-    //   (except when required to satisfy Policy A for a selected new shift key)
-    //   IMPORTANT: "selected new shift" includes auto-applied NEW shifts
-    //   via preview.auto_apply_action_ids (even though user never ticks them).
-    // ─────────────────────────────────────────────────────────────
-    try {
-      const impId = String(importId);
-
-      window.__weeklyImportUi = window.__weeklyImportUi || {};
-      window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
-
-      const ui = window.__weeklyImportUi[t][impId] || null;
-      const acts = Array.isArray(preview?.actions) ? preview.actions : [];
-
-      const autoApplyIds = (() => {
-        const raw =
-          preview?.auto_apply_action_ids ??
-          preview?.autoApplyActionIds ??
-          (preview?.summary && (preview.summary.auto_apply_action_ids ?? preview.summary.autoApplyActionIds)) ??
-          null;
-
-        const arr = Array.isArray(raw) ? raw : [];
-        const out = [];
-        const seen = new Set();
-        for (const v of arr) {
-          const s = String(v || '').trim();
-          if (!s) continue;
-          if (seen.has(s)) continue;
-          seen.add(s);
-          out.push(s);
-        }
-        return out;
-      })();
-
-      const asYmd = (v) => {
-        if (!v) return null;
-        if (typeof v === 'string') {
-          const s = v.trim();
-          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-          if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-        }
-        try {
-          const d = new Date(v);
-          if (Number.isNaN(d.getTime())) return null;
-          const yyyy = d.getUTCFullYear();
-          const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
-          const dd   = String(d.getUTCDate()).padStart(2, '0');
-          return `${yyyy}-${mm}-${dd}`;
-        } catch {
-          return null;
-        }
-      };
-
-      const actionIdOf = (a) => {
-        const id = a?.action_id ?? a?.actionId ?? null;
-        return id == null ? null : String(id).trim();
-      };
-
-      const replacementKeyOf = (a) => {
-        const rk = a?.replacement_day_key ?? a?.replacementDayKey ?? null;
-        if (rk != null && String(rk).trim()) return String(rk).trim();
-        const cid = a?.candidate_id ?? a?.candidateId ?? null;
-        const cli = a?.client_id ?? a?.clientId ?? null;
-        const wd  = asYmd(a?.work_date ?? a?.workDate ?? a?.date_local ?? a?.date ?? null);
-        if (cid && cli && wd) return `${String(cid)}|${String(cli)}|${String(wd)}`;
-        return null;
-      };
-
-      const isMissingFromImportCancel = (a) => {
-        const reason = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
-        if (reason !== 'MISSING_FROM_IMPORT') return false;
-
-        const id = String(actionIdOf(a) || '').toUpperCase();
-        const isCancel =
-          (a?.is_cancellation === true) ||
-          (a?.isCancellation === true) ||
-          (String(a?.action_kind || a?.actionKind || '').toUpperCase().includes('CANCEL')) ||
-          id.startsWith('CANCEL:');
-
-        return !!isCancel;
-      };
-
-      const inYmdRange = (ymd, fromYmd, toYmd) => {
-        const d = asYmd(ymd);
-        const f = asYmd(fromYmd);
-        const t2 = asYmd(toYmd);
-        if (!d) return false;
-        if (f && d < f) return false;
-        if (t2 && d > t2) return false;
-        return true;
-      };
-
-      // Only reconcile if store exists (we must not create/reset it here).
-      if (ui && (ui.actionSelection instanceof Set)) {
-        const opt = (ui.options && typeof ui.options === 'object')
-          ? ui.options
-          : { missingShiftsEnabled: false, dateFrom: null, dateTo: null };
-
-        const missingEnabled = (opt.missingShiftsEnabled === true);
-
-        // Current action lookup by id
-        const byId = new Map();
-        for (const a of acts) {
-          const id = actionIdOf(a);
-          if (!id) continue;
-          byId.set(id, a);
-        }
-
-        // Selection set used for Policy A protection:
-        // user ticks + auto-applied NEW shifts
-        const selectedAll = new Set([
-          ...Array.from(ui.actionSelection),
-          ...autoApplyIds
-        ]);
-
-        // replacement_day_keys that have a selected new shift
-        const selectedNewShiftKeys = new Set();
-        for (const a of acts) {
-          const id = actionIdOf(a);
-          if (!id) continue;
-          if (!selectedAll.has(id)) continue;
-
-          const isNew = (a?.is_new_shift === true || a?.isNewShift === true);
-          if (!isNew) continue;
-
-          const rk = replacementKeyOf(a);
-          if (rk) selectedNewShiftKeys.add(rk);
-        }
-
-        // Reconcile:
-        // - remove selections that no longer exist
-        // - remove hidden missing-from-import cancels unless protected by Policy A (selected new shift day)
-        for (const sel of Array.from(ui.actionSelection)) {
-          const a = byId.get(String(sel)) || null;
-
-          // Selection no longer exists in new preview
-          if (!a) {
-            ui.actionSelection.delete(sel);
-            continue;
-          }
-
-          // Missing-from-import cancels: keep only if visible OR Policy-A-protected
-          if (isMissingFromImportCancel(a)) {
-            const rk = replacementKeyOf(a);
-            const protectedByPolicyA = !!(rk && selectedNewShiftKeys.has(rk));
-
-            if (!protectedByPolicyA) {
-              if (!missingEnabled) {
-                ui.actionSelection.delete(sel);
-                continue;
-              }
-              const wd = asYmd(a?.work_date ?? a?.workDate ?? a?.date_local ?? a?.date ?? null);
-              if (!inYmdRange(wd, opt.dateFrom, opt.dateTo)) {
-                ui.actionSelection.delete(sel);
-                continue;
-              }
-            }
-          }
-        }
-
-        // Write back (no reset)
-        window.__weeklyImportUi[t][impId] = ui;
-      }
-    } catch (e) {
-      // Non-fatal; renderImportSummaryModal also re-reconciles defensively.
-      L('pre-render reconcile failed (non-fatal)', { err: e?.message || String(e) });
-    }
-
-    // IMPORTANT: renderImportSummaryModal will normalize + store canonical preview.
-    if (typeof renderImportSummaryModal === 'function') {
-      renderImportSummaryModal(t, preview);
-    } else {
-      throw new Error('renderImportSummaryModal is not defined');
-    }
-  } catch (e) {
-    console.error('[IMPORTS][WEEKLY][REFRESH] failed', e);
-    const msg = e?.message || 'Failed to refresh weekly import summary.';
-    if (window.__toast) window.__toast(msg); else alert(msg);
-  }
-}
 
 
 // ─────────────────────────────────────────────────────────────
@@ -7758,7 +7541,6 @@ function buildSummaryFilterQSForIdList(section, filters){
 
   return sp.toString();
 }
-
 function renderHrWeeklyValidationSummary(type, importId, preview) {
   const T = String(type || '').toUpperCase();
   const impId = (importId != null) ? String(importId) : '';
@@ -7805,7 +7587,7 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
       (p.client_id || sum.client_id || p?.truth_meta?.client_id || sum?.truth_meta?.client_id || '') || ''
     ).trim();
 
-  // UI store (emailSelection + invalidationSelection + altEmail) used for checkbox/input state
+  // UI store (emailSelection + invalidationSelection + altEmailByKey) used for checkbox/input state
   const ui = (window.__weeklyImportUi &&
               window.__weeklyImportUi.HR_WEEKLY &&
               window.__weeklyImportUi.HR_WEEKLY[impId] &&
@@ -8200,10 +7982,12 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
           `);
         })();
 
-        // ✅ Updated Email UI:
-        // - Always show “Alternative Email” textbox for mismatches (even if can_email=false).
-        // - Checkbox is shown whenever we have tsid + fingerprint (selection-driven). It may be ticked even if default recipient missing;
-        //   Finalise/apply will rely on either default recipient or alt email.
+        // Email block:
+        // - Always show Alternative Email textbox when mismatch exists
+        // - Checkbox is selection-driven and defaults:
+        //     - first-time email: checked
+        //     - re-email: unchecked
+        //   but explicit user toggle overrides both
         const emailBlock = (() => {
           if (!hasMismatch) return '';
 
@@ -8212,14 +7996,8 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
           const altVal = (k ? getAltEmailValue(k) : '');
 
-          // Default selection rules:
-          // - If user explicitly chose (Map true/false or Set has):
-          //     - true => checked
-          //     - false => unchecked
-          // - Else (no explicit user toggle yet):
-          //     - if emailedAlready=true => default UNCHECKED
-          //     - else => default CHECKED
           const explicit = k ? getSelectionState(k) : null;
+
           const checked = (() => {
             if (!k) return '';
             if (explicit === true) return 'checked';
@@ -8230,22 +8008,21 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
 
           const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
 
-          // Explainability: when canEmail=false, we still allow alternative email entry,
-          // but the default recipient may be missing/unusable.
+          const recipientDisplay = String(recip || '').trim() ? recip : '—';
+
+          // Explainability: when can_email=false OR default recipient missing, alt email is required to send.
+          const needsAlt =
+            (canEmail !== true) || (!String(recip || '').trim());
+
           const why =
             !tsid ? 'Email unavailable (timesheet missing).' :
             !String(fp || '').trim() ? 'Email unavailable (issue fingerprint missing).' :
-            (!String(recip || '').trim() ? 'Default recipient missing (enter Alternative Email to send).' : 'Email available.');
+            (needsAlt ? 'Default recipient not available; enter Alternative Email to send.' : 'Email available.');
 
-          const showWhy = (!canEmail || !String(recip || '').trim());
-
-          const recipientDisplay = String(recip || '').trim() ? recip : '—';
+          const showWhy = !!needsAlt;
 
           const altId = `hrAltEmail_${impId}_${String(tsid || '').slice(0,8)}_${Math.random().toString(36).slice(2)}`;
 
-          // Note: handler wiring is elsewhere; this renderer emits stable data attrs for collection:
-          // - checkbox: data-act="hr-weekly-val-email-toggle"
-          // - alt input: data-act="hr-weekly-val-alt-email"
           return html(`
             <div class="mini" style="margin-top:10px;">
               <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
@@ -8376,6 +8153,167 @@ function renderHrWeeklyValidationSummary(type, importId, preview) {
   `);
 }
 
+function ensureWeeklyUiStore(type, importId, previewState) {
+  const T = String(type || '').trim().toUpperCase();
+  const impId = String(importId || '').trim();
+  const p = (previewState && typeof previewState === 'object' && !Array.isArray(previewState)) ? previewState : {};
+
+  // Be safe in the browser: never hard-throw in UI init paths
+  if (!impId) {
+    console.warn('ensureWeeklyUiStore: importId is required');
+    return null;
+  }
+  if (T !== 'HR_WEEKLY' && T !== 'NHSP') {
+    console.warn(`ensureWeeklyUiStore: unsupported type ${T}`);
+    return null;
+  }
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    }
+    try {
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return null;
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      return null;
+    }
+  };
+
+  // Root stores
+  window.__weeklyImportUi = window.__weeklyImportUi || {};
+  window.__weeklyImportUi[T] = window.__weeklyImportUi[T] || {};
+
+  // If already exists, normalize missing fields (DO NOT clobber existing object)
+  let ui = window.__weeklyImportUi[T][impId];
+  if (!ui || typeof ui !== 'object' || Array.isArray(ui)) {
+    ui = {};
+    window.__weeklyImportUi[T][impId] = ui;
+  }
+
+  // Helpers
+  const ensureSet = (v) => (v instanceof Set ? v : new Set());
+  const ensureMap = (v) => (v instanceof Map ? v : new Map());
+
+  // Derive forced date range: file min/max first, then actions fallback (rare)
+  const sum = (p.summary && typeof p.summary === 'object' && !Array.isArray(p.summary)) ? p.summary : {};
+  const truth =
+    (p.truth_meta && typeof p.truth_meta === 'object' && !Array.isArray(p.truth_meta)) ? p.truth_meta :
+    (sum.truth_meta && typeof sum.truth_meta === 'object' && !Array.isArray(sum.truth_meta)) ? sum.truth_meta :
+    null;
+
+  const fileMin = asYmd(truth?.file_date_min ?? truth?.fileDateMin ?? null);
+  const fileMax = asYmd(truth?.file_date_max ?? truth?.fileDateMax ?? null);
+
+  const actions = Array.isArray(p.actions) ? p.actions : (Array.isArray(sum.actions) ? sum.actions : []);
+  let actMin = null;
+  let actMax = null;
+  for (const a of actions) {
+    const wd = asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || a?.week_ending_date || null);
+    if (!wd) continue;
+    if (!actMin || wd < actMin) actMin = wd;
+    if (!actMax || wd > actMax) actMax = wd;
+  }
+
+  const forcedFrom = fileMin || actMin || null;
+  const forcedTo   = fileMax || actMax || null;
+
+  // Options (shared)
+  if (!ui.options || typeof ui.options !== 'object' || Array.isArray(ui.options)) ui.options = {};
+
+  // ✅ Forced behaviour for BOTH NHSP and HR_WEEKLY (no options modal anymore)
+  ui.options.missingShiftsEnabled = true;
+
+  // Only set forced dates when we actually have them (avoid wiping a previously seeded value)
+  if (forcedFrom) ui.options.dateFrom = forcedFrom;
+  if (forcedTo)   ui.options.dateTo = forcedTo;
+
+  // Ensure keys exist even if null
+  if (!('dateFrom' in ui.options)) ui.options.dateFrom = null;
+  if (!('dateTo' in ui.options)) ui.options.dateTo = null;
+
+  // Normalise / repair inverted ranges
+  const df0 = asYmd(ui.options.dateFrom);
+  const dt0 = asYmd(ui.options.dateTo);
+  if (df0 && dt0 && df0 > dt0) {
+    // Prefer forced range if available; otherwise swap
+    if (forcedFrom && forcedTo) {
+      ui.options.dateFrom = forcedFrom;
+      ui.options.dateTo = forcedTo;
+    } else {
+      ui.options.dateFrom = dt0;
+      ui.options.dateTo = df0;
+    }
+  } else {
+    ui.options.dateFrom = df0 || ui.options.dateFrom;
+    ui.options.dateTo = dt0 || ui.options.dateTo;
+  }
+
+  // Selections (shared)
+  ui.actionSelection = ensureSet(ui.actionSelection);
+
+  // emailSelection:
+  // - HR_WEEKLY validation requires Map(key -> boolean) so explicit untick survives
+  // - NHSP keeps legacy Set
+  if (T === 'HR_WEEKLY') {
+    if (ui.emailSelection instanceof Set) {
+      const m = new Map();
+      for (const k of Array.from(ui.emailSelection)) {
+        const kk = String(k || '').trim();
+        if (kk) m.set(kk, true);
+      }
+      ui.emailSelection = m;
+    }
+    if (!(ui.emailSelection instanceof Map)) ui.emailSelection = new Map();
+  } else {
+    if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+  }
+
+  // invalidationSelection: Map `${timesheet_id}|${comparison_key}` -> boolean
+  ui.invalidationSelection = ensureMap(ui.invalidationSelection);
+
+  // altEmailByKey: Map `${timesheet_id}|${issue_fingerprint}` -> string
+  ui.altEmailByKey = ensureMap(ui.altEmailByKey);
+
+  // Filters (shared)
+  if (!ui.filters || typeof ui.filters !== 'object' || Array.isArray(ui.filters)) ui.filters = {};
+  if (typeof ui.filters.showOnlyRed !== 'boolean') ui.filters.showOnlyRed = false;
+  if (typeof ui.filters.showOnlyUnticked !== 'boolean') ui.filters.showOnlyUnticked = false;
+  if (typeof ui.filters.showOnlyCancellations !== 'boolean') ui.filters.showOnlyCancellations = false;
+  if (typeof ui.filters.search !== 'string') ui.filters.search = '';
+
+  // Hydration flags (shared)
+  if (!ui.hydratedFlags || typeof ui.hydratedFlags !== 'object' || Array.isArray(ui.hydratedFlags)) ui.hydratedFlags = {};
+  if (typeof ui.hydratedFlags.didInitDefaultActionChecks !== 'boolean') ui.hydratedFlags.didInitDefaultActionChecks = false;
+  if (typeof ui.hydratedFlags.didInitDefaultEmailChecks !== 'boolean') ui.hydratedFlags.didInitDefaultEmailChecks = false;
+  if (typeof ui.hydratedFlags.didInitDefaultInvalidationChecks !== 'boolean') ui.hydratedFlags.didInitDefaultInvalidationChecks = false;
+
+  // Optional lightweight preview meta (safe)
+  try {
+    ui.previewMeta = (ui.previewMeta && typeof ui.previewMeta === 'object' && !Array.isArray(ui.previewMeta)) ? ui.previewMeta : {};
+    if (typeof ui.previewMeta.mode_summary !== 'string') {
+      ui.previewMeta.mode_summary = String(p.mode_summary || p.modeSummary || sum.mode_summary || sum.modeSummary || '').trim();
+    }
+    if (typeof ui.previewMeta.client_id !== 'string') {
+      ui.previewMeta.client_id = String(p.client_id || sum.client_id || truth?.client_id || '').trim();
+    }
+    if (!('file_date_min' in ui.previewMeta)) ui.previewMeta.file_date_min = truth?.file_date_min ?? truth?.fileDateMin ?? null;
+    if (!('file_date_max' in ui.previewMeta)) ui.previewMeta.file_date_max = truth?.file_date_max ?? truth?.fileDateMax ?? null;
+  } catch {
+    // ignore
+  }
+
+  window.__weeklyImportUi[T][impId] = ui;
+  return ui;
+}
+
 function wireHrWeeklyValidationSummaryActions(type, importId) {
   const T = String(type || '').toUpperCase();
   const impId = String(importId || '').trim();
@@ -8400,10 +8338,10 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
 
         if (!ui && typeof ensureWeeklyUiStore === 'function') {
           try {
-            const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+            const p0 = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
               ? window.__importSummaryState.HR_WEEKLY
               : null;
-            ensureWeeklyUiStore('HR_WEEKLY', impId, p || {});
+            ensureWeeklyUiStore('HR_WEEKLY', impId, p0 || {});
           } catch {}
           ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
         }
@@ -8412,8 +8350,16 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
           ui = {
             options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
             actionSelection: new Set(),
-            emailSelection: new Set(),
-            invalidationSelection: new Map(), // ✅ key: `${timesheet_id}|${comparison_key}` -> boolean
+
+            // ✅ Map supports explicit untick (key -> boolean)
+            emailSelection: new Map(),
+
+            // existing
+            invalidationSelection: new Map(), // key: `${timesheet_id}|${comparison_key}` -> boolean
+
+            // ✅ Alternative Email per email key (`${timesheet_id}|${issue_fingerprint}`)
+            altEmailByKey: new Map(),
+
             filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
             hydratedFlags: { didInitDefaultActionChecks: true, didInitDefaultEmailChecks: false, didInitDefaultInvalidationChecks: false }
           };
@@ -8421,14 +8367,27 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
         }
 
         if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
-        if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+
+        // Back-compat: convert Set -> Map(true)
+        if (ui.emailSelection instanceof Set) {
+          const m = new Map();
+          for (const k of Array.from(ui.emailSelection)) {
+            const kk = String(k || '').trim();
+            if (kk) m.set(kk, true);
+          }
+          ui.emailSelection = m;
+        }
+        if (!(ui.emailSelection instanceof Map)) ui.emailSelection = new Map();
+
         if (!(ui.invalidationSelection instanceof Map)) ui.invalidationSelection = new Map();
+        if (!(ui.altEmailByKey instanceof Map)) ui.altEmailByKey = new Map();
 
         if (!ui.hydratedFlags || typeof ui.hydratedFlags !== 'object') ui.hydratedFlags = {};
         if (typeof ui.hydratedFlags.didInitDefaultEmailChecks !== 'boolean') ui.hydratedFlags.didInitDefaultEmailChecks = false;
         if (typeof ui.hydratedFlags.didInitDefaultInvalidationChecks !== 'boolean') ui.hydratedFlags.didInitDefaultInvalidationChecks = false;
 
         if (!ui.options || typeof ui.options !== 'object') ui.options = {};
+        // ✅ Forced behaviour (no options modal)
         ui.options.missingShiftsEnabled = true;
 
         window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
@@ -8436,28 +8395,28 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
       };
 
       const getPreview = () => {
-        const p = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+        const p0 = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
           ? window.__importSummaryState.HR_WEEKLY
           : null;
-        return (p && typeof p === 'object') ? p : {};
+        return (p0 && typeof p0 === 'object') ? p0 : {};
       };
 
-      const getMode = (p) => {
-        const sum = (p && p.summary && typeof p.summary === 'object') ? p.summary : {};
-        const raw = (p && (p.mode_summary || p.modeSummary)) || sum.mode_summary || sum.modeSummary || '';
+      const getMode = (p0) => {
+        const sum0 = (p0 && p0.summary && typeof p0.summary === 'object') ? p0.summary : {};
+        const raw = (p0 && (p0.mode_summary || p0.modeSummary)) || sum0.mode_summary || sum0.modeSummary || '';
         const ms = String(raw || '').trim().toUpperCase();
         if (ms === 'MODE_A_ONLY' || ms === 'MODE_B_ONLY' || ms === 'MIXED') return ms;
 
-        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups.length : 0;
-        const ag = Array.isArray(p?.action_groups) ? p.action_groups.length : 0;
-        const acts = Array.isArray(p?.actions) ? p.actions.length : 0;
-        if (vg > 0 && (ag > 0 || acts > 0)) return 'MIXED';
-        if (vg > 0) return 'MODE_A_ONLY';
-        if (ag > 0 || acts > 0) return 'MODE_B_ONLY';
+        const vgN = Array.isArray(p0?.validation_groups) ? p0.validation_groups.length : 0;
+        const agN = Array.isArray(p0?.action_groups) ? p0.action_groups.length : 0;
+        const aN  = Array.isArray(p0?.actions) ? p0.actions.length : 0;
+        if (vgN > 0 && (agN > 0 || aN > 0)) return 'MIXED';
+        if (vgN > 0) return 'MODE_A_ONLY';
+        if (agN > 0 || aN > 0) return 'MODE_B_ONLY';
         return 'MODE_A_ONLY';
       };
 
-      const parseKey = (k) => {
+      const parseEmailKey = (k) => {
         const s = String(k || '');
         const i = s.indexOf('|');
         if (i <= 0) return null;
@@ -8467,14 +8426,38 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
         return { ts, fp };
       };
 
+      const buildDefaultRecipientByKey = (p0) => {
+        const out = new Map();
+        const vg0 = Array.isArray(p0?.validation_groups) ? p0.validation_groups : [];
+        for (const g of vg0) {
+          const tsid = g?.timesheet_id || g?.timesheetId || null;
+          const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim();
+          if (!tsid || !fp) continue;
+          const k = `${String(tsid).trim()}|${fp}`;
+          const recip = String(g?.recipient_email || g?.recipientEmail || '').trim();
+          const canEmail = (g?.can_email === true) || (g?.canEmail === true);
+          out.set(k, { recipient_email: recip, can_email: !!canEmail });
+        }
+        return out;
+      };
+
       const buildEmailActions = () => {
         const ui = ensureUi();
-        const sel = (ui && ui.emailSelection instanceof Set) ? ui.emailSelection : new Set();
+        const selMap = (ui && ui.emailSelection instanceof Map) ? ui.emailSelection : new Map();
+        const altMap = (ui && ui.altEmailByKey instanceof Map) ? ui.altEmailByKey : new Map();
+
         const out = [];
-        for (const k of sel) {
-          const it = parseKey(k);
+        for (const [k, v] of selMap.entries()) {
+          if (v !== true) continue;
+          const it = parseEmailKey(k);
           if (!it) continue;
-          out.push({ timesheet_id: it.ts, issue_fingerprint: it.fp });
+
+          const alt = String(altMap.get(k) || '').trim();
+          out.push({
+            timesheet_id: it.ts,
+            issue_fingerprint: it.fp,
+            alt_email: alt || null
+          });
         }
         return out;
       };
@@ -8495,48 +8478,55 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
         return out;
       };
 
-      // ✅ Hydrate defaults exactly once per import:
-      // - Email ticked by default for all failing groups (that can_email)
-      // - Invalidation ticked by default for destructive invalidations
       const hydrateDefaultsOnce = () => {
         const ui = ensureUi();
-        const p = getPreview();
-        const vg = Array.isArray(p?.validation_groups) ? p.validation_groups : [];
+        const p0 = getPreview();
+        const vg0 = Array.isArray(p0?.validation_groups) ? p0.validation_groups : [];
 
         if (ui.hydratedFlags.didInitDefaultEmailChecks !== true) {
-          for (const g of vg) {
+          for (const g of vg0) {
             const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
-            const canEmail = (g?.can_email === true) || (g?.canEmail === true);
             const tsid = g?.timesheet_id || g?.timesheetId || null;
             const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim();
-            if (!hasMismatch || !canEmail) continue;
+            if (!hasMismatch) continue;
             if (!tsid || !fp) continue;
+
             const k = `${String(tsid).trim()}|${fp}`;
-            ui.emailSelection.add(k); // default checked
+            if (ui.emailSelection instanceof Map && ui.emailSelection.has(k)) continue;
+
+            const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
+            ui.emailSelection.set(k, emailedAlready ? false : true);
           }
           ui.hydratedFlags.didInitDefaultEmailChecks = true;
         }
 
         if (ui.hydratedFlags.didInitDefaultInvalidationChecks !== true) {
-          for (const g of vg) {
+          for (const g of vg0) {
             const tsid = g?.timesheet_id || g?.timesheetId || null;
             if (!tsid) continue;
 
             const comps = Array.isArray(g?.comparisons) ? g.comparisons
               : (Array.isArray(g?.comparison_rows) ? g.comparison_rows : []);
             for (const c of comps) {
-              const isDestr = (c?.is_destructive_invalidation === true) || (c?.isDestructiveInvalidation === true) || (c?.is_destructive_invalidation === 'true');
+              const isDestr =
+                (c?.is_destructive_invalidation === true) ||
+                (c?.isDestructiveInvalidation === true) ||
+                (c?.is_destructive_invalidation === 'true');
               if (!isDestr) continue;
 
-              const invoiceLocked = (c?.invoice_locked === true) || (c?.invoiceLocked === true) || (String(c?.invoice_locked_invoice_id || c?.invoiceLockedInvoiceId || '').trim().length > 0);
+              const invoiceLocked =
+                (c?.invoice_locked === true) ||
+                (c?.invoiceLocked === true) ||
+                (String(c?.invoice_locked_invoice_id || c?.invoiceLockedInvoiceId || '').trim().length > 0);
               if (invoiceLocked) continue;
 
               const ck = String(c?.comparison_key || c?.comparisonKey || '').trim();
               if (!ck) continue;
 
               const key = `${String(tsid).trim()}|${ck}`;
-              // default checked
-              ui.invalidationSelection.set(key, true);
+              if (!ui.invalidationSelection.has(key)) {
+                ui.invalidationSelection.set(key, true);
+              }
             }
           }
           ui.hydratedFlags.didInitDefaultInvalidationChecks = true;
@@ -8547,7 +8537,33 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
 
       hydrateDefaultsOnce();
 
-      // Delegated change handler
+      root.addEventListener('input', (ev) => {
+        const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
+        if (!container) return;
+
+        const containerImp = String(container.getAttribute('data-import-id') || '').trim();
+        if (containerImp && containerImp !== impId) return;
+
+        const altIn = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-alt-email"]')
+          : null;
+
+        if (!altIn) return;
+
+        const tsid = String(altIn.getAttribute('data-timesheet-id') || '').trim();
+        const fp   = String(altIn.getAttribute('data-issue-fingerprint') || '').trim();
+        if (!tsid || !fp) return;
+
+        const key = `${tsid}|${fp}`;
+        const ui = ensureUi();
+
+        const v = String(altIn.value || '').trim();
+        if (v) ui.altEmailByKey.set(key, v);
+        else ui.altEmailByKey.delete(key);
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+      }, true);
+
       root.addEventListener('change', (ev) => {
         const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
         if (!container) return;
@@ -8555,7 +8571,6 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
         const containerImp = String(container.getAttribute('data-import-id') || '').trim();
         if (containerImp && containerImp !== impId) return;
 
-        // email toggle
         const cbEmail = ev.target && ev.target.closest
           ? ev.target.closest('input[data-act="hr-weekly-val-email-toggle"]')
           : null;
@@ -8566,14 +8581,12 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
 
           const ui = ensureUi();
           const key = `${tsid}|${fp}`;
-          if (cbEmail.checked) ui.emailSelection.add(key);
-          else ui.emailSelection.delete(key);
+          ui.emailSelection.set(key, !!cbEmail.checked);
 
           window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
           return;
         }
 
-        // invalidation toggle
         const cbInv = ev.target && ev.target.closest
           ? ev.target.closest('input[data-act="hr-weekly-val-invalidate-toggle"]')
           : null;
@@ -8589,9 +8602,8 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
           window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
           return;
         }
-      });
+      }, true);
 
-      // Delegated click handler
       root.addEventListener('click', async (ev) => {
         const container = ev.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
         if (!container) return;
@@ -8654,7 +8666,6 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
               throw new Error('refreshWeeklyImportSummary is not defined.');
             }
             await refreshWeeklyImportSummary('HR_WEEKLY', impId);
-            // hydrate defaults again only if not yet initialised; do NOT clobber user changes
             hydrateDefaultsOnce();
           } catch (e) {
             console.error('[IMPORTS][HR_WEEKLY][VAL] reclassify failed', e);
@@ -8673,22 +8684,55 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
             }
 
             const ui = ensureUi();
-            const p = getPreview();
-            const mode = getMode(p);
+            const p0 = getPreview();
+            const mode0 = getMode(p0);
 
             const auto_apply_action_ids =
-              Array.isArray(p?.auto_apply_action_ids) ? p.auto_apply_action_ids :
-              Array.isArray(p?.autoApplyActionIds) ? p.autoApplyActionIds :
-              (p?.summary && Array.isArray(p.summary.auto_apply_action_ids)) ? p.summary.auto_apply_action_ids :
+              Array.isArray(p0?.auto_apply_action_ids) ? p0.auto_apply_action_ids :
+              Array.isArray(p0?.autoApplyActionIds) ? p0.autoApplyActionIds :
+              (p0?.summary && Array.isArray(p0.summary.auto_apply_action_ids)) ? p0.summary.auto_apply_action_ids :
               [];
 
             const email_actions = buildEmailActions();
             const invalidation_actions = buildInvalidationActions();
 
+            // ✅ Client-side enforcement for missing default recipient:
+            {
+              const byKey = buildDefaultRecipientByKey(p0);
+              const bad = [];
+
+              for (const a of (email_actions || [])) {
+                const ts = String(a?.timesheet_id || '').trim();
+                const fp = String(a?.issue_fingerprint || '').trim();
+                if (!ts || !fp) continue;
+
+                const k = `${ts}|${fp}`;
+                const meta = byKey.get(k) || { recipient_email: '', can_email: false };
+
+                const alt = String(a?.alt_email || '').trim();
+                const recip = String(meta.recipient_email || '').trim();
+                const canEmail = (meta.can_email === true);
+
+                if (!canEmail) {
+                  if (!alt) bad.push(k);
+                  continue;
+                }
+                if (!recip && !alt) bad.push(k);
+              }
+
+              if (bad.length) {
+                alert(
+                  'Alternative Email is required for one or more selected emails (default recipient is unavailable).\n\n' +
+                  'Please enter an Alternative Email for the selected group(s) before finalising.'
+                );
+                return;
+              }
+            }
+
             let selected_action_ids = [];
             let decisions = {};
 
-            if (mode === 'MIXED') {
+            if (mode0 === 'MIXED') {
               const seen = new Set();
               const out = [];
 
@@ -8708,9 +8752,9 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
 
               if (typeof getOrInitWeeklyImportDecisionsStore === 'function') {
                 try {
-                  const ds = getOrInitWeeklyImportDecisionsStore('HR_WEEKLY', impId, p);
+                  const ds = getOrInitWeeklyImportDecisionsStore('HR_WEEKLY', impId, p0);
                   if (ds && typeof ds.serialize === 'function') {
-                    decisions = ds.serialize(p) || {};
+                    decisions = ds.serialize(p0) || {};
                   }
                 } catch {
                   decisions = {};
@@ -8721,31 +8765,372 @@ function wireHrWeeklyValidationSummaryActions(type, importId) {
               decisions = {};
             }
 
-            const result = await applyWeeklyImportTransactional('HR_WEEKLY', impId, {
+            // ✅ always pass file_date_min/max from canonical preview truth_meta
+            const tm =
+              (p0 && typeof p0.truth_meta === 'object' && p0.truth_meta) ? p0.truth_meta :
+              (p0 && p0.summary && typeof p0.summary.truth_meta === 'object' && p0.summary.truth_meta) ? p0.summary.truth_meta :
+              null;
+
+            const file_date_min =
+              tm ? (tm.file_date_min ?? tm.fileDateMin ?? null) : null;
+            const file_date_max =
+              tm ? (tm.file_date_max ?? tm.fileDateMax ?? null) : null;
+
+            const payload = {
               selected_action_ids,
               decisions,
               email_actions,
               invalidation_actions,
               include_missing_shifts: true
-            }) || {};
+            };
+            if (file_date_min) payload.file_date_min = String(file_date_min);
+            if (file_date_max) payload.file_date_max = String(file_date_max);
 
+            const result = await applyWeeklyImportTransactional('HR_WEEKLY', impId, payload) || {};
+
+            // ✅ Finalised message (keep your existing behaviour)
             alert(`Import ${result.import_id || impId} has been finalised.`);
+
+            // ✅ NEW: Optional QR reissue modal (post-apply)
+            try {
+              const candArr = Array.isArray(result?.qr_reissue_candidates) ? result.qr_reissue_candidates : [];
+
+              if (candArr.length && typeof openHrWeeklyQrReissueSelectionModal === 'function') {
+                const modalRes = await openHrWeeklyQrReissueSelectionModal(impId, candArr);
+
+                if (modalRes && modalRes.confirmed === true) {
+                  const ids = Array.isArray(modalRes.selected_timesheet_ids) ? modalRes.selected_timesheet_ids : [];
+
+                  if (ids.length) {
+                    if (typeof postHrWeeklyQrReissueBatch !== 'function') {
+                      throw new Error('postHrWeeklyQrReissueBatch is not defined.');
+                    }
+
+                    const reissueRes = await postHrWeeklyQrReissueBatch(ids);
+
+                    const okN = Number(reissueRes?.ok_count ?? 0) || 0;
+                    const failN = Number(reissueRes?.fail_count ?? 0) || 0;
+
+                    const msg =
+                      failN > 0
+                        ? `QR reissue complete: ${okN} succeeded, ${failN} failed.`
+                        : `QR reissue complete: ${okN} succeeded.`;
+
+                    if (window.__toast) window.__toast(msg);
+                    else alert(msg);
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn('[IMPORTS][HR_WEEKLY][VAL] QR reissue flow failed (non-fatal)', e);
+              if (window.__toast) window.__toast('QR reissue flow failed (non-fatal).');
+            }
+
+            // Refresh summary after finalise + optional reissue
             if (typeof refreshWeeklyImportSummary === 'function') {
               await refreshWeeklyImportSummary('HR_WEEKLY', impId);
-              // do not re-init defaults after finalise; keep whatever user set until refresh overwrites state
             }
           } catch (e) {
             console.error('[IMPORTS][HR_WEEKLY][VAL] finalise failed', e);
             alert(e?.message || 'Finalise failed.');
           }
         }
-      });
+      }, true);
     } catch (e) {
       console.warn('[IMPORTS][HR_WEEKLY][VAL] wiring failed (non-fatal)', e);
     }
   }, 0);
 }
 
+
+async function openHrWeeklyQrReissueSelectionModal(importId, qr_reissue_candidates) {
+  const impId = String(importId || '').trim();
+  const rowsIn = Array.isArray(qr_reissue_candidates) ? qr_reissue_candidates : [];
+  const rows = rowsIn
+    .map(r => (r && typeof r === 'object' ? r : null))
+    .filter(Boolean);
+
+  if (!impId) {
+    return { confirmed: false, selected_timesheet_ids: [] };
+  }
+
+  if (!rows.length) {
+    return { confirmed: false, selected_timesheet_ids: [] };
+  }
+
+  if (typeof showModal !== 'function') {
+    // Hard fallback without modal stack (should never happen in your UI)
+    const ids = rows.map(r => String(r.timesheet_id || '').trim()).filter(Boolean);
+    return { confirmed: false, selected_timesheet_ids: ids };
+  }
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  const uniq = (arr) => {
+    const out = [];
+    const seen = new Set();
+    for (const x of (Array.isArray(arr) ? arr : [])) {
+      const s = String(x || '').trim();
+      if (!s) continue;
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  };
+
+  const niceName = (r) => {
+    const a = String(r?.candidate_name || r?.candidate || r?.candidate_display_name || '').trim();
+    if (a) return a;
+    return String(r?.candidate_id || '').trim() || 'Unknown';
+  };
+
+  const niceClient = (r) => {
+    const a = String(r?.client_name || r?.client || '').trim();
+    if (a) return a;
+    return String(r?.client_id || '').trim() || '—';
+  };
+
+  const we = (r) => {
+    const s = String(r?.week_ending_date || r?.weekEndingDate || '').trim();
+    return s ? s.slice(0, 10) : '';
+  };
+
+  const shortId = (id) => {
+    const s = String(id || '').trim();
+    if (!s) return '';
+    return s.length > 10 ? `${s.slice(0, 8)}…` : s;
+  };
+
+  // Default-ticked selection
+  const allIds = uniq(rows.map(r => r?.timesheet_id));
+  const selected = new Set(allIds);
+
+  const kind = 'import-summary-hr-weekly-qr-reissue';
+
+  const render = () => {
+    const listHtml = rows.map((r) => {
+      const tsid = String(r?.timesheet_id || '').trim();
+      if (!tsid) return '';
+
+      const checked = selected.has(tsid);
+      return `
+        <tr>
+          <td class="mini" style="text-align:center;">
+            <input type="checkbox" data-act="qr-reissue-toggle" data-timesheet-id="${enc(tsid)}" ${checked ? 'checked' : ''}/>
+          </td>
+          <td class="mini">${enc(niceName(r))}</td>
+          <td class="mini">${enc(niceClient(r))}</td>
+          <td class="mini" style="white-space:nowrap;">${enc(we(r) || '—')}</td>
+          <td class="mini mono" title="${enc(tsid)}" style="white-space:nowrap;">${enc(shortId(tsid))}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const selectedCount = selected.size;
+
+    return `
+      <div id="hrWeeklyQrReissueModal" data-import-id="${enc(impId)}">
+        <div class="card">
+          <div class="row">
+            <label>QR reissue</label>
+            <div class="controls">
+              <div class="mini" style="margin-bottom:8px;">
+                Some QR timesheets were issued before booking reference numbers changed.
+                You can optionally reissue new QR emails so candidates sign the updated copy.
+              </div>
+
+              <div class="mini" style="margin-bottom:8px;">
+                Selected: <span class="mono" id="qrReissueSelectedCount">${enc(String(selectedCount))}</span> / ${enc(String(rows.length))}
+              </div>
+
+              <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
+                <table class="grid" style="table-layout:auto; width:100%; min-width:760px;">
+                  <thead>
+                    <tr>
+                      <th style="width:44px;"></th>
+                      <th>Candidate</th>
+                      <th>Client</th>
+                      <th style="width:130px;">W/E</th>
+                      <th style="width:140px;">Timesheet</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${listHtml || `<tr><td colspan="5"><span class="mini">No candidates to show.</span></td></tr>`}
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="hint" style="margin-top:10px;">
+                Only “issued but unsigned” QR timesheets are shown here. Signed items are excluded.
+              </div>
+
+              <div style="display:flex; gap:10px; margin-top:12px; align-items:center;">
+                <button type="button" class="btn" id="btnQrReissueSkip">Skip</button>
+                <button type="button" class="btn btn-primary" id="btnQrReissueConfirm">Reissue selected</button>
+                <span class="mini" id="qrReissueHint" style="margin-left:auto; opacity:.85;"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const closeTop = () => {
+    try {
+      const btn = document.getElementById('btnCloseModal');
+      if (btn && typeof btn.click === 'function') { btn.click(); return; }
+    } catch {}
+    try { if (typeof closeModal === 'function') closeModal(); } catch {}
+  };
+
+  return await new Promise((resolve) => {
+    let done = false;
+    const finish = (res) => {
+      if (done) return;
+      done = true;
+      resolve(res);
+    };
+
+    const onDismiss = () => finish({ confirmed: false, selected_timesheet_ids: [] });
+
+    const renderTab = (key) => {
+      if (key !== 'main') return '';
+      return render();
+    };
+
+    showModal(
+      'QR reissue (optional)',
+      [{ key: 'main', label: 'Reissue' }],
+      renderTab,
+      null,
+      true,
+      null,
+      {
+        kind,
+        noParentGate: true,
+        showSave: false,
+        showApply: false,
+        stayOpenOnSave: false,
+        onDismiss
+      }
+    );
+
+    const wire = () => {
+      const body = document.getElementById('modalBody');
+      if (!body) return;
+
+      const modalRoot = body.querySelector('#hrWeeklyQrReissueModal');
+      if (!modalRoot) return;
+
+      // Avoid double wiring
+      if (modalRoot.__qrReissueWired) return;
+      modalRoot.__qrReissueWired = true;
+
+      const updateUi = () => {
+        const cntEl = document.getElementById('qrReissueSelectedCount');
+        if (cntEl) cntEl.textContent = String(selected.size);
+
+        const hintEl = document.getElementById('qrReissueHint');
+        if (hintEl) {
+          hintEl.textContent = selected.size ? '' : 'Select at least one timesheet to reissue.';
+        }
+
+        const btnConfirm = document.getElementById('btnQrReissueConfirm');
+        if (btnConfirm) btnConfirm.disabled = (selected.size === 0);
+      };
+
+      body.addEventListener('change', (ev) => {
+        const cb = ev.target && ev.target.closest ? ev.target.closest('input[data-act="qr-reissue-toggle"]') : null;
+        if (!cb) return;
+
+        const tsid = String(cb.getAttribute('data-timesheet-id') || '').trim();
+        if (!tsid) return;
+
+        if (cb.checked) selected.add(tsid);
+        else selected.delete(tsid);
+
+        updateUi();
+      }, true);
+
+      const btnSkip = body.querySelector('#btnQrReissueSkip');
+      if (btnSkip && !btnSkip.__wired) {
+        btnSkip.__wired = true;
+        btnSkip.onclick = () => {
+          closeTop();
+          finish({ confirmed: false, selected_timesheet_ids: [] });
+        };
+      }
+
+      const btnConfirm = body.querySelector('#btnQrReissueConfirm');
+      if (btnConfirm && !btnConfirm.__wired) {
+        btnConfirm.__wired = true;
+        btnConfirm.onclick = () => {
+          const ids = uniq(Array.from(selected));
+          closeTop();
+          finish({ confirmed: true, selected_timesheet_ids: ids });
+        };
+      }
+
+      updateUi();
+    };
+
+    try { requestAnimationFrame(() => requestAnimationFrame(wire)); }
+    catch { setTimeout(wire, 0); }
+  });
+}
+
+
+async function postHrWeeklyQrReissueBatch(timesheetIds) {
+  if (typeof authFetch !== 'function' || typeof API !== 'function') {
+    throw new Error('authFetch/API helper missing in postHrWeeklyQrReissueBatch.');
+  }
+
+  const uniqStrings = (arr) => {
+    const out = [];
+    const seen = new Set();
+    for (const x of (Array.isArray(arr) ? arr : [])) {
+      const s = String(x || '').trim();
+      if (!s) continue;
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  };
+
+  const ids = uniqStrings(timesheetIds);
+  if (!ids.length) {
+    return { ok: true, requested_count: 0, ok_count: 0, fail_count: 0, results: [] };
+  }
+
+  const res = await authFetch(API('/api/healthroster/weekly/qr-reissue-batch'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ timesheet_ids: ids })
+  });
+
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    let msg = text || `QR reissue batch failed (${res.status})`;
+    try {
+      const j = text ? JSON.parse(text) : null;
+      if (j && typeof j === 'object') {
+        if (typeof j.message === 'string' && j.message.trim()) msg = j.message.trim();
+        else if (typeof j.error === 'string' && j.error.trim()) msg = j.error.trim();
+      }
+    } catch {}
+    throw new Error(msg);
+  }
+
+  try { return text ? JSON.parse(text) : {}; } catch { return {}; }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: ensurePickerDatasetPrimed(entity)  entity in {'candidates','clients'}
@@ -49374,86 +49759,7 @@ function wireImportDropzones() {
   wireOneZone('hrRotaImportDrop', 'hrRotaImportFile', handleHrRotaFileDrop);
 }
 
-async function handleNhspFileDrop(file) {
-  const summaryEl = document.getElementById('nhspImportSummary');
-  if (summaryEl) {
-    summaryEl.textContent = 'Uploading NHSP file to storage…';
-  }
 
-  try {
-    // 1) Upload file to R2 and get file_key
-    const { fileKey, filename } = await uploadImportFileToR2(file);
-
-    if (summaryEl) {
-      summaryEl.textContent = 'Registering NHSP import and parsing workbook…';
-    }
-
-    // 2) Tell backend about the file so it can parse + classify
-    const resUpload = await authFetch(API('/api/nhsp/import'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        original_name: filename,
-        file_key: fileKey,
-        tz_assumption: 'Europe/London'
-      })
-    });
-    const textUpload = await resUpload.text();
-    if (!resUpload.ok) {
-      throw new Error(textUpload || `NHSP import upload failed (${resUpload.status})`);
-    }
-
-    let parsed;
-    try { parsed = textUpload ? JSON.parse(textUpload) : {}; } catch { parsed = {}; }
-    const importId = parsed.import_id || parsed.id || null;
-    if (!importId) {
-      throw new Error('NHSP import did not return an import_id.');
-    }
-
-    if (summaryEl) {
-      summaryEl.textContent = `File uploaded. Loading NHSP classification for import ${importId}…`;
-    }
-
-    // 3) Fetch preview / classification
-    const resPrev  = await authFetch(API(`/api/nhsp/${encodeURIComponent(importId)}/preview`));
-    const textPrev = await resPrev.text();
-    if (!resPrev.ok) {
-      throw new Error(textPrev || `NHSP import preview failed (${resPrev.status})`);
-    }
-
-    let summaryState;
-    try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
-
-    // 4) Persist and render summary modal
-    window.modalCtx = window.modalCtx || {};
-    window.modalCtx.importsState = window.modalCtx.importsState || {};
-    window.modalCtx.importsState.nhsp = {
-      import_id: importId,
-      summary: summaryState
-    };
-
-    const total =
-      (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
-        ? summaryState.summary.total_rows
-        : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
-
-    if (summaryEl) {
-      summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
-    }
-
-    if (typeof renderImportSummaryModal === 'function') {
-      renderImportSummaryModal('NHSP', summaryState);
-    } else {
-      console.warn('[IMPORTS] renderImportSummaryModal is not defined; NHSP summary not shown.');
-    }
-  } catch (err) {
-    console.error('[IMPORTS][NHSP] handleNhspFileDrop failed', err);
-    if (summaryEl) {
-      summaryEl.textContent = `NHSP import failed: ${err?.message || 'Unknown error'}`;
-    }
-    alert(err?.message || 'NHSP import failed.');
-  }
-}
 
 // Install once so dropping a file anywhere in the app never opens it in a new tab.
 function installGlobalFileDropGuards() {
@@ -51750,312 +52056,6 @@ function renderImportSummaryModal(importType, summaryState) {
   } catch {}
 }
 
-async function openWeeklyImportOptionsModal(type, importId, preview) {
-  const t = String(type || '').toUpperCase();
-  const impId = (importId != null) ? String(importId) : '';
-
-  // Only meaningful for weekly imports; for anything else, just allow flow to continue.
-  if (!impId || (t !== 'NHSP' && t !== 'HR_WEEKLY')) return true;
-
-  const enc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s);
-
-  const asYmd = (v) => {
-    if (!v) return null;
-    if (typeof v === 'string') {
-      const s = v.trim();
-      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-      if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-    }
-    try {
-      const d = new Date(v);
-      if (Number.isNaN(d.getTime())) return null;
-      const yyyy = d.getUTCFullYear();
-      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
-      const dd   = String(d.getUTCDate()).padStart(2, '0');
-      return `${yyyy}-${mm}-${dd}`;
-    } catch {
-      return null;
-    }
-  };
-
-  const p = (preview && typeof preview === 'object') ? preview : {};
-  const truthMeta = (p.truth_meta && typeof p.truth_meta === 'object') ? p.truth_meta : {};
-  const actions = Array.isArray(p.actions) ? p.actions : [];
-
-  const fileMin = asYmd(truthMeta.file_date_min);
-  const fileMax = asYmd(truthMeta.file_date_max);
-
-  const minMaxFromActions = () => {
-    let minD = null, maxD = null;
-    for (const a of actions) {
-      const wd = asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
-      if (!wd) continue;
-      if (!minD || wd < minD) minD = wd;
-      if (!maxD || wd > maxD) maxD = wd;
-    }
-    return { minD, maxD };
-  };
-
-  const { minD: actMin, maxD: actMax } = minMaxFromActions();
-  const defaultFrom = fileMin || actMin || null;
-  const defaultTo   = fileMax || actMax || null;
-
-  // Ensure persistent weekly UI store exists (options must live outside modal DOM)
-  window.__weeklyImportUi = window.__weeklyImportUi || {};
-  window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
-  const ui = window.__weeklyImportUi[t][impId] || {
-    // ✅ DEFAULT ON for first-time opens
-    options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
-    actionSelection: new Set(),
-    filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
-    emailSelection: new Set(),
-    hydratedFlags: { didInitDefaultActionChecks: false }
-  };
-
-  ui.options = (ui.options && typeof ui.options === 'object') ? ui.options : {};
-
-  // ✅ Default missingShiftsEnabled to true for first-time opens.
-  //    Only set it if it's not already a boolean (preserves user choice across opens).
-  if (typeof ui.options.missingShiftsEnabled !== 'boolean') ui.options.missingShiftsEnabled = true;
-
-  if (!ui.options.dateFrom) ui.options.dateFrom = defaultFrom;
-  if (!ui.options.dateTo)   ui.options.dateTo = defaultTo;
-
-  // Normalise / repair inverted ranges to defaults
-  const df0 = asYmd(ui.options.dateFrom);
-  const dt0 = asYmd(ui.options.dateTo);
-  if (df0 && dt0 && df0 > dt0) {
-    ui.options.dateFrom = defaultFrom;
-    ui.options.dateTo = defaultTo;
-  } else {
-    ui.options.dateFrom = df0 || ui.options.dateFrom || defaultFrom;
-    ui.options.dateTo = dt0 || ui.options.dateTo || defaultTo;
-  }
-
-  // Re-store (so caller can rely on it immediately)
-  window.__weeklyImportUi[t][impId] = ui;
-
-  // ─────────────────────────────────────────────────────────────
-  // HR_WEEKLY: guaranteed no-op (no modal). Seed defaults and continue.
-  // ─────────────────────────────────────────────────────────────
-  if (t === 'HR_WEEKLY') {
-    try {
-      window.__weeklyImportUi = window.__weeklyImportUi || {};
-      window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
-
-      const store = window.__weeklyImportUi[t][impId] || ui;
-      store.options = (store.options && typeof store.options === 'object') ? store.options : {};
-
-      // Force-on for HR_WEEKLY (as per requirement)
-      store.options.missingShiftsEnabled = true;
-
-      const dfA = asYmd(store.options.dateFrom);
-      const dtA = asYmd(store.options.dateTo);
-
-      if (!dfA) store.options.dateFrom = defaultFrom;
-      if (!dtA) store.options.dateTo = defaultTo;
-
-      const dfB = asYmd(store.options.dateFrom);
-      const dtB = asYmd(store.options.dateTo);
-      if (dfB && dtB && dfB > dtB) {
-        store.options.dateFrom = defaultFrom;
-        store.options.dateTo = defaultTo;
-      } else {
-        store.options.dateFrom = dfB || store.options.dateFrom || defaultFrom;
-        store.options.dateTo   = dtB || store.options.dateTo   || defaultTo;
-      }
-
-      if (!(store.actionSelection instanceof Set)) store.actionSelection = new Set();
-      if (!(store.emailSelection instanceof Set)) store.emailSelection = new Set();
-
-      store.filters = (store.filters && typeof store.filters === 'object') ? store.filters : {};
-      if (typeof store.filters.showOnlyRed !== 'boolean') store.filters.showOnlyRed = false;
-      if (typeof store.filters.showOnlyUnticked !== 'boolean') store.filters.showOnlyUnticked = false;
-      if (typeof store.filters.showOnlyCancellations !== 'boolean') store.filters.showOnlyCancellations = false;
-      if (typeof store.filters.search !== 'string') store.filters.search = '';
-
-      store.hydratedFlags = (store.hydratedFlags && typeof store.hydratedFlags === 'object') ? store.hydratedFlags : {};
-      if (typeof store.hydratedFlags.didInitDefaultActionChecks !== 'boolean') store.hydratedFlags.didInitDefaultActionChecks = false;
-
-      window.__weeklyImportUi[t][impId] = store;
-    } catch {
-      // best-effort; never block the user from reaching the summary
-    }
-
-    return true;
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // NHSP: options modal flow remains unchanged (modal code lives below).
-  // ─────────────────────────────────────────────────────────────
-
-  const fmt = (s) => (s ? enc(String(s)) : '—');
-
-  const render = () => {
-    const cur = window.__weeklyImportUi[t] && window.__weeklyImportUi[t][impId]
-      ? window.__weeklyImportUi[t][impId]
-      : ui;
-
-    const opt = cur && cur.options && typeof cur.options === 'object' ? cur.options : {};
-    const df = asYmd(opt.dateFrom) || '';
-    const dt = asYmd(opt.dateTo) || '';
-    const ms = (opt.missingShiftsEnabled === true);
-
-    return html(`
-      <div class="form">
-        <div class="card">
-          <div class="row">
-            <label>Missing shifts</label>
-            <div class="controls">
-              <label class="inline">
-                <input type="checkbox" id="weeklyOptMissing" ${ms ? 'checked' : ''}/>
-                <span>Include missing shifts (cancellations)</span>
-              </label>
-              <div class="hint">
-                Missing-from-import cancellations will be included only when enabled and within the date range.
-              </div>
-            </div>
-          </div>
-
-          <div class="row">
-            <label>Date range</label>
-            <div class="controls">
-              <div class="grid2">
-                <div>
-                  <div class="mini">From</div>
-                  <input class="input" id="weeklyOptFrom" type="date" value="${enc(df)}"/>
-                </div>
-                <div>
-                  <div class="mini">To</div>
-                  <input class="input" id="weeklyOptTo" type="date" value="${enc(dt)}"/>
-                </div>
-              </div>
-              <div class="hint">
-                Defaults: file range ${fmt(fileMin)} → ${fmt(fileMax)} (fallback: actions range ${fmt(actMin)} → ${fmt(actMax)}).
-              </div>
-            </div>
-          </div>
-
-          <div class="row">
-            <label></label>
-            <div class="controls">
-              <button type="button" class="btn" id="weeklyOptCancel">Cancel</button>
-              <button type="button" class="btn btn-primary" id="weeklyOptContinue">Continue</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  // Show a modal and wait for user decision.
-  // We use the existing showModal framework and resolve a Promise.
-  return await new Promise((resolve) => {
-    const kind = `weekly-import-options-${t.toLowerCase()}`;
-
-    const renderTab = (key) => {
-      if (key !== 'main') return '';
-      return render();
-    };
-
-    const onShown = () => {
-      try {
-        const body = document.getElementById('modalBody');
-        if (!body) return;
-
-        const btnCancel = body.querySelector('#weeklyOptCancel');
-        const btnContinue = body.querySelector('#weeklyOptContinue');
-        const chkMissing = body.querySelector('#weeklyOptMissing');
-        const inpFrom = body.querySelector('#weeklyOptFrom');
-        const inpTo = body.querySelector('#weeklyOptTo');
-
-        const closeTop = () => {
-          try {
-            if (typeof closeModal === 'function') closeModal();
-          } catch {}
-        };
-
-        const commit = () => {
-          const store = (window.__weeklyImportUi[t] && window.__weeklyImportUi[t][impId])
-            ? window.__weeklyImportUi[t][impId]
-            : ui;
-
-          store.options = (store.options && typeof store.options === 'object') ? store.options : {};
-          store.options.missingShiftsEnabled = !!(chkMissing && chkMissing.checked);
-
-          const df = asYmd(inpFrom && inpFrom.value);
-          const dt = asYmd(inpTo && inpTo.value);
-
-          // Save raw values; normalise inverted ranges to defaults
-          store.options.dateFrom = df || defaultFrom;
-          store.options.dateTo = dt || defaultTo;
-
-          const df2 = asYmd(store.options.dateFrom);
-          const dt2 = asYmd(store.options.dateTo);
-          if (df2 && dt2 && df2 > dt2) {
-            store.options.dateFrom = defaultFrom;
-            store.options.dateTo = defaultTo;
-          } else {
-            store.options.dateFrom = df2 || store.options.dateFrom || defaultFrom;
-            store.options.dateTo = dt2 || store.options.dateTo || defaultTo;
-          }
-
-          if (!(store.actionSelection instanceof Set)) store.actionSelection = new Set();
-          if (!(store.emailSelection instanceof Set)) store.emailSelection = new Set();
-
-          store.filters = (store.filters && typeof store.filters === 'object') ? store.filters : {};
-          if (typeof store.filters.showOnlyRed !== 'boolean') store.filters.showOnlyRed = false;
-          if (typeof store.filters.showOnlyUnticked !== 'boolean') store.filters.showOnlyUnticked = false;
-          if (typeof store.filters.showOnlyCancellations !== 'boolean') store.filters.showOnlyCancellations = false;
-          if (typeof store.filters.search !== 'string') store.filters.search = '';
-
-          store.hydratedFlags = (store.hydratedFlags && typeof store.hydratedFlags === 'object') ? store.hydratedFlags : {};
-          if (typeof store.hydratedFlags.didInitDefaultActionChecks !== 'boolean') store.hydratedFlags.didInitDefaultActionChecks = false;
-
-          window.__weeklyImportUi[t][impId] = store;
-        };
-
-        if (btnCancel) {
-          btnCancel.onclick = () => {
-            closeTop();
-            resolve(false);
-          };
-        }
-
-        if (btnContinue) {
-          btnContinue.onclick = () => {
-            commit();
-            closeTop();
-            resolve(true);
-          };
-        }
-      } catch {
-        // If wiring fails, allow flow to continue rather than blocking user.
-        resolve(true);
-      }
-    };
-
-    showModal(
-      (t === 'NHSP' ? 'Weekly Import Options (NHSP)' : 'Weekly Import Options'),
-      [{ key: 'main', label: 'Options' }],
-      renderTab,
-      null,
-      false,
-      null,
-      {
-        kind,
-        noParentGate: true,
-        stayOpenOnSave: false,
-        showSave: false
-      }
-    );
-
-    // Wire after modal is created.
-    setTimeout(onShown, 0);
-  });
-}
 function openAssignmentBandMappingsModal(opts) {
   // Ensure we have a local HTML-escape helper in this closure
   // (prevents "ReferenceError: enc is not defined")
@@ -52855,6 +52855,521 @@ function openAssignmentBandMappingsModal(opts) {
 }
 
 
+async function openWeeklyImportOptionsModal(type, importId, preview) {
+  const t = String(type || '').toUpperCase();
+  const impId = (importId != null) ? String(importId) : '';
+
+  // Weekly imports only
+  if (!impId || (t !== 'NHSP' && t !== 'HR_WEEKLY')) return true;
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    }
+    try {
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return null;
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      return null;
+    }
+  };
+
+  const p = (preview && typeof preview === 'object') ? preview : {};
+  const truthMeta = (p.truth_meta && typeof p.truth_meta === 'object') ? p.truth_meta : {};
+  const actions = Array.isArray(p.actions) ? p.actions : [];
+
+  const fileMin = asYmd(truthMeta.file_date_min);
+  const fileMax = asYmd(truthMeta.file_date_max);
+
+  // Fallback only if file min/max are not provided by backend (should be rare)
+  const minMaxFromActions = () => {
+    let minD = null, maxD = null;
+    for (const a of actions) {
+      const wd = asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
+      if (!wd) continue;
+      if (!minD || wd < minD) minD = wd;
+      if (!maxD || wd > maxD) maxD = wd;
+    }
+    return { minD, maxD };
+  };
+  const { minD: actMin, maxD: actMax } = minMaxFromActions();
+
+  // ✅ Forced behaviour: include missing shifts, and date range = import file min/max
+  const forcedFrom = fileMin || actMin || null;
+  const forcedTo   = fileMax || actMax || null;
+
+  // Ensure persistent weekly UI store exists (NO MODAL)
+  window.__weeklyImportUi = window.__weeklyImportUi || {};
+  window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
+
+  let ui = window.__weeklyImportUi[t][impId] || null;
+  if (!ui || typeof ui !== 'object' || Array.isArray(ui)) {
+    ui = {
+      options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+      actionSelection: new Set(),
+      filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+      // NHSP legacy Set; HR_WEEKLY validation uses Map for explicit untick
+      emailSelection: (t === 'HR_WEEKLY') ? new Map() : new Set(),
+      hydratedFlags: (t === 'HR_WEEKLY')
+        ? { didInitDefaultActionChecks: false, didInitDefaultEmailChecks: false, didInitDefaultInvalidationChecks: false }
+        : { didInitDefaultActionChecks: false }
+    };
+  }
+
+  // Options forced (no user choice)
+  ui.options = (ui.options && typeof ui.options === 'object' && !Array.isArray(ui.options)) ? ui.options : {};
+  ui.options.missingShiftsEnabled = true;
+  ui.options.dateFrom = forcedFrom;
+  ui.options.dateTo = forcedTo;
+
+  // Normalise / repair inverted ranges (forced)
+  const df0 = asYmd(ui.options.dateFrom);
+  const dt0 = asYmd(ui.options.dateTo);
+  if (df0 && dt0 && df0 > dt0) {
+    ui.options.dateFrom = forcedFrom;
+    ui.options.dateTo = forcedTo;
+  } else {
+    ui.options.dateFrom = df0 || ui.options.dateFrom;
+    ui.options.dateTo = dt0 || ui.options.dateTo;
+  }
+
+  // Normalise core stores (no clobber)
+  if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+
+  if (t === 'HR_WEEKLY') {
+    if (ui.emailSelection instanceof Set) {
+      const m = new Map();
+      for (const k of Array.from(ui.emailSelection)) {
+        const kk = String(k || '').trim();
+        if (kk) m.set(kk, true);
+      }
+      ui.emailSelection = m;
+    }
+    if (!(ui.emailSelection instanceof Map)) ui.emailSelection = new Map();
+
+    if (!(ui.invalidationSelection instanceof Map)) ui.invalidationSelection = new Map();
+    if (!(ui.altEmailByKey instanceof Map)) ui.altEmailByKey = new Map();
+
+    ui.hydratedFlags = (ui.hydratedFlags && typeof ui.hydratedFlags === 'object' && !Array.isArray(ui.hydratedFlags)) ? ui.hydratedFlags : {};
+    if (typeof ui.hydratedFlags.didInitDefaultActionChecks !== 'boolean') ui.hydratedFlags.didInitDefaultActionChecks = false;
+    if (typeof ui.hydratedFlags.didInitDefaultEmailChecks !== 'boolean') ui.hydratedFlags.didInitDefaultEmailChecks = false;
+    if (typeof ui.hydratedFlags.didInitDefaultInvalidationChecks !== 'boolean') ui.hydratedFlags.didInitDefaultInvalidationChecks = false;
+  } else {
+    if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+    ui.hydratedFlags = (ui.hydratedFlags && typeof ui.hydratedFlags === 'object' && !Array.isArray(ui.hydratedFlags)) ? ui.hydratedFlags : {};
+    if (typeof ui.hydratedFlags.didInitDefaultActionChecks !== 'boolean') ui.hydratedFlags.didInitDefaultActionChecks = false;
+  }
+
+  ui.filters = (ui.filters && typeof ui.filters === 'object' && !Array.isArray(ui.filters)) ? ui.filters : {};
+  if (typeof ui.filters.showOnlyRed !== 'boolean') ui.filters.showOnlyRed = false;
+  if (typeof ui.filters.showOnlyUnticked !== 'boolean') ui.filters.showOnlyUnticked = false;
+  if (typeof ui.filters.showOnlyCancellations !== 'boolean') ui.filters.showOnlyCancellations = false;
+  if (typeof ui.filters.search !== 'string') ui.filters.search = '';
+
+  window.__weeklyImportUi[t][impId] = ui;
+
+  // ✅ No options modal is ever shown now
+  return true;
+}
+
+async function handleNhspFileDrop(file) {
+  const summaryEl = document.getElementById('nhspImportSummary');
+  if (summaryEl) {
+    summaryEl.textContent = 'Uploading NHSP file to storage…';
+  }
+
+  try {
+    // 1) Upload file to R2 and get file_key
+    const { fileKey, filename } = await uploadImportFileToR2(file);
+
+    if (summaryEl) {
+      summaryEl.textContent = 'Registering NHSP import and parsing workbook…';
+    }
+
+    // 2) Tell backend about the file so it can parse + classify
+    const resUpload = await authFetch(API('/api/nhsp/import'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        original_name: filename,
+        file_key: fileKey,
+        tz_assumption: 'Europe/London'
+      })
+    });
+    const textUpload = await resUpload.text();
+    if (!resUpload.ok) {
+      throw new Error(textUpload || `NHSP import upload failed (${resUpload.status})`);
+    }
+
+    let parsed;
+    try { parsed = textUpload ? JSON.parse(textUpload) : {}; } catch { parsed = {}; }
+    const importId = parsed.import_id || parsed.id || null;
+    if (!importId) {
+      throw new Error('NHSP import did not return an import_id.');
+    }
+
+    if (summaryEl) {
+      summaryEl.textContent = `File uploaded. Loading NHSP classification for import ${importId}…`;
+    }
+
+    // 3) Fetch preview / classification
+    const resPrev  = await authFetch(API(`/api/nhsp/${encodeURIComponent(importId)}/preview`));
+    const textPrev = await resPrev.text();
+    if (!resPrev.ok) {
+      throw new Error(textPrev || `NHSP import preview failed (${resPrev.status})`);
+    }
+
+    let summaryState;
+    try { summaryState = textPrev ? JSON.parse(textPrev) : {}; } catch { summaryState = {}; }
+
+    // ✅ Forced behaviour: include missing shifts always; use file min/max date range
+    try {
+      const asYmd = (v) => {
+        if (!v) return null;
+        if (typeof v === 'string') {
+          const s = v.trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+          if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+        }
+        try {
+          const d = new Date(v);
+          if (Number.isNaN(d.getTime())) return null;
+          const yyyy = d.getUTCFullYear();
+          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        } catch {
+          return null;
+        }
+      };
+
+      const tm =
+        (summaryState && typeof summaryState.truth_meta === 'object' && summaryState.truth_meta) ? summaryState.truth_meta :
+        (summaryState && summaryState.summary && typeof summaryState.summary.truth_meta === 'object' && summaryState.summary.truth_meta) ? summaryState.summary.truth_meta :
+        null;
+
+      const fileMin = tm ? asYmd(tm.file_date_min) : null;
+      const fileMax = tm ? asYmd(tm.file_date_max) : null;
+
+      window.__weeklyImportUi = window.__weeklyImportUi || {};
+      window.__weeklyImportUi.NHSP = window.__weeklyImportUi.NHSP || {};
+
+      const impIdStr = String(importId);
+      let ui = window.__weeklyImportUi.NHSP[impIdStr] || null;
+      if (!ui || typeof ui !== 'object' || Array.isArray(ui)) {
+        ui = {
+          options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+          actionSelection: new Set(),
+          filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+          emailSelection: new Set(),
+          hydratedFlags: { didInitDefaultActionChecks: false }
+        };
+      }
+
+      ui.options = (ui.options && typeof ui.options === 'object' && !Array.isArray(ui.options)) ? ui.options : {};
+      ui.options.missingShiftsEnabled = true;
+      ui.options.dateFrom = fileMin;
+      ui.options.dateTo = fileMax;
+
+      if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+      if (!(ui.emailSelection instanceof Set)) ui.emailSelection = new Set();
+
+      ui.filters = (ui.filters && typeof ui.filters === 'object' && !Array.isArray(ui.filters)) ? ui.filters : {};
+      if (typeof ui.filters.showOnlyRed !== 'boolean') ui.filters.showOnlyRed = false;
+      if (typeof ui.filters.showOnlyUnticked !== 'boolean') ui.filters.showOnlyUnticked = false;
+      if (typeof ui.filters.showOnlyCancellations !== 'boolean') ui.filters.showOnlyCancellations = false;
+      if (typeof ui.filters.search !== 'string') ui.filters.search = '';
+
+      ui.hydratedFlags = (ui.hydratedFlags && typeof ui.hydratedFlags === 'object' && !Array.isArray(ui.hydratedFlags)) ? ui.hydratedFlags : {};
+      if (typeof ui.hydratedFlags.didInitDefaultActionChecks !== 'boolean') ui.hydratedFlags.didInitDefaultActionChecks = false;
+
+      window.__weeklyImportUi.NHSP[impIdStr] = ui;
+    } catch (e) {
+      console.warn('[IMPORTS][NHSP] failed to seed weekly UI store options (non-fatal)', e);
+    }
+
+    // 4) Persist and render summary modal
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.importsState = window.modalCtx.importsState || {};
+    window.modalCtx.importsState.nhsp = {
+      import_id: importId,
+      summary: summaryState
+    };
+
+    const total =
+      (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
+        ? summaryState.summary.total_rows
+        : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
+
+    if (summaryEl) {
+      summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
+    }
+
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal('NHSP', summaryState);
+    } else {
+      console.warn('[IMPORTS] renderImportSummaryModal is not defined; NHSP summary not shown.');
+    }
+  } catch (err) {
+    console.error('[IMPORTS][NHSP] handleNhspFileDrop failed', err);
+    if (summaryEl) {
+      summaryEl.textContent = `NHSP import failed: ${err?.message || 'Unknown error'}`;
+    }
+    alert(err?.message || 'NHSP import failed.');
+  }
+}
+
+async function refreshWeeklyImportSummary(type, importId) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][WEEKLY][REFRESH]', ...a); };
+
+  try {
+    if (!type || !importId) {
+      throw new Error('Missing type or importId for refreshWeeklyImportSummary');
+    }
+
+    const t = String(type || '').toUpperCase();
+    let url;
+    if (t === 'NHSP') {
+      url = `/api/nhsp/${encodeURIComponent(importId)}/preview`;
+    } else if (t === 'HR_WEEKLY') {
+      url = `/api/healthroster/autoprocess/${encodeURIComponent(importId)}/preview`;
+    } else {
+      throw new Error(`Unsupported weekly import type: ${t}`);
+    }
+
+    if (typeof authFetch !== 'function' || typeof API !== 'function') {
+      throw new Error('authFetch/API helper missing in refreshWeeklyImportSummary');
+    }
+
+    L('fetching preview', { type: t, importId, url: API(url) });
+    const res  = await authFetch(API(url));
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `Weekly import preview refresh failed (${res.status})`);
+    }
+
+    let preview;
+    try { preview = text ? JSON.parse(text) : {}; } catch { preview = {}; }
+
+    // ─────────────────────────────────────────────────────────────
+    // ✅ Forced behaviour:
+    // - include missing shifts ALWAYS
+    // - date range = import file min/max (truth_meta)
+    // - reconcile selections against refreshed actions
+    // ─────────────────────────────────────────────────────────────
+    try {
+      const impId = String(importId);
+
+      const asYmd = (v) => {
+        if (!v) return null;
+        if (typeof v === 'string') {
+          const s = v.trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+          if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+        }
+        try {
+          const d = new Date(v);
+          if (Number.isNaN(d.getTime())) return null;
+          const yyyy = d.getUTCFullYear();
+          const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd   = String(d.getUTCDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        } catch {
+          return null;
+        }
+      };
+
+      const acts = Array.isArray(preview?.actions) ? preview.actions : [];
+
+      const truthMeta =
+        (preview && typeof preview.truth_meta === 'object' && preview.truth_meta) ? preview.truth_meta :
+        (preview && preview.summary && typeof preview.summary.truth_meta === 'object' && preview.summary.truth_meta) ? preview.summary.truth_meta :
+        null;
+
+      const fileMin = truthMeta ? asYmd(truthMeta.file_date_min) : null;
+      const fileMax = truthMeta ? asYmd(truthMeta.file_date_max) : null;
+
+      // Fallback only if file min/max absent
+      const minMaxFromActions = () => {
+        let minD = null, maxD = null;
+        for (const a of acts) {
+          const wd = asYmd(a?.work_date || a?.workDate || a?.date_local || a?.date || null);
+          if (!wd) continue;
+          if (!minD || wd < minD) minD = wd;
+          if (!maxD || wd > maxD) maxD = wd;
+        }
+        return { minD, maxD };
+      };
+      const { minD: actMin, maxD: actMax } = minMaxFromActions();
+
+      const forcedFrom = fileMin || actMin || null;
+      const forcedTo   = fileMax || actMax || null;
+
+      const autoApplyIds = (() => {
+        const raw =
+          preview?.auto_apply_action_ids ??
+          preview?.autoApplyActionIds ??
+          (preview?.summary && (preview.summary.auto_apply_action_ids ?? preview.summary.autoApplyActionIds)) ??
+          null;
+
+        const arr = Array.isArray(raw) ? raw : [];
+        const out = [];
+        const seen = new Set();
+        for (const v of arr) {
+          const s = String(v || '').trim();
+          if (!s) continue;
+          if (seen.has(s)) continue;
+          seen.add(s);
+          out.push(s);
+        }
+        return out;
+      })();
+
+      const actionIdOf = (a) => {
+        const id = a?.action_id ?? a?.actionId ?? null;
+        return id == null ? null : String(id).trim();
+      };
+
+      const replacementKeyOf = (a) => {
+        const rk = a?.replacement_day_key ?? a?.replacementDayKey ?? null;
+        if (rk != null && String(rk).trim()) return String(rk).trim();
+        const cid = a?.candidate_id ?? a?.candidateId ?? null;
+        const cli = a?.client_id ?? a?.clientId ?? null;
+        const wd  = asYmd(a?.work_date ?? a?.workDate ?? a?.date_local ?? a?.date ?? null);
+        if (cid && cli && wd) return `${String(cid)}|${String(cli)}|${String(wd)}`;
+        return null;
+      };
+
+      const isMissingFromImportCancel = (a) => {
+        const reason = String(a?.reason || a?.cancel_reason || a?.kind_reason || '').toUpperCase();
+        if (reason !== 'MISSING_FROM_IMPORT') return false;
+
+        const id = String(actionIdOf(a) || '').toUpperCase();
+        const isCancel =
+          (a?.is_cancellation === true) ||
+          (a?.isCancellation === true) ||
+          (String(a?.action_kind || a?.actionKind || '').toUpperCase().includes('CANCEL')) ||
+          id.startsWith('CANCEL:');
+
+        return !!isCancel;
+      };
+
+      const inYmdRange = (ymd, fromYmd, toYmd) => {
+        const d = asYmd(ymd);
+        const f = asYmd(fromYmd);
+        const t2 = asYmd(toYmd);
+        if (!d) return false;
+        if (f && d < f) return false;
+        if (t2 && d > t2) return false;
+        return true;
+      };
+
+      window.__weeklyImportUi = window.__weeklyImportUi || {};
+      window.__weeklyImportUi[t] = window.__weeklyImportUi[t] || {};
+
+      // Ensure store exists (but do NOT reset it if it already exists)
+      let ui = window.__weeklyImportUi[t][impId] || null;
+      if (!ui || typeof ui !== 'object' || Array.isArray(ui)) {
+        ui = {
+          options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+          actionSelection: new Set(),
+          filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+          emailSelection: (t === 'HR_WEEKLY') ? new Map() : new Set(),
+          hydratedFlags: (t === 'HR_WEEKLY')
+            ? { didInitDefaultActionChecks: false, didInitDefaultEmailChecks: false, didInitDefaultInvalidationChecks: false }
+            : { didInitDefaultActionChecks: false }
+        };
+      }
+
+      // Force options every refresh (no user control)
+      ui.options = (ui.options && typeof ui.options === 'object' && !Array.isArray(ui.options)) ? ui.options : {};
+      ui.options.missingShiftsEnabled = true;
+      ui.options.dateFrom = forcedFrom;
+      ui.options.dateTo = forcedTo;
+
+      if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
+
+      // Current action lookup by id
+      const byId = new Map();
+      for (const a of acts) {
+        const id = actionIdOf(a);
+        if (!id) continue;
+        byId.set(id, a);
+      }
+
+      // Selection set used for Policy A protection:
+      // user ticks + auto-applied NEW shifts
+      const selectedAll = new Set([
+        ...Array.from(ui.actionSelection),
+        ...autoApplyIds
+      ]);
+
+      // replacement_day_keys that have a selected new shift
+      const selectedNewShiftKeys = new Set();
+      for (const a of acts) {
+        const id = actionIdOf(a);
+        if (!id) continue;
+        if (!selectedAll.has(id)) continue;
+
+        const isNew = (a?.is_new_shift === true || a?.isNewShift === true);
+        if (!isNew) continue;
+
+        const rk = replacementKeyOf(a);
+        if (rk) selectedNewShiftKeys.add(rk);
+      }
+
+      // Reconcile:
+      // - remove selections that no longer exist
+      // - missing-from-import cancels are always enabled, but still constrained to the forced file date range
+      for (const sel of Array.from(ui.actionSelection)) {
+        const a = byId.get(String(sel)) || null;
+
+        // Selection no longer exists in new preview
+        if (!a) {
+          ui.actionSelection.delete(sel);
+          continue;
+        }
+
+        // Missing-from-import cancels: keep only if within forced range OR Policy-A-protected
+        if (isMissingFromImportCancel(a)) {
+          const rk = replacementKeyOf(a);
+          const protectedByPolicyA = !!(rk && selectedNewShiftKeys.has(rk));
+          if (!protectedByPolicyA) {
+            const wd = asYmd(a?.work_date ?? a?.workDate ?? a?.date_local ?? a?.date ?? null);
+            if (!inYmdRange(wd, forcedFrom, forcedTo)) {
+              ui.actionSelection.delete(sel);
+              continue;
+            }
+          }
+        }
+      }
+
+      window.__weeklyImportUi[t][impId] = ui;
+    } catch (e) {
+      // Non-fatal; renderImportSummaryModal also re-reconciles defensively.
+      L('pre-render reconcile failed (non-fatal)', { err: e?.message || String(e) });
+    }
+
+    // IMPORTANT: renderImportSummaryModal will normalize + store canonical preview.
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal(t, preview);
+    } else {
+      throw new Error('renderImportSummaryModal is not defined');
+    }
+  } catch (e) {
+    console.error('[IMPORTS][WEEKLY][REFRESH] failed', e);
+    const msg = e?.message || 'Failed to refresh weekly import summary.';
+    if (window.__toast) window.__toast(msg); else alert(msg);
+  }
+}
 
 function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
@@ -52878,6 +53393,25 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const normUpper = (s) => String(s || '').trim().toUpperCase();
+
+  const asYmd = (v) => {
+    if (!v) return null;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    }
+    try {
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return null;
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      return null;
+    }
+  };
 
   // Prefer rows from preview object when present
   const rowsState = Array.isArray(rootObj.rows)
@@ -52914,19 +53448,36 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
     return out;
   })();
 
+  // Truth meta (single source; used for warnings + forced date range)
+  const truthMeta =
+    (rootObj && typeof rootObj.truth_meta === 'object' && rootObj.truth_meta) ? rootObj.truth_meta :
+    (summary && typeof summary.truth_meta === 'object' && summary.truth_meta) ? summary.truth_meta :
+    (rootObj && typeof rootObj.truthMeta === 'object' && rootObj.truthMeta) ? rootObj.truthMeta :
+    (summary && typeof summary.truthMeta === 'object' && summary.truthMeta) ? summary.truthMeta :
+    {};
+
+  const fileMin = asYmd(truthMeta.file_date_min);
+  const fileMax = asYmd(truthMeta.file_date_max);
+
   // ✅ Weekly UI state store (actionSelection must persist across rerenders)
   window.__weeklyImportUi = window.__weeklyImportUi || {};
   window.__weeklyImportUi[TYPE] = window.__weeklyImportUi[TYPE] || {};
   const ui = window.__weeklyImportUi[TYPE][String(importId)] || (window.__weeklyImportUi[TYPE][String(importId)] = {
-    // ✅ DEFAULT: missing shifts enabled (user can disable in Options)
-    options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+    // ✅ Forced: missing shifts enabled + date range from import file
+    options: { missingShiftsEnabled: true, dateFrom: fileMin, dateTo: fileMax },
     actionSelection: new Set(),
     filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
-    emailSelection: new Set(),
+    emailSelection: (TYPE === 'HR_WEEKLY') ? new Map() : new Set(),
     hydratedFlags: { didInitDefaultActionChecks: false }
   });
   if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
   if (!ui.hydratedFlags || typeof ui.hydratedFlags !== 'object') ui.hydratedFlags = { didInitDefaultActionChecks: false };
+
+  // ✅ Forced every render (no options modal anymore)
+  ui.options = (ui.options && typeof ui.options === 'object' && !Array.isArray(ui.options)) ? ui.options : {};
+  ui.options.missingShiftsEnabled = true;
+  ui.options.dateFrom = fileMin;
+  ui.options.dateTo = fileMax;
 
   const actionIdOf = (a) => {
     const id = a?.action_id ?? a?.actionId ?? null;
@@ -52967,15 +53518,11 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   // ─────────────────────────────────────────────────────────────
   // ✅ NEW: Hydrate default-checked action IDs ONCE per import
-  //
-  // Needed so backend can send SHIFT_ATTACH (or others) with default_checked=true
-  // and the UI will actually include them in selected_action_ids unless unticked.
   // ─────────────────────────────────────────────────────────────
   const defaultCheckedActionIds = (() => {
     const out = [];
     const seen = new Set();
 
-    // Prefer explicit contract list if present
     const contractObj =
       rootObj.action_contract ??
       summary.action_contract ??
@@ -53000,7 +53547,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       for (const v of rawList) pushId(v);
     }
 
-    // Fallback: derive from actions[].default_checked
     for (const a of (actions || [])) {
       const id = actionIdOf(a);
       if (!id) continue;
@@ -53020,7 +53566,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
     ui.hydratedFlags.didInitDefaultActionChecks = true;
 
-    // Lightweight debug log (front-end) for controlled runs; does not affect UX.
     try {
       const LOGW = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
       if (LOGW && defaultCheckedActionIds.length) {
@@ -53037,13 +53582,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
   // ─────────────────────────────────────────────────────────────
   // ✅ NEW: Surface backend warnings + detached/missing-timesheet meta
   // ─────────────────────────────────────────────────────────────
-  const truthMeta =
-    (rootObj && typeof rootObj.truth_meta === 'object' && rootObj.truth_meta) ? rootObj.truth_meta :
-    (summary && typeof summary.truth_meta === 'object' && summary.truth_meta) ? summary.truth_meta :
-    (rootObj && typeof rootObj.truthMeta === 'object' && rootObj.truthMeta) ? rootObj.truthMeta :
-    (summary && typeof summary.truthMeta === 'object' && summary.truthMeta) ? summary.truthMeta :
-    {};
-
   const backendWarningsRaw =
     (Array.isArray(rootObj.warnings) ? rootObj.warnings :
      Array.isArray(summary.warnings) ? summary.warnings :
@@ -53076,7 +53614,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
     for (const w of backendWarningsRaw) addWarn(w);
 
-    // Synthesize warnings from truth_meta if backend warnings not present (or to reinforce visibility)
     const detachedCount = (truthMeta && truthMeta.detached_active_shift_count != null)
       ? Number(truthMeta.detached_active_shift_count || 0)
       : 0;
@@ -53149,7 +53686,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         </details>
       ` : '';
 
-      // Keep it simple: use existing "mini" + subtle box; no dependency on CSS classes that may not exist.
       return `
         <div style="border:1px solid #e6b800; background:#fff8d6; border-radius:8px; padding:10px; margin-bottom:8px;">
           <div class="mini" style="margin-bottom:4px;">
@@ -53216,7 +53752,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
       const ak = String(a?.action_kind || '').toUpperCase();
 
-      // ROW actions (includes SHIFT_CHANGED and SHIFT_ATTACH): bind by contract_id + week_ending_date (and candidate/client for safety)
       if (id.toUpperCase().startsWith('ROW:') || ak === 'SHIFT_CHANGED' || ak === 'SHIFT_ATTACH') {
         const aCid = a?.candidate_id != null ? String(a.candidate_id) : '';
         const aCli = a?.client_id != null ? String(a.client_id) : '';
@@ -53229,7 +53764,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         continue;
       }
 
-      // Cancellations: bind by candidate+client and work_date within [we-6, we]
       if (id.toUpperCase().startsWith('CANCEL:') || ak === 'SHIFT_CANCEL') {
         const aCid = a?.candidate_id != null ? String(a.candidate_id) : '';
         const aCli = a?.client_id != null ? String(a.client_id) : '';
@@ -53337,7 +53871,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
       const ek = rowExternalKeyOf(r);
       const rowId = ek ? `ROW:${ek}` : '';
 
-      // Prefer action reason_text for ROW actions (changed/attach)
       if (ek && changeActionIdByExternalKey.has(ek)) {
         const aid = changeActionIdByExternalKey.get(ek);
         const act = aid ? (actionById.get(aid) || null) : null;
@@ -53380,7 +53913,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         displayAction = 'IGNORED';
       }
 
-      // Friendly group reason override when NOT_APPROVED
       if (level === 'group' && st === 'NOT_APPROVED') {
         const reqIds = groupRequiredActionIds(r);
         const unapproved = reqIds.filter((id) => !selectedAllSet.has(String(id)));
@@ -53567,13 +54099,10 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         const selAll = getSelectedAll();
         const rowsNow = getRowsNow();
 
-        // Rebuild ONLY the rows tbody (delegated events still work; action table unchanged)
         tbody.innerHTML = buildRowsTbodyHtml(rowsNow, selAll);
 
-        // Restore scroll position so it DOES NOT snap back to top
         if (rowsWrap) rowsWrap.scrollTop = scrollTopBefore;
 
-        // Update overview counters
         const c = computeOverviewCounts(rowsNow, selAll);
         const elApply = document.getElementById(`wiApply_${idSafe}`);
         const elNA = document.getElementById(`wiNotApproved_${idSafe}`);
@@ -53596,7 +54125,6 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         return m;
       };
 
-      // ✅ Approval checkbox toggles (top section)
       root.addEventListener('change', (ev) => {
         const cb = ev.target && ev.target.closest ? ev.target.closest('input[data-act="weekly-approve-action"]') : null;
         if (!cb) return;
@@ -53609,11 +54137,9 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
         if (cb.checked) ui.actionSelection.add(id);
         else ui.actionSelection.delete(id);
 
-        // ✅ IMPORTANT: do NOT call renderImportSummaryModal here (it rebuilds DOM and resets scroll / breaks checkbox UX)
         patchRowsAndOverviewInPlace();
       });
 
-      // Existing resolve buttons (delegated)
       root.addEventListener('click', (ev) => {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
@@ -53717,6 +54243,7 @@ function renderWeeklyImportSummary(type, importId, rows, ss) {
 
   return markup;
 }
+
 
 
 
@@ -53840,7 +54367,6 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
 
   const p = (payloadIn && typeof payloadIn === 'object' && !Array.isArray(payloadIn)) ? payloadIn : {};
 
-  // selected_action_ids: accept Set or Array; normalise to unique string[]
   const selected_action_ids = (() => {
     const raw = p.selected_action_ids ?? p.selectedActionIds ?? p.selected_actions ?? p.selectedActions ?? null;
 
@@ -53853,7 +54379,6 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
       arr = [];
     }
 
-    // de-dupe, preserve order
     const seen = new Set();
     const out = [];
     for (const x of arr) {
@@ -53869,33 +54394,59 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
       ? p.decisions
       : {};
 
-  // HR weekly only: email_actions [{timesheet_id, issue_fingerprint}]
+  const normEmail = (v) => {
+    const s = String(v ?? '').trim();
+    return s ? s : '';
+  };
+
   const email_actions = (() => {
     if (t !== 'HR_WEEKLY') return undefined;
+
     const raw = p.email_actions ?? p.emailActions ?? null;
     const arr = Array.isArray(raw) ? raw : [];
     const out = [];
 
     for (const it of arr) {
       if (!it || typeof it !== 'object') continue;
+
       const tsId = (it.timesheet_id ?? it.timesheetId ?? null);
       const fp   = (it.issue_fingerprint ?? it.issueFingerprint ?? null);
       const ts = tsId != null ? String(tsId).trim() : '';
       const f  = fp != null ? String(fp).trim() : '';
       if (!ts || !f) continue;
-      out.push({ timesheet_id: ts, issue_fingerprint: f });
+
+      const alt =
+        normEmail(it.alt_email) ||
+        normEmail(it.alternative_email) ||
+        normEmail(it.alt_recipient_email) ||
+        normEmail(it.to_email) ||
+        normEmail(it.toEmail) ||
+        normEmail(it.recipient_email_override) ||
+        normEmail(it.override_email) ||
+        '';
+
+      out.push({
+        timesheet_id: ts,
+        issue_fingerprint: f,
+        ...(alt ? { alt_email: alt } : {})
+      });
     }
 
-    // de-dupe by timesheet_id + fingerprint
-    const seen = new Set();
-    const uniq = [];
+    const seen = new Map();
     for (const x of out) {
       const k = `${x.timesheet_id}__${x.issue_fingerprint}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      uniq.push(x);
+      if (!seen.has(k)) {
+        seen.set(k, x);
+        continue;
+      }
+      const prev = seen.get(k);
+      const prevAlt = String(prev?.alt_email || '').trim();
+      const nextAlt = String(x?.alt_email || '').trim();
+      if (!prevAlt && nextAlt) {
+        seen.set(k, { ...prev, alt_email: nextAlt });
+      }
     }
-    return uniq;
+    return Array.from(seen.values());
   })();
 
   const urlPath =
@@ -53904,20 +54455,34 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
       : `/api/healthroster/${encId}/autoprocess-apply`;
 
   // -------------------------------------------------------------------
-  // ✅ CHANGE (HR_WEEKLY only):
-  // - Do NOT show any extra modal for "include missing shifts" / date range.
-  // - Always include missing shifts.
-  // - Always send the file date-range min/max already computed for the import
-  //   (earliest + latest shift in the import file).
-  //
-  // This is a no-op for NHSP.
+  // HR_WEEKLY forced fields:
+  // - Always include missing shifts
+  // - Always send file date range (prefer payload, else canonical preview truth_meta)
   // -------------------------------------------------------------------
+  const getPreviewTruthMeta = () => {
+    try {
+      const p0 = (window.__importSummaryState && window.__importSummaryState.HR_WEEKLY)
+        ? window.__importSummaryState.HR_WEEKLY
+        : null;
+      if (!p0 || typeof p0 !== 'object') return null;
+
+      if (p0.truth_meta && typeof p0.truth_meta === 'object') return p0.truth_meta;
+      if (p0.summary && p0.summary.truth_meta && typeof p0.summary.truth_meta === 'object') return p0.summary.truth_meta;
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const tm0 = (t === 'HR_WEEKLY') ? getPreviewTruthMeta() : null;
+
   const hrFileDateMin =
     (t === 'HR_WEEKLY')
       ? (
           (p.file_date_min ?? p.fileDateMin ?? p.date_min ?? p.dateMin ?? null) ??
           (p.truth_meta?.file_date_min ?? p.truthMeta?.file_date_min ?? null) ??
-          (p.truth_meta?.file_date_min ?? p.truthMeta?.fileDateMin ?? null) ??
+          (p.truth_meta?.fileDateMin ?? p.truthMeta?.fileDateMin ?? null) ??
+          (tm0?.file_date_min ?? tm0?.fileDateMin ?? null) ??
           null
         )
       : null;
@@ -53927,7 +54492,8 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
       ? (
           (p.file_date_max ?? p.fileDateMax ?? p.date_max ?? p.dateMax ?? null) ??
           (p.truth_meta?.file_date_max ?? p.truthMeta?.file_date_max ?? null) ??
-          (p.truth_meta?.file_date_max ?? p.truthMeta?.fileDateMax ?? null) ??
+          (p.truth_meta?.fileDateMax ?? p.truthMeta?.fileDateMax ?? null) ??
+          (tm0?.file_date_max ?? tm0?.fileDateMax ?? null) ??
           null
         )
       : null;
@@ -53936,11 +54502,8 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
 
   if (t === 'HR_WEEKLY') {
     body.email_actions = email_actions || [];
-
-    // Always include missing shifts (no UI prompt).
     body.include_missing_shifts = true;
 
-    // Always send the date range (best-effort; backend may ignore if not needed).
     if (hrFileDateMin) body.file_date_min = String(hrFileDateMin);
     if (hrFileDateMax) body.file_date_max = String(hrFileDateMax);
   }
@@ -53954,7 +54517,6 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
   const text = await res.text().catch(() => '');
 
   if (!res.ok) {
-    // Try to surface a friendly server error message if body is JSON.
     let msg = text || `Weekly import apply failed (${res.status})`;
     try {
       if (text) {
@@ -53964,15 +54526,12 @@ async function applyWeeklyImportTransactional(type, importId, payloadIn) {
           else if (typeof j.error === 'string' && j.error.trim()) msg = j.error.trim();
         }
       }
-    } catch {
-      // ignore JSON parse errors
-    }
+    } catch {}
     throw new Error(msg);
   }
 
   try { return text ? JSON.parse(text) : {}; } catch { return {}; }
 }
-
 
 
 
