@@ -66754,13 +66754,27 @@ function renderTimesheetEvidenceTab(ctx) {
     return false;
   };
 
-  // ✅ Evidence "Type" (uses display_name first; falls back to kind)
-  const typeLabel = (ev) => {
-    const dn = String(ev?.display_name || '').trim();
-    if (dn) return dn;
-    const k = String(ev?.kind || '').trim();
-    return k ? k : 'Unknown';
+ // ✅ Evidence "Type" — DO NOT fall back to display_name (that's Filename)
+const typeLabel = (ev) => {
+  const k = String(ev?.kind || '').trim().toUpperCase();
+  if (!k) return 'Unknown';
+
+  const map = {
+    TIMESHEET: 'Timesheet',
+    MILEAGE: 'Mileage',
+    TRAVEL: 'Travel',
+    ACCOMMODATION: 'Accommodation',
+    OTHER: 'Other',
+    QR: 'QR',
+    PDF: 'PDF',
+    ELECTRONIC_SIGNATURES: 'Electronic signatures',
+    HEALTHROSTER: 'HealthRoster',
+    NHSP: 'NHSP'
   };
+
+  return map[k] || (k.charAt(0) + k.slice(1).toLowerCase());
+};
+
 
   // ✅ NEW: Filename column (prefer explicit filename; fall back to display_name as legacy)
   const filenameLabel = (ev) => {
