@@ -5595,19 +5595,7 @@ async function contractWeekManualUpsert(week_id, payload /* schedule-driven week
 
 
 // FE FIX: authorise must be expected-guarded (uses apiPostJson)
-async function contractWeekAuthorise(week_id, expectedTimesheetId /* optional */) {
-  const expected =
-    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
-    (window.modalCtx?.timesheetMeta?.expected_timesheet_id
-      ? String(window.modalCtx.timesheetMeta.expected_timesheet_id)
-      : '');
 
-  if (!expected) throw new Error('contractWeekAuthorise: expected_timesheet_id is required');
-
-  return apiPostJson(`/api/contract-weeks/${_enc(week_id)}/manual-authorise`, {
-    expected_timesheet_id: expected
-  });
-}
 
 // FE FIX: delete timesheet must be expected-guarded (uses apiDeleteJson)
 async function contractWeekDeleteTimesheet(week_id, expectedTimesheetId /* optional */) {
@@ -14702,480 +14690,6 @@ async function openSearchModal(opts = {}) {
   setTimeout(wireAdvancedSearch, 0);
 }
 
-function renderTimesheetIssuesTab(ctx) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
-  const { row, details } = normaliseTimesheetCtx(ctx);
-
-  GC('render');
-
-  const tsfin  = details.tsfin || {};
-  const ts     = details.timesheet || {};
-
-  // ✅ Use the shared helper for requiresAuth/authorised/badge rule (per spec)
-  let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
-  if (typeof computeRequiresTimesheetAuthorisation === 'function') {
-    try {
-      authInfo = computeRequiresTimesheetAuthorisation(details, row) || authInfo;
-    } catch (e) {
-      if (LOGM) L('[ISSUES] computeRequiresTimesheetAuthorisation failed (non-fatal)', e);
-    }
-  }
-
-  // ✅ Use the shared helper for the mutually-exclusive Processing State label (per spec)
-  let ps = { key: '', label: 'Unprocessed' };
-  if (typeof computeTimesheetProcessingState === 'function') {
-    try {
-      ps = computeTimesheetProcessingState(details, row) || ps;
-    } catch (e) {
-      if (LOGM) L('[ISSUES] computeTimesheetProcessingState failed (non-fatal)', e);
-    }
-  } else {
-    // If helper is not yet implemented, do not invent alternate state logic here.
-    // The tab must still render without crashing.
-    ps = { key: 'UNPROCESSED', label: 'Unprocessed' };
-  }
-
-  const esc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s == null ? '' : s)
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-
-  const fmtYmdToDmy = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    const [y, m, d] = s.split('-');
-    return `${d}/${m}/${y}`;
-  };
-
-  const fmtDow = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
-    const d = new Date(`${s}T00:00:00Z`);
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
-  };
-
-  const addDaysYmd = (ymd, deltaDays) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-    const [yy, mm, dd] = s.split('-').map(Number);
-    const dt = new Date(Date.UTC(yy, mm - 1, dd));
-    dt.setUTCDate(dt.getUTCDate() + Number(deltaDays || 0));
-    return dt.toISOString().slice(0, 10);
-  };
-
-  // Monday start (matches Postgres date_trunc('week', ...) behaviour)
-  const weekStartMondayYmd = (ymd) => {
-    const s = String(ymd || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-    const [yy, mm, dd] = s.split('-').map(Number);
-    const dt = new Date(Date.UTC(yy, mm - 1, dd));
-    const jsDow = dt.getUTCDay();        // Sun=0..Sat=6
-    const monIndex = (jsDow + 6) % 7;   // Mon=0..Sun=6
-    dt.setUTCDate(dt.getUTCDate() - monIndex);
-    return dt.toISOString().slice(0, 10);
-  };
-
-  const boolish = (v) => {
-    if (v === true) return true;
-    if (v === false) return false;
-    if (v == null) return false;
-    const s = String(v).trim().toLowerCase();
-    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
-  };
-
-  const normStr = (v) => (v == null ? '' : String(v).trim());
-
-  const fmtHHMM = (isoLike) => {
-    const s = String(isoLike || '');
-    const m1 = s.match(/T(\d{2}:\d{2})/);
-    if (m1 && m1[1]) return m1[1];
-    const m2 = s.match(/(\d{2}:\d{2})/);
-    if (m2 && m2[1]) return m2[1];
-    return '';
-  };
-
-  // Facts used only for issues list (not for Processing State label)
-  const procStatusRaw =
-    tsfin.processing_status ||
-    details.processing_status ||
-    row.processing_status ||
-    null;
-
-  const procStatus = String(procStatusRaw || '').toUpperCase();
-
-  if (LOGM) {
-    L('snapshot', {
-      procStatus,
-      requiresAuth: !!authInfo.requires,
-      authorised: !!authInfo.authorised,
-      processingState: ps
-    });
-  }
-
-  const issues = [];
-
-  // ─────────────────────────────────────────────────────────────
-  // ✅ NEW: Validation framework detection + coherent UX
-  // When HR validation framework is active:
-  //  - if validation ERROR => show it as primary issue
-  //  - if validation OK => suppress stale/conflicting HR_HOURS_MISSING warnings
-  // This is display-only; DB fields remain unchanged.
-  // ─────────────────────────────────────────────────────────────
-  const hrValidationRequired =
-    boolish(tsfin.client_hr_validation_required) ||
-    boolish(tsfin.hr_validation_required_for_invoice) ||
-    boolish(details.client_hr_validation_required) ||
-    boolish(details.hr_validation_required_for_invoice) ||
-    boolish(row.client_hr_validation_required) ||
-    boolish(row.hr_validation_required_for_invoice) ||
-    false;
-
-  const validationStatusRaw =
-    tsfin.validation_status ||
-    details.validation_status ||
-    row.validation_status ||
-    details.timesheet_validation_status ||
-    row.timesheet_validation_status ||
-    null;
-
-  const validationStatus = String(validationStatusRaw || '').trim().toUpperCase();
-
-  const validationFrameworkInUse = !!hrValidationRequired;
-
-  // Helper: decide whether a validation status is "OK" vs "ERROR"
-  const validationIsOk =
-    (validationStatus === 'VALIDATION_OK' || validationStatus === 'OK' || validationStatus === 'PASS' || validationStatus === 'OVERRIDDEN');
-
-  const validationIsError =
-    (validationStatus === 'VALIDATION_ERROR' || validationStatus === 'ERROR' || validationStatus === 'FAIL');
-
-  if (validationFrameworkInUse) {
-    if (validationIsError) {
-      issues.push('Validation failed (HealthRoster): this timesheet is not consistent with HealthRoster and is blocked until corrected or overridden.');
-    } else if (validationIsOk) {
-      // We do not push an "OK" issue line; we just use this to suppress conflicting crosscheck warnings below.
-      // (User sees the OK status in HealthRoster validation screens, not as an "issue".)
-    } else if (validationStatus) {
-      // Unknown but present; surface as neutral info.
-      issues.push(`Validation status: ${validationStatus}.`);
-    } else {
-      // Validation required but no status present: treat as informational blocker.
-      issues.push('Validation is required for this client, but no validation result is recorded yet.');
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // ✅ NEW: Reference blocker issue + per-day/segment detail
-  // Source of truth:
-  //  - ref blocker codes live in issue_codes (Option A strings)
-  //  - detail list lives in details.refs_missing_items_json / count (details view only)
-  // ─────────────────────────────────────────────────────────────
-  try {
-    const rawCodes =
-      Array.isArray(row?.issue_codes) ? row.issue_codes :
-      (Array.isArray(details?.issue_codes) ? details.issue_codes : []);
-
-    const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
-
-    // ✅ Friendly mapping for "Refs - Timesheet PDF invalid"
-    if (codes.includes('Refs - Timesheet PDF invalid')) {
-      const smUpper = String(ts?.submission_mode || '').trim().toUpperCase();
-
-      const qrIssued =
-        (
-          (ts?.qr_token && String(ts.qr_token).trim() && ts?.qr_generated_at)
-          || (ts?.qr_last_sent_hash && String(ts.qr_last_sent_hash).trim())
-        ) ? true : false;
-
-      if (smUpper === 'ELECTRONIC') {
-        issues.push('Refs changed since PDF generated — system will regenerate automatically.');
-      } else if (qrIssued) {
-        issues.push('Refs changed since QR PDF issued — signed/issued QR evidence may not match current refs.');
-      } else {
-        issues.push('Refs changed since timesheet PDF generated.');
-      }
-    }
-
-    const REF_PRECEDENCE = [
-      'Refs (Invoice and Issue Blocked)',
-      'Refs (Invoicing Blocked)',
-      'Refs (Issue Invoice Blocked)'
-    ];
-
-    let refChosen = '';
-    for (const k of REF_PRECEDENCE) {
-      if (codes.includes(k)) { refChosen = k; break; }
-    }
-
-    if (refChosen) {
-      if (refChosen === 'Refs (Invoice and Issue Blocked)') {
-        issues.push('Reference numbers are missing — invoicing and issuing invoices are both blocked until references are added.');
-      } else if (refChosen === 'Refs (Invoicing Blocked)') {
-        issues.push('Reference numbers are missing — invoicing is blocked until references are added.');
-      } else if (refChosen === 'Refs (Issue Invoice Blocked)') {
-        issues.push('Reference numbers are missing — invoices can be created, but cannot be issued until references are added.');
-      }
-
-      let items = details?.refs_missing_items_json ?? null;
-      if (typeof items === 'string') {
-        try { items = JSON.parse(items); } catch { items = null; }
-      }
-      if (!Array.isArray(items)) items = [];
-
-      const countRaw = details?.refs_missing_items_count;
-      const count = Number(countRaw);
-      const countNum = Number.isFinite(count) ? count : null;
-
-      if (items.length > 0) {
-        issues.push(`Missing reference numbers on ${items.length} day(s)/segment(s):`);
-
-        const sorted = items.slice().sort((a, b) => {
-          const ad = normStr(a?.day_ymd || a?.day_date || a?.date);
-          const bd = normStr(b?.day_ymd || b?.day_date || b?.date);
-          if (ad !== bd) return ad.localeCompare(bd);
-          const ak = normStr(a?.kind);
-          const bk = normStr(b?.kind);
-          if (ak !== bk) return ak.localeCompare(bk);
-          const ai = Number(a?.segment_index);
-          const bi = Number(b?.segment_index);
-          const aok = Number.isFinite(ai);
-          const bok = Number.isFinite(bi);
-          if (aok && bok) return ai - bi;
-          if (aok) return -1;
-          if (bok) return 1;
-          return 0;
-        });
-
-        for (const it of sorted) {
-          const kind = String(it?.kind || '').trim().toUpperCase();
-          let day = normStr(it?.day_ymd || it?.day_date || it?.date);
-
-          // Fallback day extraction from start values
-          if (!day) {
-            const s1 = normStr(it?.start_utc || it?.start);
-            const m = s1.match(/^(\d{4}-\d{2}-\d{2})/);
-            if (m && m[1]) day = m[1];
-          }
-
-          const dmy = day ? fmtYmdToDmy(day) : '';
-          const dow = day ? fmtDow(day) : '';
-
-          if (kind === 'TIMESHEET') {
-            const st = normStr(it?.start_utc || it?.start);
-            const en = normStr(it?.end_utc || it?.end);
-            const t1 = fmtHHMM(st);
-            const t2 = fmtHHMM(en);
-            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (Daily timesheet).`);
-          } else if (kind === 'FREEFORM') {
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'} (Weekly day reference).`);
-          } else if (kind === 'SEGMENT') {
-            const idx0 = Number(it?.segment_index);
-            const idx = Number.isFinite(idx0) ? (idx0 + 1) : null;
-
-            const st = normStr(it?.start);
-            const en = normStr(it?.end);
-            const t1 = fmtHHMM(st);
-            const t2 = fmtHHMM(en);
-            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
-
-            const segLabel = idx != null ? `Segment ${idx}` : 'Segment';
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (${segLabel}).`);
-          } else {
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}.`);
-          }
-        }
-      } else if (countNum != null && countNum > 0) {
-        issues.push(`Missing reference numbers on ${countNum} day(s)/segment(s).`);
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] reference missing detail mapping failed (non-fatal)', e);
-  }
-
-  // Processing-status based issues (keep concise)
-  if (procStatus === 'RATE_MISSING') {
-    issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
-  }
-  if (procStatus === 'PAY_CHANNEL_MISSING') {
-    issues.push('Pay channel missing: candidate bank/umbrella details incomplete for this timesheet.');
-  }
-  if (procStatus === 'CLIENT_UNRESOLVED') {
-    issues.push('Client unresolved: timesheet could not be linked to a client correctly.');
-  }
-  if (procStatus === 'UNASSIGNED') {
-    issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
-  }
-
-  // Pay hold (sheet-level, from row or tsfin)
-  const payOnHold = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
-  if (payOnHold) {
-    issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // ✅ NEW: SEGMENTS-mode per-day delays (matches your SQL rules)
-  //   - invoice delayed per day: invoice_locked_invoice_id empty AND invoice_target_week_start present AND target != baseline
-  //   - pay delayed per day: exclude_from_pay === true
-  // Only list dates that are actually delayed.
-  // ─────────────────────────────────────────────────────────────
-  try {
-    const weYmd = (ts.week_ending_date || row.week_ending_date || null);
-    const baselineWeekStart =
-      (weYmd && /^\d{4}-\d{2}-\d{2}$/.test(String(weYmd).slice(0,10)))
-        ? addDaysYmd(String(weYmd).slice(0,10), -6)
-        : null;
-
-    let inv = tsfin.invoice_breakdown_json ?? null;
-    if (typeof inv === 'string') {
-      try { inv = JSON.parse(inv); } catch { inv = null; }
-    }
-
-    const mode = String(inv?.mode || '').toUpperCase();
-    const segs = Array.isArray(inv?.segments) ? inv.segments : [];
-
-    if (mode === 'SEGMENTS' && segs.length) {
-      const invoiceDelayed = [];
-      const payDelayed     = [];
-
-      for (const seg of segs) {
-        if (!seg || typeof seg !== 'object') continue;
-
-        const segDate = String(seg.date || '').slice(0, 10);
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(segDate)) continue;
-
-        // --- pay delay (exclude_from_pay) ---
-        if (boolish(seg.exclude_from_pay)) {
-          const reason = (seg.held_back_reason != null && String(seg.held_back_reason).trim())
-            ? String(seg.held_back_reason).trim()
-            : '';
-          payDelayed.push({ date: segDate, reason });
-        }
-
-        // --- invoice delay (exactly your SQL rule) ---
-        const lockedRaw = seg.invoice_locked_invoice_id;
-        const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim();
-
-        const targetRaw = seg.invoice_target_week_start;
-        const target    = (targetRaw == null) ? '' : String(targetRaw).slice(0, 10).trim();
-
-        const baseStart = baselineWeekStart || weekStartMondayYmd(segDate);
-
-        const hasLocked = !!lockedId;
-        const hasTarget = !!target;
-
-        const isDelayed = (!hasLocked) && hasTarget && baseStart && (target !== baseStart);
-
-        if (isDelayed) {
-          const isPermanent = (target === '2099-01-05') || (/^2099-/.test(target));
-          invoiceDelayed.push({
-            date: segDate,
-            targetWeekStart: target,
-            permanent: isPermanent
-          });
-        }
-      }
-
-      if (invoiceDelayed.length) {
-        const allInvDelayed = (invoiceDelayed.length === segs.length);
-        issues.push(allInvDelayed
-          ? 'Whole invoice is delayed: all dated lines are being held back for invoicing.'
-          : `Some invoice issuing delays: ${invoiceDelayed.length} dated line(s) are being held back for invoicing.`
-        );
-
-        for (const it of invoiceDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
-          const dmy = fmtYmdToDmy(it.date);
-          const dow = fmtDow(it.date);
-          if (it.permanent) {
-            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — permanently delayed.`);
-          } else {
-            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — delayed until week starting ${fmtYmdToDmy(it.targetWeekStart)}.`);
-          }
-        }
-      }
-
-      if (payDelayed.length) {
-        const allPayDelayed = (payDelayed.length === segs.length);
-        issues.push(allPayDelayed
-          ? 'All pay is on hold (line-level): all dated lines are excluded from pay.'
-          : `Some pay is on hold (line-level): ${payDelayed.length} dated line(s) are excluded from pay.`
-        );
-
-        for (const it of payDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
-          const dmy = fmtYmdToDmy(it.date);
-          const dow = fmtDow(it.date);
-          const extra = it.reason ? ` (Reason: ${it.reason})` : '';
-          issues.push(`Pay excluded: ${dow ? dow + ' ' : ''}${dmy}${extra}.`);
-        }
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] SEGMENTS delay scan failed (non-fatal)', e);
-  }
-
-  // HR cross-check issues (from TSFIN)
-  // ✅ UPDATED: If validation framework is in use and validation is OK, suppress HR_HOURS_MISSING to avoid contradictory UX.
-  try {
-    const hrIssuesArr = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
-    const hrIssues = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
-
-    const seen = new Set();
-    for (const code of hrIssues) {
-      if (seen.has(code)) continue;
-      seen.add(code);
-
-      if (code === 'HOURS_MISMATCH_HR') {
-        issues.push('Timesheet hours mismatch with HealthRoster.');
-      } else if (code === 'HR_HOURS_MISSING') {
-        // Suppress when validation is in use and OK (stale TSFIN should clear after recompute).
-        if (validationFrameworkInUse && validationIsOk) {
-          // intentionally suppressed
-        } else {
-          issues.push('Timesheet has hours not yet on HealthRoster.');
-        }
-      } else if (code === 'DUPLICATE_CONTRACTS') {
-        issues.push('Multiple contracts cover the same period for this client.');
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] hr_crosscheck_issues mapping failed (non-fatal)', e);
-  }
-
-  // Authorisation required but not yet authorised (issue line)
-  if (authInfo.requires && !authInfo.authorised) {
-    issues.push('Awaiting authorisation by team.');
-  }
-
-  const issuesHtml = issues.length
-    ? `<ul class="mini">${issues.map(i => `<li>${esc(i)}</li>`).join('')}</ul>`
-    : `<span class="mini">No issues detected.</span>`;
-
-  GE();
-
-  return `
-    <div class="tabc">
-      <div class="card">
-        <div class="row">
-          <label>Processing State</label>
-          <div class="controls">
-            <span class="mini">${esc(ps.label || 'Unprocessed')}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:10px;">
-        <div class="row">
-          <label>Issues Flagged</label>
-          <div class="controls">
-            ${issuesHtml}
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
 
 
 // === REPLACE: openSearchModal (icons only, legacy forced hidden, robust wiring) ===
@@ -37454,6 +36968,689 @@ this._markDirty();
   `;
 }
 
+function renderTimesheetIssuesTab(ctx) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
+  const { row, details } = normaliseTimesheetCtx(ctx);
+
+  GC('render');
+
+  const tsfin  = details.tsfin || {};
+  const ts     = details.timesheet || {};
+
+  // ✅ Use the shared helper for requiresAuth/authorised/badge rule (per spec)
+  let authInfo = { requires: false, authorised: false, showAwaitingBadge: false };
+  if (typeof computeRequiresTimesheetAuthorisation === 'function') {
+    try {
+      authInfo = computeRequiresTimesheetAuthorisation(details, row) || authInfo;
+    } catch (e) {
+      if (LOGM) L('[ISSUES] computeRequiresTimesheetAuthorisation failed (non-fatal)', e);
+    }
+  }
+
+  // ✅ Use the shared helper for the mutually-exclusive Processing State label (per spec)
+  let ps = { key: '', label: 'Unprocessed' };
+  if (typeof computeTimesheetProcessingState === 'function') {
+    try {
+      ps = computeTimesheetProcessingState(details, row) || ps;
+    } catch (e) {
+      if (LOGM) L('[ISSUES] computeTimesheetProcessingState failed (non-fatal)', e);
+    }
+  } else {
+    // If helper is not yet implemented, do not invent alternate state logic here.
+    // The tab must still render without crashing.
+    ps = { key: 'UNPROCESSED', label: 'Unprocessed' };
+  }
+
+  const esc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  const fmtYmdToDmy = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const [y, m, d] = s.split('-');
+    return `${d}/${m}/${y}`;
+  };
+
+  const fmtDow = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+    const d = new Date(`${s}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'Europe/London' });
+  };
+
+  const addDaysYmd = (ymd, deltaDays) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    const [yy, mm, dd] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(yy, mm - 1, dd));
+    dt.setUTCDate(dt.getUTCDate() + Number(deltaDays || 0));
+    return dt.toISOString().slice(0, 10);
+  };
+
+  // Monday start (matches Postgres date_trunc('week', ...) behaviour)
+  const weekStartMondayYmd = (ymd) => {
+    const s = String(ymd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    const [yy, mm, dd] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(yy, mm - 1, dd));
+    const jsDow = dt.getUTCDay();        // Sun=0..Sat=6
+    const monIndex = (jsDow + 6) % 7;   // Mon=0..Sun=6
+    dt.setUTCDate(dt.getUTCDate() - monIndex);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  const boolish = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return (s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on');
+  };
+
+  const normStr = (v) => (v == null ? '' : String(v).trim());
+
+  const fmtHHMM = (isoLike) => {
+    const s = String(isoLike || '');
+    const m1 = s.match(/T(\d{2}:\d{2})/);
+    if (m1 && m1[1]) return m1[1];
+    const m2 = s.match(/(\d{2}:\d{2})/);
+    if (m2 && m2[1]) return m2[1];
+    return '';
+  };
+
+  // Facts used only for issues list (not for Processing State label)
+  const procStatusRaw =
+    tsfin.processing_status ||
+    details.processing_status ||
+    row.processing_status ||
+    null;
+
+  const procStatus = String(procStatusRaw || '').toUpperCase();
+
+  if (LOGM) {
+    L('snapshot', {
+      procStatus,
+      requiresAuth: !!authInfo.requires,
+      authorised: !!authInfo.authorised,
+      processingState: ps
+    });
+  }
+
+  const issues = [];
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Awaiting signed QR timesheet issue line
+  // Matches the shared truth model:
+  // qr_status=PENDING AND issued proof exists AND qr_scanned_at is null
+  // (optionally show once hours exist)
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const qrStatusU = String(ts?.qr_status ?? row?.qr_status ?? '').trim().toUpperCase();
+    const qrToken = (ts?.qr_token != null) ? String(ts.qr_token).trim() : '';
+    const qrGen = ts?.qr_generated_at || null;
+    const qrLastSentHash = (ts?.qr_last_sent_hash != null) ? String(ts.qr_last_sent_hash).trim() : '';
+    const qrScannedAt = ts?.qr_scanned_at || null;
+
+    const hasIssuedProof = (
+      ((qrToken && qrGen) ? true : false) ||
+      (!!qrLastSentHash)
+    );
+
+    const totalHours = Number(tsfin?.total_hours ?? details?.total_hours ?? row?.total_hours ?? 0);
+    const hasHours = Number.isFinite(totalHours) ? (totalHours > 0) : true;
+
+    const qrAwaitingSignatureUpload =
+      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt && hasHours);
+
+    if (qrAwaitingSignatureUpload) {
+      issues.push('Awaiting signed QR timesheet: this can be authorised for pay, but invoicing is blocked until the signed QR copy is received.');
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] QR awaiting signature detection failed (non-fatal)', e);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Validation framework detection + coherent UX
+  // ─────────────────────────────────────────────────────────────
+  const hrValidationRequired =
+    boolish(tsfin.client_hr_validation_required) ||
+    boolish(tsfin.hr_validation_required_for_invoice) ||
+    boolish(details.client_hr_validation_required) ||
+    boolish(details.hr_validation_required_for_invoice) ||
+    boolish(row.client_hr_validation_required) ||
+    boolish(row.hr_validation_required_for_invoice) ||
+    false;
+
+  const validationStatusRaw =
+    tsfin.validation_status ||
+    details.validation_status ||
+    row.validation_status ||
+    details.timesheet_validation_status ||
+    row.timesheet_validation_status ||
+    null;
+
+  const validationStatus = String(validationStatusRaw || '').trim().toUpperCase();
+
+  const validationFrameworkInUse = !!hrValidationRequired;
+
+  const validationIsOk =
+    (validationStatus === 'VALIDATION_OK' || validationStatus === 'OK' || validationStatus === 'PASS' || validationStatus === 'OVERRIDDEN');
+
+  const validationIsError =
+    (validationStatus === 'VALIDATION_ERROR' || validationStatus === 'ERROR' || validationStatus === 'FAIL');
+
+  if (validationFrameworkInUse) {
+    if (validationIsError) {
+      issues.push('Validation failed (HealthRoster): this timesheet is not consistent with HealthRoster and is blocked until corrected or overridden.');
+    } else if (validationIsOk) {
+      // Do not show "OK" as an issue line.
+    } else if (validationStatus) {
+      issues.push(`Validation status: ${validationStatus}.`);
+    } else {
+      issues.push('Validation is required for this client, but no validation result is recorded yet.');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Reference blocker issue + per-day/segment detail
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const rawCodes =
+      Array.isArray(row?.issue_codes) ? row.issue_codes :
+      (Array.isArray(details?.issue_codes) ? details.issue_codes : []);
+
+    const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
+
+    if (codes.includes('Refs - Timesheet PDF invalid')) {
+      const smUpper = String(ts?.submission_mode || '').trim().toUpperCase();
+
+      const qrIssued =
+        (
+          (ts?.qr_token && String(ts.qr_token).trim() && ts?.qr_generated_at)
+          || (ts?.qr_last_sent_hash && String(ts.qr_last_sent_hash).trim())
+        ) ? true : false;
+
+      if (smUpper === 'ELECTRONIC') {
+        issues.push('Refs changed since PDF generated — system will regenerate automatically.');
+      } else if (qrIssued) {
+        issues.push('Refs changed since QR PDF issued — signed/issued QR evidence may not match current refs.');
+      } else {
+        issues.push('Refs changed since timesheet PDF generated.');
+      }
+    }
+
+    const REF_PRECEDENCE = [
+      'Refs (Invoice and Issue Blocked)',
+      'Refs (Invoicing Blocked)',
+      'Refs (Issue Invoice Blocked)'
+    ];
+
+    let refChosen = '';
+    for (const k of REF_PRECEDENCE) {
+      if (codes.includes(k)) { refChosen = k; break; }
+    }
+
+    if (refChosen) {
+      if (refChosen === 'Refs (Invoice and Issue Blocked)') {
+        issues.push('Reference numbers are missing — invoicing and issuing invoices are both blocked until references are added.');
+      } else if (refChosen === 'Refs (Invoicing Blocked)') {
+        issues.push('Reference numbers are missing — invoicing is blocked until references are added.');
+      } else if (refChosen === 'Refs (Issue Invoice Blocked)') {
+        issues.push('Reference numbers are missing — invoices can be created, but cannot be issued until references are added.');
+      }
+
+      let items = details?.refs_missing_items_json ?? null;
+      if (typeof items === 'string') {
+        try { items = JSON.parse(items); } catch { items = null; }
+      }
+      if (!Array.isArray(items)) items = [];
+
+      const countRaw = details?.refs_missing_items_count;
+      const count = Number(countRaw);
+      const countNum = Number.isFinite(count) ? count : null;
+
+      if (items.length > 0) {
+        issues.push(`Missing reference numbers on ${items.length} day(s)/segment(s):`);
+
+        const sorted = items.slice().sort((a, b) => {
+          const ad = normStr(a?.day_ymd || a?.day_date || a?.date);
+          const bd = normStr(b?.day_ymd || b?.day_date || b?.date);
+          if (ad !== bd) return ad.localeCompare(bd);
+          const ak = normStr(a?.kind);
+          const bk = normStr(b?.kind);
+          if (ak !== bk) return ak.localeCompare(bk);
+          const ai = Number(a?.segment_index);
+          const bi = Number(b?.segment_index);
+          const aok = Number.isFinite(ai);
+          const bok = Number.isFinite(bi);
+          if (aok && bok) return ai - bi;
+          if (aok) return -1;
+          if (bok) return 1;
+          return 0;
+        });
+
+        for (const it of sorted) {
+          const kind = String(it?.kind || '').trim().toUpperCase();
+          let day = normStr(it?.day_ymd || it?.day_date || it?.date);
+
+          if (!day) {
+            const s1 = normStr(it?.start_utc || it?.start);
+            const m = s1.match(/^(\d{4}-\d{2}-\d{2})/);
+            if (m && m[1]) day = m[1];
+          }
+
+          const dmy = day ? fmtYmdToDmy(day) : '';
+          const dow = day ? fmtDow(day) : '';
+
+          if (kind === 'TIMESHEET') {
+            const st = normStr(it?.start_utc || it?.start);
+            const en = normStr(it?.end_utc || it?.end);
+            const t1 = fmtHHMM(st);
+            const t2 = fmtHHMM(en);
+            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (Daily timesheet).`);
+          } else if (kind === 'FREEFORM') {
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'} (Weekly day reference).`);
+          } else if (kind === 'SEGMENT') {
+            const idx0 = Number(it?.segment_index);
+            const idx = Number.isFinite(idx0) ? (idx0 + 1) : null;
+
+            const st = normStr(it?.start);
+            const en = normStr(it?.end);
+            const t1 = fmtHHMM(st);
+            const t2 = fmtHHMM(en);
+            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
+
+            const segLabel = idx != null ? `Segment ${idx}` : 'Segment';
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (${segLabel}).`);
+          } else {
+            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}.`);
+          }
+        }
+      } else if (countNum != null && countNum > 0) {
+        issues.push(`Missing reference numbers on ${countNum} day(s)/segment(s).`);
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] reference missing detail mapping failed (non-fatal)', e);
+  }
+
+  // Processing-status based issues (keep concise)
+  if (procStatus === 'RATE_MISSING') {
+    issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
+  }
+  if (procStatus === 'PAY_CHANNEL_MISSING') {
+    issues.push('Pay channel missing: candidate bank/umbrella details incomplete for this timesheet.');
+  }
+  if (procStatus === 'CLIENT_UNRESOLVED') {
+    issues.push('Client unresolved: timesheet could not be linked to a client correctly.');
+  }
+  if (procStatus === 'UNASSIGNED') {
+    issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
+  }
+
+  // Pay hold (sheet-level, from row or tsfin)
+  const payOnHold = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
+  if (payOnHold) {
+    issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ SEGMENTS-mode per-day delays (unchanged)
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const weYmd = (ts.week_ending_date || row.week_ending_date || null);
+    const baselineWeekStart =
+      (weYmd && /^\d{4}-\d{2}-\d{2}$/.test(String(weYmd).slice(0,10)))
+        ? addDaysYmd(String(weYmd).slice(0,10), -6)
+        : null;
+
+    let inv = tsfin.invoice_breakdown_json ?? null;
+    if (typeof inv === 'string') {
+      try { inv = JSON.parse(inv); } catch { inv = null; }
+    }
+
+    const mode = String(inv?.mode || '').toUpperCase();
+    const segs = Array.isArray(inv?.segments) ? inv.segments : [];
+
+    if (mode === 'SEGMENTS' && segs.length) {
+      const invoiceDelayed = [];
+      const payDelayed     = [];
+
+      for (const seg of segs) {
+        if (!seg || typeof seg !== 'object') continue;
+
+        const segDate = String(seg.date || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(segDate)) continue;
+
+        // --- pay delay (exclude_from_pay) ---
+        if (boolish(seg.exclude_from_pay)) {
+          const reason = (seg.held_back_reason != null && String(seg.held_back_reason).trim())
+            ? String(seg.held_back_reason).trim()
+            : '';
+          payDelayed.push({ date: segDate, reason });
+        }
+
+        // --- invoice delay (exactly your SQL rule) ---
+        const lockedRaw = seg.invoice_locked_invoice_id;
+        const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim();
+
+        const targetRaw = seg.invoice_target_week_start;
+        const target    = (targetRaw == null) ? '' : String(targetRaw).slice(0, 10).trim();
+
+        const baseStart = baselineWeekStart || weekStartMondayYmd(segDate);
+
+        const hasLocked = !!lockedId;
+        const hasTarget = !!target;
+
+        const isDelayed = (!hasLocked) && hasTarget && baseStart && (target !== baseStart);
+
+        if (isDelayed) {
+          const isPermanent = (target === '2099-01-05') || (/^2099-/.test(target));
+          invoiceDelayed.push({
+            date: segDate,
+            targetWeekStart: target,
+            permanent: isPermanent
+          });
+        }
+      }
+
+      if (invoiceDelayed.length) {
+        const allInvDelayed = (invoiceDelayed.length === segs.length);
+        issues.push(allInvDelayed
+          ? 'Whole invoice is delayed: all dated lines are being held back for invoicing.'
+          : `Some invoice issuing delays: ${invoiceDelayed.length} dated line(s) are being held back for invoicing.`
+        );
+
+        for (const it of invoiceDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
+          const dmy = fmtYmdToDmy(it.date);
+          const dow = fmtDow(it.date);
+          if (it.permanent) {
+            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — permanently delayed.`);
+          } else {
+            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — delayed until week starting ${fmtYmdToDmy(it.targetWeekStart)}.`);
+          }
+        }
+      }
+
+      if (payDelayed.length) {
+        const allPayDelayed = (payDelayed.length === segs.length);
+        issues.push(allPayDelayed
+          ? 'All pay is on hold (line-level): all dated lines are excluded from pay.'
+          : `Some pay is on hold (line-level): ${payDelayed.length} dated line(s) are excluded from pay.`
+        );
+
+        for (const it of payDelayed.sort((a,b)=>String(a.date).localeCompare(String(b.date)))) {
+          const dmy = fmtYmdToDmy(it.date);
+          const dow = fmtDow(it.date);
+          const extra = it.reason ? ` (Reason: ${it.reason})` : '';
+          issues.push(`Pay excluded: ${dow ? dow + ' ' : ''}${dmy}${extra}.`);
+        }
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] SEGMENTS delay scan failed (non-fatal)', e);
+  }
+
+  // HR cross-check issues (from TSFIN)
+  // ✅ If validation framework is in use and validation is OK, suppress HR_HOURS_MISSING to avoid contradictory UX.
+  try {
+    const hrIssuesArr = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
+    const hrIssues = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
+
+    const seen = new Set();
+    for (const code of hrIssues) {
+      if (seen.has(code)) continue;
+      seen.add(code);
+
+      if (code === 'HOURS_MISMATCH_HR') {
+        issues.push('Timesheet hours mismatch with HealthRoster.');
+      } else if (code === 'HR_HOURS_MISSING') {
+        if (validationFrameworkInUse && validationIsOk) {
+          // intentionally suppressed
+        } else {
+          issues.push('Timesheet has hours not yet on HealthRoster.');
+        }
+      } else if (code === 'DUPLICATE_CONTRACTS') {
+        issues.push('Multiple contracts cover the same period for this client.');
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[ISSUES] hr_crosscheck_issues mapping failed (non-fatal)', e);
+  }
+
+  // Authorisation required but not yet authorised (issue line)
+  if (authInfo.requires && !authInfo.authorised) {
+    issues.push('Awaiting authorisation by team.');
+  }
+
+  const issuesHtml = issues.length
+    ? `<ul class="mini">${issues.map(i => `<li>${esc(i)}</li>`).join('')}</ul>`
+    : `<span class="mini">No issues detected.</span>`;
+
+  GE();
+
+  return `
+    <div class="tabc">
+      <div class="card">
+        <div class="row">
+          <label>Processing State</label>
+          <div class="controls">
+            <span class="mini">${esc(ps.label || 'Unprocessed')}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Issues Flagged</label>
+          <div class="controls">
+            ${issuesHtml}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+async function authoriseTimesheet(ctxOrId, expectedTimesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUTH]');
+  GC('authoriseTimesheet');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('authoriseTimesheet: timesheetId is required');
+  }
+
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(tsId);
+
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/authorise`;
+
+  const payload = { expected_timesheet_id: expected };
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW RULE: Unsigned QR cannot be authorised.
+  // Block client-side (UX), matching the truth model:
+  // qr_status=PENDING AND (issued proof exists) AND qr_scanned_at is null
+  // Prefer details.timesheet fields when available; fallback to issue_codes.
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const dts = mc.timesheetDetails?.timesheet || {};
+    const qrStatusU = String(dts.qr_status ?? row.qr_status ?? '').trim().toUpperCase();
+
+    const qrToken = (dts.qr_token != null ? String(dts.qr_token).trim() : '');
+    const qrGen = dts.qr_generated_at || null;
+    const qrLastSentHash = (dts.qr_last_sent_hash != null ? String(dts.qr_last_sent_hash).trim() : '');
+    const qrScannedAt = dts.qr_scanned_at || null;
+
+    const hasIssuedProof = (
+      ((qrToken && qrGen) ? true : false) ||
+      (!!qrLastSentHash)
+    );
+
+    const qrAwaitingSignatureUpload =
+      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt);
+
+    let hasIssueCode = false;
+    try {
+      const codes = Array.isArray(row?.issue_codes) ? row.issue_codes : [];
+      hasIssueCode = codes.map(x => String(x || '').trim()).includes('Awaiting signed QR timesheet');
+    } catch {}
+
+    if (qrAwaitingSignatureUpload || hasIssueCode) {
+      const msg = 'Cannot authorise until the signed QR timesheet is received.';
+      if (typeof window.toast === 'function') window.toast(msg, { kind: 'warn' });
+      else if (typeof window.showToast === 'function') window.showToast(msg, 'warn');
+      else window.alert(msg);
+
+      GE();
+      return { ok: false, blocked: true, reason: 'QR_UNSIGNED' };
+    }
+  } catch (e) {
+    // Non-fatal; do not block authorisation if block logic fails.
+    if (LOGM) L('[TS][AUTH] unsigned-QR block check failed (non-fatal)', e);
+  }
+
+  L('REQUEST', { url: API(urlPath), tsId, payload });
+
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
+
+  L('authorise result', json);
+
+  const newId =
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
+
+  // Refresh details so Overview, Lines, Finance reflect new status
+  let newDetails = mc.timesheetDetails;
+  try {
+    newDetails = await fetchTimesheetDetails(resolvedId);
+    window.modalCtx.timesheetDetails = newDetails;
+  } catch (err) {
+    L('refresh details failed (non-fatal)', err);
+  }
+
+  // Update summary row if present
+  const tsfin = newDetails?.tsfin || {};
+  const summaryStageFromDetails =
+    (newDetails && typeof newDetails === 'object' && newDetails.summary_stage) ? newDetails.summary_stage :
+    (tsfin && typeof tsfin === 'object' && tsfin.summary_stage) ? tsfin.summary_stage :
+    (newDetails && typeof newDetails === 'object' && newDetails.row && newDetails.row.summary_stage) ? newDetails.row.summary_stage :
+    (mc.data?.summary_stage ?? row.summary_stage ?? null);
+
+  const updatedRow = {
+    ...(mc.data || row),
+    summary_stage: (json && json.summary_stage) ? json.summary_stage : summaryStageFromDetails,
+    processing_status: tsfin.processing_status || mc.data?.processing_status || row.processing_status,
+    total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
+    total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
+    margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
+    timesheet_id: resolvedId,
+    id: resolvedId
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  // ✅ keep guarded-write expected id aligned
+  if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('UPDATED ROW', updatedRow);
+  GE();
+  return { ok: true, updatedRow, details: newDetails, json };
+}
+
+
+async function contractWeekAuthorise(week_id, expectedTimesheetId /* optional */) {
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (window.modalCtx?.timesheetMeta?.expected_timesheet_id
+      ? String(window.modalCtx.timesheetMeta.expected_timesheet_id)
+      : '');
+
+  if (!expected) throw new Error('contractWeekAuthorise: expected_timesheet_id is required');
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW RULE: Unsigned QR cannot be authorised.
+  // Block client-side, matching the truth model, before calling backend.
+  // Prefer modal details if available; fallback to issue_codes.
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const mc = window.modalCtx || {};
+    const row = mc.data || {};
+    const dts = mc.timesheetDetails?.timesheet || {};
+
+    const qrStatusU = String(dts.qr_status ?? row.qr_status ?? '').trim().toUpperCase();
+
+    const qrToken = (dts.qr_token != null ? String(dts.qr_token).trim() : '');
+    const qrGen = dts.qr_generated_at || null;
+    const qrLastSentHash = (dts.qr_last_sent_hash != null ? String(dts.qr_last_sent_hash).trim() : '');
+    const qrScannedAt = dts.qr_scanned_at || null;
+
+    const hasIssuedProof = (
+      ((qrToken && qrGen) ? true : false) ||
+      (!!qrLastSentHash)
+    );
+
+    const qrAwaitingSignatureUpload =
+      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt);
+
+    let hasIssueCode = false;
+    try {
+      const codes = Array.isArray(row?.issue_codes) ? row.issue_codes : [];
+      hasIssueCode = codes.map(x => String(x || '').trim()).includes('Awaiting signed QR timesheet');
+    } catch {}
+
+    if (qrAwaitingSignatureUpload || hasIssueCode) {
+      const msg = 'Cannot authorise until the signed QR timesheet is received.';
+      if (typeof window.toast === 'function') window.toast(msg, { kind: 'warn' });
+      else if (typeof window.showToast === 'function') window.showToast(msg, 'warn');
+      else window.alert(msg);
+
+      return { ok: false, blocked: true, reason: 'QR_UNSIGNED' };
+    }
+  } catch {}
+
+  const json = await apiPostJson(`/api/contract-weeks/${_enc(week_id)}/manual-authorise`, {
+    expected_timesheet_id: expected
+  });
+
+  return json;
+}
 
 function renderSummary(rows){
   currentRows = rows;
@@ -37492,67 +37689,66 @@ function renderSummary(rows){
   const clearSelection = ()=>{ sel.ids.clear(); };
 
    // Small helper: render red issue badges or green OK for the Issues column
-  const renderIssueBadges = (codes) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'issue-badges';
+ const renderIssueBadges = (codes) => {
+  const wrap = document.createElement('div');
+  wrap.className = 'issue-badges';
 
-    const raw = Array.isArray(codes) ? codes.filter(Boolean) : [];
-    const arr0 = raw.map(x => String(x || '').trim()).filter(Boolean);
+  const raw = Array.isArray(codes) ? codes.filter(Boolean) : [];
+  const arr0 = raw.map(x => String(x || '').trim()).filter(Boolean);
 
-    // ✅ Reference blocker pills (Option A: DB emits exact strings into issue_codes)
-    // Ensure we never display more than one, even if legacy data ever contains multiples.
-    const REF_ALL = new Set([
-      'Refs (Invoicing Blocked)',
-      'Refs (Issue Invoice Blocked)',
-      'Refs (Invoice and Issue Blocked)'
-    ]);
+  // ✅ Reference blocker pills (Option A: DB emits exact strings into issue_codes)
+  // Ensure we never display more than one, even if legacy data ever contains multiples.
+  const REF_ALL = new Set([
+    'Refs (Invoicing Blocked)',
+    'Refs (Issue Invoice Blocked)',
+    'Refs (Invoice and Issue Blocked)'
+  ]);
+  const REF_PRECEDENCE = [
+    'Refs (Invoice and Issue Blocked)',
+    'Refs (Invoicing Blocked)',
+    'Refs (Issue Invoice Blocked)'
+  ];
 
-    const REF_PRECEDENCE = [
-      'Refs (Invoice and Issue Blocked)',
-      'Refs (Invoicing Blocked)',
-      'Refs (Issue Invoice Blocked)'
-    ];
+  let refChosen = '';
+  for (const k of REF_PRECEDENCE) {
+    if (arr0.includes(k)) { refChosen = k; break; }
+  }
 
-    let refChosen = '';
-    for (const k of REF_PRECEDENCE) {
-      if (arr0.includes(k)) { refChosen = k; break; }
-    }
+  const rest = arr0.filter(x => !REF_ALL.has(x));
+  const arr = refChosen ? [refChosen, ...rest] : rest;
 
-    // Keep all other issue codes, but remove any additional ref codes so only one displays.
-    const rest = arr0.filter(x => !REF_ALL.has(x));
-
-    // Place the chosen ref pill first (most important blocker), then all other issues.
-    const arr = refChosen ? [refChosen, ...rest] : rest;
-
-    if (!arr.length) {
-      // No issues → green OK badge
-      const ok = document.createElement('span');
-      ok.className = 'pill pill-ok';
-      ok.textContent = 'OK';
-      wrap.appendChild(ok);
-      return wrap;
-    }
-
-    arr.forEach(code => {
-      const span = document.createElement('span');
-      const label = String(code || '').trim() || 'Issue';
-
-      // Default: red (issue)
-      let cls = 'pill pill-bad';
-
-      // Slightly softer amber for "On hold" / "Validation" / "Authorisation"
-      const up = label.toUpperCase();
-      if (up === 'ON HOLD' || up === 'VALIDATION' || up === 'AUTHORISATION') {
-        cls = 'pill pill-warn';
-      }
-
-      span.className = cls;
-      span.textContent = label;
-      wrap.appendChild(span);
-    });
-
+  if (!arr.length) {
+    const ok = document.createElement('span');
+    ok.className = 'pill pill-ok';
+    ok.textContent = 'OK';
+    wrap.appendChild(ok);
     return wrap;
-  };
+  }
+
+  arr.forEach(code => {
+    const span = document.createElement('span');
+    const label = String(code || '').trim() || 'Issue';
+
+    let cls = 'pill pill-bad';
+    const up = label.toUpperCase();
+
+    // ✅ WARN (amber) pills
+    if (
+      up === 'ON HOLD' ||
+      up === 'VALIDATION' ||
+      up === 'AUTHORISATION' ||
+      up === 'AWAITING SIGNED QR TIMESHEET'
+    ) {
+      cls = 'pill pill-warn';
+    }
+
+    span.className = cls;
+    span.textContent = label;
+    wrap.appendChild(span);
+  });
+
+  return wrap;
+};
 
 
   // Tie selection to dataset via fingerprint (filters + section)
@@ -45452,7 +45648,6 @@ const isUtilityKind =
   btnClose.setAttribute('title', label);
 };
 
-
 top._updateButtons = ()=> {
   try {
     const h = document.getElementById('modalHint');
@@ -45813,13 +46008,43 @@ try {
   requiresAuthNow = false;
 }
 
+  // ✅ NEW: unsigned QR gating for Authorise button (show shaded + tooltip; do not allow click)
+  let qrUnsignedNow = false;
+  try {
+    const qrStatusU = String(tsNowObj.qr_status ?? mcNow.data?.qr_status ?? '').trim().toUpperCase();
+    const qrToken = (tsNowObj.qr_token != null ? String(tsNowObj.qr_token).trim() : (mcNow.data?.qr_token != null ? String(mcNow.data.qr_token).trim() : ''));
+    const qrGen = (tsNowObj.qr_generated_at ?? mcNow.data?.qr_generated_at ?? null);
+    const qrLastSentHash = (tsNowObj.qr_last_sent_hash != null ? String(tsNowObj.qr_last_sent_hash).trim() : (mcNow.data?.qr_last_sent_hash != null ? String(mcNow.data.qr_last_sent_hash).trim() : ''));
+    const qrScannedAt = (tsNowObj.qr_scanned_at ?? mcNow.data?.qr_scanned_at ?? null);
 
-  const canAuthoriseNow =
+    const hasIssuedProof = (
+      ((qrToken && qrGen) ? true : false) ||
+      (!!qrLastSentHash)
+    );
+
+    const byTruthModel = (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt);
+
+    let byIssueCode = false;
+    try {
+      const codes = Array.isArray(mcNow.data?.issue_codes) ? mcNow.data.issue_codes : [];
+      byIssueCode = codes.map(x => String(x || '').trim()).includes('Awaiting signed QR timesheet');
+    } catch {}
+
+    qrUnsignedNow = (byTruthModel || byIssueCode);
+  } catch {
+    qrUnsignedNow = false;
+  }
+
+  const canAuthoriseNowBase =
     (top.mode === 'view') &&
     !!tsIdNow &&
     !lockedNow &&
     requiresAuthNow &&
     !isAuthorisedNow;
+
+  const canAuthoriseNow = canAuthoriseNowBase && !qrUnsignedNow;
+
+  const showAuthoriseDisabled = canAuthoriseNowBase && qrUnsignedNow;
 
   const canUnauthoriseNow =
     (top.mode === 'view') &&
@@ -46016,35 +46241,68 @@ const canProcessNow =
 
       // ── Authorise ──
       if (btnTsAuthorise) {
-        btnTsAuthorise.style.display = canAuthoriseNow ? '' : 'none';
-        btnTsAuthorise.disabled      = !!top._saving;
+        const showBtn = (canAuthoriseNow || showAuthoriseDisabled);
+        btnTsAuthorise.style.display = showBtn ? '' : 'none';
 
-        btnTsAuthorise.dataset.ownerToken = top._token;
-        btnTsAuthorise.onclick = async () => {
-          const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
-          if (!fr || btnTsAuthorise.dataset.ownerToken !== fr._token) return;
+        // clear any previous disabled shading/hint
+        try {
+          btnTsAuthorise.style.opacity = '';
+          btnTsAuthorise.style.filter = '';
+          btnTsAuthorise.style.pointerEvents = '';
+          btnTsAuthorise.removeAttribute('aria-disabled');
+          btnTsAuthorise.removeAttribute('data-disabled');
+          btnTsAuthorise.removeAttribute('title');
+        } catch {}
 
-          const id = (window.modalCtx?.data?.timesheet_id || null);
-          if (!id) { alert('Timesheet id missing.'); return; }
+        if (showAuthoriseDisabled) {
+          // ✅ Shade out (do NOT remove), keep hover title working (avoid native disabled)
+          btnTsAuthorise.disabled = false;
+          btnTsAuthorise.style.opacity = '0.45';
+          btnTsAuthorise.style.filter = 'grayscale(40%)';
+          btnTsAuthorise.style.pointerEvents = 'auto';
+          btnTsAuthorise.setAttribute('aria-disabled', 'true');
+          btnTsAuthorise.setAttribute('data-disabled', '1');
+          btnTsAuthorise.setAttribute('title', 'QR Timesheet has not been signed by manager yet');
 
-          try {
-            await authoriseTimesheet(id);
-            window.__toast && window.__toast('Timesheet authorised');
-            await refreshFooter();
-          } catch (e) {
+          btnTsAuthorise.dataset.ownerToken = top._token;
+          btnTsAuthorise.onclick = async (ev) => {
+            try { ev && ev.preventDefault && ev.preventDefault(); } catch {}
+            try { ev && ev.stopPropagation && ev.stopPropagation(); } catch {}
+            const msg = 'QR Timesheet has not been signed by manager yet';
+            if (window.__toast) window.__toast(msg);
+            else alert(msg);
+            return;
+          };
+        } else if (canAuthoriseNow) {
+          btnTsAuthorise.disabled = !!top._saving;
+
+          btnTsAuthorise.dataset.ownerToken = top._token;
+          btnTsAuthorise.onclick = async () => {
+            const fr = (typeof currentFrame === 'function') ? currentFrame() : null;
+            if (!fr || btnTsAuthorise.dataset.ownerToken !== fr._token) return;
+
+            const id = (window.modalCtx?.data?.timesheet_id || null);
+            if (!id) { alert('Timesheet id missing.'); return; }
+
             try {
-              if (typeof tsHandleMoved409Modal === 'function') {
-                const handled = await tsHandleMoved409Modal(e, {
-                  tabKey: 'overview',
-                  label: 'footer-authorise',
-                  toast: 'This timesheet changed while you were editing; review and try again.'
-                });
-                if (handled) return;
-              }
-            } catch {}
-            alert(e?.message || 'Failed to authorise timesheet.');
-          }
-        };
+              await authoriseTimesheet(id);
+              window.__toast && window.__toast('Timesheet authorised');
+              await refreshFooter();
+            } catch (e) {
+              try {
+                if (typeof tsHandleMoved409Modal === 'function') {
+                  const handled = await tsHandleMoved409Modal(e, {
+                    tabKey: 'overview',
+                    label: 'footer-authorise',
+                    toast: 'This timesheet changed while you were editing; review and try again.'
+                  });
+                  if (handled) return;
+                }
+              } catch {}
+              alert(e?.message || 'Failed to authorise timesheet.');
+            }
+          };
+        }
       }
 
       // ── Unauthorise ──
@@ -60827,7 +61085,6 @@ function computeTimesheetProcessingState(details, row) {
 
   return { key: 'UNPROCESSED', label: 'Unprocessed' };
 }
-
 async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][VIEWER]');
   GC('openTimesheetEvidenceViewerExisting');
@@ -61449,6 +61706,19 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   }
   const storageKey = storageKeyRaw.replace(/^\/+/, '');
 
+  const tsIdForPdf = String(tsIdNow() || tsId);
+  const evidenceIdUpper = String(evidenceId || '').trim().toUpperCase();
+  const storageKeyUpper = String(storageKey || '').trim().toUpperCase();
+
+  // ✅ NEW: If this is the SYSTEM-GENERATED timesheet PDF, do NOT presign storage_key directly.
+  // Route via getTimesheetPdfUrl(timesheetId) so the backend can ensure a non-dirty PDF.
+  const isSystemGeneratedTimesheetPdf =
+    isSystem && (
+      evidenceIdUpper.startsWith('SYS:PDF:GENERATED') ||
+      evidenceIdUpper.startsWith('SYS:PDF:CURRENT') ||
+      String(storageKey || '').replace(/^\/+/, '').trim() === `docs-pdf/timesheets/ts_${tsIdForPdf}.pdf`
+    );
+
   L('ENTRY', {
     tsId,
     evidenceId,
@@ -61458,10 +61728,31 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     canDelete,
     canEditType,
     dt: dtRaw,
-    previewMode: previewMode || 'PDF'
+    previewMode: previewMode || 'PDF',
+    isSystemGeneratedTimesheetPdf
   });
 
-  const signedUrl = await presignDownload(storageKey);
+  let signedUrl = null;
+
+  if (isSystemGeneratedTimesheetPdf) {
+    try {
+      if (typeof getTimesheetPdfUrl !== 'function') {
+        GE();
+        throw new Error('getTimesheetPdfUrl is not available.');
+      }
+      signedUrl = await getTimesheetPdfUrl(tsIdForPdf);
+    } catch (err) {
+      // Best effort: if timesheet rotated while viewing, let caller refresh state
+      if (await handleMovedInViewer(err, 'evidence-viewer-open-sys-pdf')) {
+        GE();
+        return;
+      }
+      GE();
+      throw err;
+    }
+  } else {
+    signedUrl = await presignDownload(storageKey);
+  }
 
   const instanceId = `ts-ev-view-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const iframeId    = `${instanceId}-iframe`;
@@ -68170,8 +68461,6 @@ async function openTimesheetEvidenceReplaceDialog(file) {
   GE();
 }
 
-
-
 async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][REFRESH]');
   GC('refreshTimesheetEvidenceIntoModalState');
@@ -68252,6 +68541,17 @@ async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
           return;
         }
 
+        const idNow =
+          mc?.data?.timesheet_id ||
+          mc?.data?.id ||
+          String(timesheetId);
+
+        const tsIdForPdf = String(idNow || '');
+
+        const evidenceIdStr = (ev.id != null) ? String(ev.id) : '';
+        const isSystem =
+          (typeof ev.system === 'boolean') ? ev.system : String(evidenceIdStr).startsWith('SYS:');
+
         const keyRaw =
           (ev.download_storage_key != null && String(ev.download_storage_key).trim())
             ? String(ev.download_storage_key).trim()
@@ -68259,13 +68559,42 @@ async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
               ? String(ev.storage_key).trim()
               : '';
 
-        const key = keyRaw.replace(/^\/+/, '');
+        const key = keyRaw.replace(/^\/+/, '').trim();
+
+        // ✅ NEW: System-generated timesheet PDF must go via /api/timesheets/:id/pdf
+        // so the backend can ensure a non-dirty PDF.
+        const isCanonicalTsPdfKey = !!(key && key === `docs-pdf/timesheets/ts_${tsIdForPdf}.pdf`);
+        const evidenceIdUpper = String(evidenceIdStr || '').trim().toUpperCase();
+
+        const isSystemGeneratedTimesheetPdf =
+          isSystem && (
+            evidenceIdUpper.startsWith('SYS:PDF:GENERATED') ||
+            evidenceIdUpper.startsWith('SYS:PDF:CURRENT') ||
+            isCanonicalTsPdfKey
+          );
+
+        if (isSystemGeneratedTimesheetPdf) {
+          if (typeof getTimesheetPdfUrl !== 'function') {
+            window.__toast && window.__toast('Timesheet PDF endpoint is not available');
+            return;
+          }
+
+          const url = await getTimesheetPdfUrl(tsIdForPdf);
+          if (!url) {
+            window.__toast && window.__toast('Failed to open timesheet PDF');
+            return;
+          }
+
+          window.open(url, '_blank', 'noopener,noreferrer');
+          return;
+        }
+
         if (!key) {
           window.__toast && window.__toast('No downloadable file for this evidence item');
           return;
         }
 
-        // presign-download
+        // presign-download (non-system evidence and non-canonical PDFs)
         const presRes = await authFetch(API('/api/files/presign-download'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -68295,6 +68624,7 @@ async function refreshTimesheetEvidenceIntoModalState(timesheetId) {
     throw err;
   }
 }
+
 
 
 async function getTimesheetPdfUrl(timesheetId) {
@@ -68725,95 +69055,6 @@ async function handleTimesheetEvidenceRemoveClick(ev) {
   GE();
 }
 
-
-async function authoriseTimesheet(ctxOrId, expectedTimesheetId) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUTH]');
-  GC('authoriseTimesheet');
-
-  const mc  = window.modalCtx || {};
-  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
-  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
-
-  if (!tsId) {
-    L('ERROR: missing timesheetId');
-    GE();
-    throw new Error('authoriseTimesheet: timesheetId is required');
-  }
-
-  const expected =
-    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
-    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
-    String(tsId);
-
-  const encId   = encodeURIComponent(tsId);
-  const urlPath = `/api/timesheets/${encId}/authorise`;
-
-  const payload = { expected_timesheet_id: expected };
-
-  L('REQUEST', { url: API(urlPath), tsId, payload });
-
-  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
-  const json = await apiPostJson(urlPath, payload);
-
-  L('authorise result', json);
-
-  const newId =
-    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
-      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
-      : null;
-
-  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
-
-  // Refresh details so Overview, Lines, Finance reflect new status
-  let newDetails = mc.timesheetDetails;
-  try {
-    newDetails = await fetchTimesheetDetails(resolvedId);
-    window.modalCtx.timesheetDetails = newDetails;
-  } catch (err) {
-    L('refresh details failed (non-fatal)', err);
-  }
-
-  // Update summary row if present
-  const tsfin = newDetails?.tsfin || {};
-  const updatedRow = {
-    ...(mc.data || row),
-    summary_stage: json.summary_stage || mc.data?.summary_stage || 'READY_FOR_INVOICE',
-    processing_status: tsfin.processing_status || mc.data?.processing_status,
-    total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
-    total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
-    margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
-    timesheet_id: resolvedId,
-    id: resolvedId
-  };
-
-  window.modalCtx.data = updatedRow;
-
-  // ✅ keep guarded-write expected id aligned
-  if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
-    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
-  }
-
-  try {
-    window.__pendingFocus = {
-      section: 'timesheets',
-      ids: [String(resolvedId)],
-      primaryIds: [String(resolvedId)]
-    };
-  } catch {}
-
-  // ✅ Keep the summary grid consistent
-  try {
-    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-      await refreshTimesheetsSummaryAfterRotation(resolvedId);
-    }
-  } catch (e) {
-    L('summary refresh failed (non-fatal)', e);
-  }
-
-  L('UPDATED ROW', updatedRow);
-  GE();
-  return { ok: true, updatedRow, details: newDetails, json };
-}
 
 async function toggleTimesheetPayHold(ctxOrId, onHold, reason = '', expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][PAY-HOLD]');
