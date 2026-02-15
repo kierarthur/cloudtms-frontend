@@ -55613,22 +55613,22 @@ async function renderClientSettingsUI(settingsObj){
     }
   };
 
-  const applyFromDOM = (soft) => {
-    const frame = _currentFrame();
-    if (!frame || frame.mode !== 'edit') return;
+ const applyFromDOM = (soft) => {
+  const frame = _currentFrame();
+  if (!frame || (frame.mode !== 'edit' && frame.mode !== 'create')) return;
 
-    const prev = ctx.clientSettingsState || {};
-    const vals = collectForm('#clientSettingsForm', false);
-    let next = { ...prev, ...vals };
+  const prev = ctx.clientSettingsState || {};
+  const vals = collectForm('#clientSettingsForm', false);
+  let next = { ...prev, ...vals };
 
-    // ✅ NEW: stage client-level ts_queries_email in ctx.data (NOT in client_settings payload)
-    if (Object.prototype.hasOwnProperty.call(vals, 'ts_queries_email')) {
-      try {
-        const v = String(vals.ts_queries_email ?? '').trim();
-        ctx.data = ctx.data || {};
-        ctx.data.ts_queries_email = v;
-      } catch {}
-    }
+  // ✅ NEW: stage client-level ts_queries_email in ctx.data (NOT in client_settings payload)
+  if (Object.prototype.hasOwnProperty.call(vals, 'ts_queries_email')) {
+    try {
+      const v = String(vals.ts_queries_email ?? '').trim();
+      ctx.data = ctx.data || {};
+      ctx.data.ts_queries_email = v;
+    } catch {}
+  }
 
     TIME_KEYS.forEach(k=>{
       const v = String(vals[k] ?? '').trim();
@@ -55764,22 +55764,22 @@ async function renderClientSettingsUI(settingsObj){
 
   const syncSoft = ()=> applyFromDOM(true);
 
-  const btnClear = root.querySelector('#btnClearClientShiftTimes');
-  if (btnClear && !btnClear.__wired) {
-    btnClear.__wired = true;
-    btnClear.addEventListener('click', () => {
-      const frame = _currentFrame();
-      if (!frame || frame.mode !== 'edit') return;
+ const btnClear = root.querySelector('#btnClearClientShiftTimes');
+if (btnClear && !btnClear.__wired) {
+  btnClear.__wired = true;
+  btnClear.addEventListener('click', () => {
+    const frame = _currentFrame();
+    if (!frame || (frame.mode !== 'edit' && frame.mode !== 'create')) return;
 
-      TIME_KEYS.forEach(k => {
-        const el = root.querySelector(`input[name="${k}"]`);
-        if (el) el.value = '';
-      });
-
-      applyFromDOM(false);
-      try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+    TIME_KEYS.forEach(k => {
+      const el = root.querySelector(`input[name="${k}"]`);
+      if (el) el.value = '';
     });
-  }
+
+    applyFromDOM(false);
+    try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+  });
+}
 
   root.__syncSoft = syncSoft;
 
