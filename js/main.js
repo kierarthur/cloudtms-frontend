@@ -2164,88 +2164,7 @@ async function refreshHrRotaSummary(importId) {
   }
 }
 
-async function postHrRotaResolveMappings(importId, payload) {
-  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
-  const L   = (...a) => { if (LOG) console.log('[IMPORTS][HR_ROTA][RESOLVE]', ...a); };
 
-  if (!importId) {
-    throw new Error('Missing importId for postHrRotaResolveMappings');
-  }
-
-  const body = payload || {};
-  const candidate_mappings = Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [];
-  const client_aliases     = Array.isArray(body.client_aliases)     ? body.client_aliases     : [];
-
-  // ✅ NEW: optional role mappings (hr_row_id → selected target id)
-  const role_mappings =
-    Array.isArray(body.role_mappings) ? body.role_mappings :
-    Array.isArray(body.timesheet_target_mappings) ? body.timesheet_target_mappings :
-    Array.isArray(body.roleMappings) ? body.roleMappings :
-    [];
-
-  if (!candidate_mappings.length && !client_aliases.length && !role_mappings.length) {
-    L('no mappings to send; returning early', { importId });
-    return {
-      ok: true,
-      candidate_mappings_applied: 0,
-      client_aliases_applied: 0,
-      role_mappings_applied: 0
-    };
-  }
-
-  if (typeof authFetch !== 'function' || typeof API !== 'function') {
-    throw new Error('authFetch/API helper missing in postHrRotaResolveMappings');
-  }
-
-  const url = `/api/imports/hr-rota/${encodeURIComponent(importId)}/resolve-conflicts`;
-
-  const aliasDebug = client_aliases.map(a => ({
-    client_id: a.client_id || null,
-    hr_row_ids: Array.isArray(a.hr_row_ids) ? a.hr_row_ids : [],
-    hospital_norm: a.hospital_norm || null
-  }));
-
-  const roleDebug = role_mappings.map(r => ({
-    hr_row_id: r.hr_row_id || null,
-    target_id: r.target_id || r.timesheet_target_id || null,
-    candidate_id: r.candidate_id || null,
-    client_id: r.client_id || null,
-    work_date: r.work_date || null,
-    grade_raw: r.grade_raw || null
-  }));
-
-  L('posting HR rota resolve-conflicts', {
-    importId,
-    url: API(url),
-    candidate_mappings_count: candidate_mappings.length,
-    client_aliases_count: client_aliases.length,
-    role_mappings_count: role_mappings.length,
-    client_aliases_hr_row_ids: aliasDebug,
-    role_mappings_debug: roleDebug
-  });
-
-  // ✅ Only include role_mappings if present (backward compatible with older backend)
-  const postBody = { candidate_mappings, client_aliases };
-  if (role_mappings.length) postBody.role_mappings = role_mappings;
-
-  const res  = await authFetch(API(url), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(postBody)
-  });
-
-  const text = await res.text().catch(() => '');
-  if (!res.ok) {
-    const msg = text || `HR rota resolve-conflicts failed (${res.status})`;
-    throw new Error(msg);
-  }
-
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
-
-  L('resolve-conflicts OK', json);
-  return json;
-}
 
 function openHrRotaAssignCandidateModal(importId, rowIndex) {
   const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
@@ -50479,88 +50398,6 @@ async function handleHrWeeklyFileDrop(file) {
 }
 
 
-async function handleHrRotaFileDrop(file) {
-  const summaryEl = document.getElementById('hrRotaImportSummary');
-  if (summaryEl) {
-    summaryEl.textContent = 'Uploading HR rota daily file to storage…';
-  }
-
-  try {
-    // 1) Upload file to R2
-    const { fileKey, filename } = await uploadImportFileToR2(file);
-
-    if (summaryEl) {
-      summaryEl.textContent = 'Registering HR rota daily import and parsing workbook…';
-    }
-
-    // 2) Call parse endpoint with JSON and file_r2_key
-    const res = await authFetch(API('/api/imports/hr-rota/parse'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        file_r2_key: fileKey,
-        original_name: filename
-      })
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(text || `HR rota daily import upload failed (${res.status})`);
-    }
-
-    let parsed;
-    try { parsed = text ? JSON.parse(text) : {}; } catch { parsed = {}; }
-    const importId = parsed.import_id || parsed.id || null;
-    if (!importId) {
-      throw new Error('HR rota daily import did not return an import_id.');
-    }
-
-    if (summaryEl) {
-      summaryEl.textContent =
-        `File uploaded. Loading HR rota classification for import ${importId}…`;
-    }
-
-    // 3) Fetch preview / classification
-    const previewRes  = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
-    const previewText = await previewRes.text();
-    if (!previewRes.ok) {
-      throw new Error(previewText || `HR rota daily preview failed (${previewRes.status})`);
-    }
-
-    let summaryState;
-    try { summaryState = previewText ? JSON.parse(previewText) : {}; } catch { summaryState = {}; }
-
-    // 4) Persist into modalCtx and render summary modal
-    window.modalCtx = window.modalCtx || {};
-    window.modalCtx.importsState = window.modalCtx.importsState || {};
-    window.modalCtx.importsState.hrRota = {
-      import_id: importId,
-      summary: summaryState
-    };
-
-    const total =
-      (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
-        ? summaryState.summary.total_rows
-        : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
-
-    if (summaryEl) {
-      summaryEl.textContent = `Import ${importId}: ${total} rows parsed.`;
-    }
-
-    if (typeof renderImportSummaryModal === 'function') {
-      renderImportSummaryModal('HR_ROTA_DAILY', summaryState);
-    } else {
-      console.warn('[IMPORTS] renderImportSummaryModal is not defined; HR rota summary not shown.');
-    }
-  } catch (err) {
-    console.error('[IMPORTS][HR_ROTA] handleHrRotaFileDrop failed', err);
-    if (summaryEl) {
-      summaryEl.textContent =
-        `HR rota daily import failed: ${err?.message || 'Unknown error'}`;
-    }
-    alert(err?.message || 'HR rota daily import failed.');
-  }
-}
-
 async function searchClientsForResolve(term) {
   const q = String(term || '').trim();
   if (!q) return [];
@@ -50637,65 +50474,195 @@ async function uploadImportFileToR2(file) {
   return { fileKey, filename };
 }
 
-async function applyHrRotaValidation(importId, sendEmailRowIds) {
-  const rawId = String(importId || '').trim();
-  if (!rawId) {
-    throw new Error('Missing import_id for applyHrRotaValidation.');
-  }
-  const encId = encodeURIComponent(rawId);
+async function openHrRotaResolveGradeRoleModal(importId, rowIndex) {
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
 
-  if (typeof authFetch !== 'function' || typeof API !== 'function') {
-    throw new Error('authFetch/API helper missing in applyHrRotaValidation.');
+  if (!importId) {
+    alert('Missing importId.');
+    return;
   }
 
-  const body = {
-    // Ensure we only send string ids (FE already ensures these are real hr_row_id values)
-    send_email_row_ids: Array.isArray(sendEmailRowIds)
-      ? sendEmailRowIds.map(x => String(x || '').trim()).filter(Boolean)
-      : []
+  const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+  const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  const idx = Number(rowIndex);
+  const row = (Number.isFinite(idx) && idx >= 0 && idx < rows.length) ? rows[idx] : null;
+
+  if (!row) {
+    alert('Row not found for grade/role resolution.');
+    return;
+  }
+
+  const incomingGradeNorm = String(row.incoming_grade_norm || '').trim();
+  const gradeRaw = String(row.grade_raw || incomingGradeNorm || '').trim();
+  if (!incomingGradeNorm) {
+    alert('This row is missing incoming_grade_norm, so it cannot be resolved.');
+    return;
+  }
+
+  // Prefer candidate roles if preview supplies them. We do NOT fetch anything extra here.
+  const rawRoles =
+    Array.isArray(row.candidate_roles) ? row.candidate_roles :
+    Array.isArray(row.candidateRoles) ? row.candidateRoles :
+    Array.isArray(row.roles) ? row.roles :
+    null;
+
+  const roleOptions = Array.isArray(rawRoles)
+    ? rawRoles
+        .map((x) => {
+          if (x == null) return '';
+          if (typeof x === 'string') return x;
+          if (typeof x === 'object' && x && x.code) return x.code;
+          return '';
+        })
+        .map((s) => String(s || '').trim().toUpperCase())
+        .filter(Boolean)
+    : [];
+
+  const clientName = String(st?.client_name || st?.summary?.client_name || row.client_name || '').trim();
+  const clientId = String(st?.client_id || st?.summary?.client_id || row.client_id || '').trim();
+
+  if (typeof showModal !== 'function') {
+    alert('showModal is not available.');
+    return;
+  }
+
+  const ROLE_SELECT_ID = 'hrRotaGradeRoleSelect';
+  const ROLE_INPUT_ID  = 'hrRotaGradeRoleInput';
+  const BAND_INPUT_ID  = 'hrRotaGradeBandInput';
+
+  const optionsHtml = roleOptions.length
+    ? roleOptions.map((r) => `<option value="${enc(r)}">${enc(r)}</option>`).join('')
+    : '';
+
+  const renderBody = () => {
+    const roleControl = roleOptions.length
+      ? `
+        <select class="input" id="${ROLE_SELECT_ID}">
+          <option value="">-- choose role --</option>
+          ${optionsHtml}
+        </select>
+        <div class="hint mini" style="margin-top:6px;">
+          Role options are taken from candidate roles (when provided in preview).
+        </div>
+      `
+      : `
+        <input class="input" id="${ROLE_INPUT_ID}" placeholder="Role code (e.g. RMN)" />
+        <div class="hint mini" style="margin-top:6px;">
+          No candidate roles were provided in preview for this row, so enter the role code manually.
+        </div>
+      `;
+
+    return `
+      <div class="form" id="hrRotaGradeResolve">
+        <div class="card">
+          <div class="row">
+            <label>Context</label>
+            <div class="controls">
+              <div class="mini">
+                Client: <strong>${enc(clientName || clientId || '—')}</strong><br/>
+                Import ID: <span class="mono">${enc(importId)}</span><br/>
+                Row: <span class="mono">${enc(String(idx + 1))}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Incoming grade</label>
+            <div class="controls">
+              <div class="mini">
+                Raw: <span class="mono">${enc(gradeRaw || '—')}</span><br/>
+                Normalised key: <span class="mono">${enc(incomingGradeNorm)}</span>
+              </div>
+              <div class="hint mini" style="margin-top:6px;">
+                This mapping is saved as (client_id, incoming_grade_norm) so you won’t be asked again for this client+grade.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Role</label>
+            <div class="controls">
+              ${roleControl}
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Band</label>
+            <div class="controls">
+              <input class="input" id="${BAND_INPUT_ID}" placeholder="Optional (e.g. Band 5)" />
+              <div class="hint mini" style="margin-top:6px;">
+                Leave blank unless band is required for rate resolution.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
   };
 
-  const res = await authFetch(API(`/api/imports/hr-rota/${encId}/apply`), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  const saveFn = async () => {
+    const roleCode = roleOptions.length
+      ? String(document.getElementById(ROLE_SELECT_ID)?.value || '').trim().toUpperCase()
+      : String(document.getElementById(ROLE_INPUT_ID)?.value || '').trim().toUpperCase();
 
-  const text = await res.text().catch(() => '');
-  if (!res.ok) {
-    throw new Error(text || `HR rota apply failed (${res.status})`);
-  }
+    const bandNorm = String(document.getElementById(BAND_INPUT_ID)?.value || '').trim();
 
-  let payload;
-  try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
+    if (!roleCode) {
+      alert('Role is required.');
+      return false;
+    }
 
-  // New backend shape:
-  // { import_id, apply: { validations_upserted, ... , email_jobs }, post_commit: { emails_queued, email_failures } }
-  const apply = (payload && typeof payload.apply === 'object' && payload.apply) ? payload.apply : {};
-  const post  = (payload && typeof payload.post_commit === 'object' && payload.post_commit) ? payload.post_commit : {};
+    const payload = {
+      grade_role_mappings: [{
+        incoming_grade_norm: incomingGradeNorm,
+        role_code: roleCode,
+        band_norm: bandNorm || null
+      }]
+    };
 
-  const validationsUpserted =
-    (apply.validations_upserted ?? payload.validations_upserted ?? 0);
+    // Prefer the project helper if present, otherwise call the resolve endpoint directly.
+    if (typeof postHrRotaResolveMappings === 'function') {
+      await postHrRotaResolveMappings(importId, payload);
+    } else {
+      if (typeof authFetch !== 'function' || typeof API !== 'function') {
+        throw new Error('authFetch/API not available to persist grade mapping.');
+      }
+      const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/resolve-conflicts`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const txt = await res.text().catch(() => '');
+      if (!res.ok) throw new Error(txt || `Resolve grade/role failed (${res.status})`);
+    }
 
-  const emailsQueued =
-    (post.emails_queued ?? payload.emails_queued ?? body.send_email_row_ids.length ?? 0);
+    if (typeof refreshHrRotaSummary === 'function') {
+      await refreshHrRotaSummary(importId);
+    }
 
-  const emailFailuresCount =
-    Array.isArray(post.email_failures) ? post.email_failures.length : 0;
+    return true;
+  };
 
-  const msg =
-    `Applied HR rota validations (${validationsUpserted} validations upserted, ${emailsQueued} emails queued` +
-    (emailFailuresCount ? `, ${emailFailuresCount} email failures` : '') +
-    ').';
-
-  if (window.__toast) window.__toast(msg);
-
-  // Refresh so email_already_sent and related flags reflect immediately
-  if (typeof refreshHrRotaSummary === 'function') {
-    await refreshHrRotaSummary(rawId);
-  }
-
-  return payload;
+  showModal(
+    'Resolve grade to role (daily)',
+    [{ key: 'main', label: 'Resolve' }],
+    (k) => (k === 'main' ? renderBody() : ''),
+    saveFn,
+    false,
+    null,
+    {
+      kind: 'hr-rota-grade-resolve',
+      noParentGate: true,
+      showSave: true,
+      onDismiss: () => {}
+    }
+  );
 }
 
 
@@ -63008,314 +62975,205 @@ function renderTimesheetOverviewTab(ctx) {
 }
 
 
-
-async function openHrRotaAssignRoleModal(importId, rowIndex) {
-  const impId = String(importId || '').trim();
-  const idx = Number(rowIndex);
-  if (!impId) {
-    alert('Missing import_id for role assignment.');
-    return;
-  }
-  if (!Number.isFinite(idx) || idx < 0) {
-    alert('Invalid row index for role assignment.');
-    return;
+async function handleHrRotaFileDrop(file) {
+  const summaryEl = document.getElementById('hrRotaImportSummary');
+  if (summaryEl) {
+    summaryEl.textContent = 'Preparing HR rota daily import…';
   }
 
-  const enc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
-        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-      }[c]));
+  try {
+    // Ensure modalCtx/importsState exist
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.importsState = window.modalCtx.importsState || {};
+    const st = window.modalCtx.importsState;
 
-  const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
-  const rows = st && Array.isArray(st.rows) ? st.rows : [];
-  const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-  if (!row) {
-    alert('Row not found for role assignment.');
-    return;
-  }
+    // 0) Always ask user to confirm the client (HealthRoster clients only)
+    let clientId = '';
+    let clientName = '';
 
-  const hrRowId = row.hr_row_id ? String(row.hr_row_id).trim() : '';
-  if (!hrRowId) {
-    alert('This row has no hr_row_id, so a role assignment cannot be saved safely.');
-    return;
-  }
+    {
+      let items = [];
+      try {
+        const res = await authFetch(API('/api/healthroster/autoprocess/clients'));
+        const text = await res.text();
+        if (!res.ok) throw new Error(text || `Failed to load HealthRoster clients (${res.status})`);
+        const json = text ? JSON.parse(text) : {};
+        items = Array.isArray(json.items) ? json.items : [];
+      } catch (e) {
+        console.error('[IMPORTS][HR_ROTA] failed to load clients', e);
+        alert(e?.message || 'Failed to load HealthRoster clients for daily import.');
+        return;
+      }
 
-  const staff = String(row.staff_name || row.staff_raw || '').trim();
-  const unit  = String(row.unit || row.hospital_or_trust || row.hospital_norm || '').trim();
-  const date  = String(row.date_local || row.date || row.shift_date || row.work_date || '').trim();
-  const grade = String(row.grade_raw || row.incoming_code || row.assignment_code || '').trim();
+      if (!items.length) {
+        alert('No HealthRoster clients are configured.');
+        return;
+      }
 
-  const optionsRaw =
-    (Array.isArray(row.timesheet_target_options) ? row.timesheet_target_options :
-     Array.isArray(row.timesheetTargetOptions) ? row.timesheetTargetOptions :
-     Array.isArray(row.target_options) ? row.target_options :
-     Array.isArray(row.targetOptions) ? row.targetOptions :
-     []);
+      const enc = (typeof escapeHtml === 'function')
+        ? escapeHtml
+        : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+            '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+          }[c]));
 
-  const options = (Array.isArray(optionsRaw) ? optionsRaw : []).map((o) => {
-    const obj = (o && typeof o === 'object') ? o : {};
-    const id =
-      String(
-        obj.target_id ??
-        obj.targetId ??
-        obj.timesheet_target_id ??
-        obj.timesheetTargetId ??
-        obj.timesheet_id ??
-        obj.timesheetId ??
-        obj.contract_id ??
-        obj.contractId ??
-        ''
-      ).trim();
+      const defaultId = st.hrRotaClientId ? String(st.hrRotaClientId).trim() : '';
+      const optionsHtml = items.map((c) => {
+        const id = String(c.client_id || '').trim();
+        const name = String(c.client_name || '').trim();
+        const sel = (defaultId && id === defaultId) ? ' selected' : '';
+        return `<option value="${enc(id)}"${sel}>${enc(name || id)}</option>`;
+      }).join('');
 
-    const label =
-      String(
-        obj.label ??
-        obj.display_label ??
-        obj.displayLabel ??
-        obj.band_label ??
-        obj.bandLabel ??
-        obj.role_label ??
-        obj.roleLabel ??
-        obj.contract_label ??
-        obj.contractLabel ??
-        ''
-      ).trim();
+      const picked = await new Promise((resolve) => {
+        let done = false;
+        const resolveOnce = (v) => { if (done) return; done = true; resolve(v); };
 
-    const extra = {
-      candidate_id: obj.candidate_id ?? obj.candidateId ?? null,
-      client_id: obj.client_id ?? obj.clientId ?? null,
-      band: obj.band ?? obj.band_text ?? obj.bandText ?? null,
-      role: obj.role ?? obj.role_text ?? obj.roleText ?? null
-    };
+        if (typeof showModal !== 'function') {
+          // Fallback: if showModal missing, just resolve null
+          resolveOnce(null);
+          return;
+        }
 
-    return { id, label, extra };
-  }).filter(x => x.id);
-
-  if (!options.length) {
-    alert('No role/timesheet target options were provided for this row.');
-    return;
-  }
-
-  // Persistent selection store per import
-  window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
-  if (!window.__hrRotaRoleSelections[impId] || typeof window.__hrRotaRoleSelections[impId] !== 'object') {
-    window.__hrRotaRoleSelections[impId] = {};
-  }
-
-  const existing = window.__hrRotaRoleSelections[impId][hrRowId] || null;
-  const initialSelectedId = existing && existing.target_id ? String(existing.target_id).trim() : '';
-
-  window.__hrRotaAssignRoleState = {
-    importId: impId,
-    rowIndex: idx,
-    hr_row_id: hrRowId,
-    selectedTargetId: initialSelectedId || (options.length === 1 ? options[0].id : ''),
-    options
-  };
-
-  const state = () => window.__hrRotaAssignRoleState || {};
-
-  const renderTab = (key) => {
-    if (key !== 'main') return '';
-    const s = state();
-    const selected = String(s.selectedTargetId || '').trim();
-
-    const rowsHtml = s.options.map((o) => {
-      const isSel = String(o.id) === selected;
-      const band = o.extra && o.extra.band ? String(o.extra.band) : '';
-      const role = o.extra && o.extra.role ? String(o.extra.role) : '';
-      const metaBits = [];
-      if (role) metaBits.push(role);
-      if (band) metaBits.push(band);
-
-      return `
-        <tr class="${isSel ? 'active' : ''}"
-            style="cursor:pointer;"
-            data-act="hr-rota-role-pick"
-            data-target-id="${enc(o.id)}">
-          <td class="mini" style="white-space:normal;word-break:break-word;">
-            <strong>${enc(o.label || o.id)}</strong>
-            ${metaBits.length ? `<div class="mini" style="opacity:.8;margin-top:2px;">${enc(metaBits.join(' • '))}</div>` : ``}
-          </td>
-          <td class="mini" style="width:220px;white-space:nowrap;">
-            <span class="mono">${enc(o.id)}</span>
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    return html(`
-      <div class="form" id="hrRotaAssignRole">
-        <div class="card">
-          <div class="row">
-            <label>Assign role / target</label>
-            <div class="controls">
-              <div class="mini">
-                Import: <span class="mono">${enc(impId)}</span><br/>
-                Staff: <strong>${enc(staff || '—')}</strong><br/>
-                Unit / Site: <span class="mini">${enc(unit || '—')}</span><br/>
-                Date: <span class="mini">${enc(date || '—')}</span>
-                ${grade ? `<br/>Grade: <span class="mono">${enc(grade)}</span>` : ``}
-              </div>
-              <div class="hint mini" style="margin-top:6px;">
-                Choose the correct role/timesheet target for this day. This selection will be saved and used for future imports.
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Targets</label>
-            <div class="controls">
-              <div style="max-height:300px; overflow:auto; border:1px solid var(--line); border-radius:10px; padding:6px;">
-                <table class="grid" style="table-layout:auto; width:100%;">
-                  <thead>
-                    <tr>
-                      <th>Target</th>
-                      <th style="width:220px;">ID</th>
-                    </tr>
-                  </thead>
-                  <tbody id="hrRotaRoleTargets">
-                    ${rowsHtml}
-                  </tbody>
-                </table>
-              </div>
-
-              <div class="row" style="margin-top:10px;">
-                <label></label>
-                <div class="controls">
-                  <button type="button" class="btn btn-primary" data-act="hr-rota-role-save">
-                    Save selection
-                  </button>
-                  <button type="button" class="btn" style="margin-left:8px;" data-act="hr-rota-role-cancel">
-                    Cancel
-                  </button>
-                  <span class="mini" style="margin-left:8px;">
-                    After saving, the daily preview will reclassify.
-                  </span>
+        showModal(
+          'Select HealthRoster client (daily validation)',
+          [{ key: 'main', label: 'Select client' }],
+          (k) => {
+            if (k !== 'main') return '';
+            return `
+              <div style="display:block;">
+                <div class="row">
+                  <label>Client</label>
+                  <div class="controls">
+                    <select class="input" id="hrRotaClientSelect">
+                      <option value="">-- choose a client --</option>
+                      ${optionsHtml}
+                    </select>
+                  </div>
+                </div>
+                <div class="hint" style="grid-column:1/-1">
+                  This client will be used for parsing and validating this HealthRoster daily export.
+                  Close this dialog to cancel the import.
                 </div>
               </div>
+            `;
+          },
+          async () => {
+            const sel = document.getElementById('hrRotaClientSelect');
+            if (!sel || !sel.value) {
+              alert('Please select a client to continue.');
+              return false; // keep modal open
+            }
+            const cid = String(sel.value || '').trim();
+            const cname = (sel.options && sel.selectedIndex >= 0)
+              ? String(sel.options[sel.selectedIndex].textContent || '').trim()
+              : '';
 
-            </div>
-          </div>
-        </div>
-      </div>
-    `);
-  };
-
-  showModal(
-    'Assign role (HR Rota Daily)',
-    [{ key: 'main', label: 'Assign role' }],
-    renderTab,
-    null,
-    false,
-    null,
-    { kind: 'hr-rota-assign-role', noParentGate: true, stayOpenOnSave: false }
-  );
-
-  setTimeout(() => {
-    const root = document.getElementById('modalBody');
-    if (!root) return;
-
-    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-    if (!fr || fr.kind !== 'hr-rota-assign-role') return;
-
-    const host = root.querySelector('#hrRotaAssignRole');
-    if (!host) return;
-
-    // De-dupe
-    root.__hrRotaAssignRoleWired ||= new Set();
-    const wKey = `hr-rota-assign-role:${impId}:${hrRowId}`;
-    if (root.__hrRotaAssignRoleWired.has(wKey)) return;
-    root.__hrRotaAssignRoleWired.add(wKey);
-
-    host.addEventListener('click', async (ev) => {
-      const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-act="hr-rota-role-pick"]') : null;
-      if (tr) {
-        const targetId = String(tr.getAttribute('data-target-id') || '').trim();
-        if (!targetId) return;
-        window.__hrRotaAssignRoleState = state();
-        window.__hrRotaAssignRoleState.selectedTargetId = targetId;
-
-        // Re-render selection highlight
-        try {
-          const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
-          if (fr2 && fr2.kind === 'hr-rota-assign-role' && typeof fr2.setTab === 'function') fr2.setTab('main');
-        } catch {}
-        return;
-      }
-
-      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
-      if (!btn) return;
-      const act = String(btn.getAttribute('data-act') || '');
-
-      if (act === 'hr-rota-role-cancel') {
-        const closeBtn = document.getElementById('btnCloseModal');
-        if (closeBtn) closeBtn.click();
-        return;
-      }
-
-      if (act === 'hr-rota-role-save') {
-        const s = state();
-        const selectedId = String(s.selectedTargetId || '').trim();
-        if (!selectedId) {
-          alert('Select a target first.');
-          return;
-        }
-
-        // Find selected option (for label persistence)
-        const chosen = (s.options || []).find(o => String(o.id) === selectedId) || null;
-        const chosenLabel = chosen ? (chosen.label || chosen.id) : selectedId;
-
-        // Persist locally (survives rerender)
-        window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
-        if (!window.__hrRotaRoleSelections[impId] || typeof window.__hrRotaRoleSelections[impId] !== 'object') {
-          window.__hrRotaRoleSelections[impId] = {};
-        }
-        window.__hrRotaRoleSelections[impId][hrRowId] = {
-          target_id: selectedId,
-          label: String(chosenLabel || selectedId)
-        };
-
-        // Persist to backend for future imports + reclassify correctness
-        // Expected helper exists per your plan: postHrRotaResolveMappings(importId, payload)
-        // Payload includes stable hr_row_id -> selected target id plus useful context.
-        if (typeof postHrRotaResolveMappings !== 'function') {
-          alert('postHrRotaResolveMappings is not defined (cannot persist role mapping to backend).');
-          return;
-        }
-
-        const payload = {
-          role_mappings: [{
-            hr_row_id: hrRowId,
-            target_id: selectedId,
-            candidate_id: row.candidate_id || null,
-            client_id: row.client_id || null,
-            work_date: row.work_date || row.date_local || row.date || row.shift_date || null,
-            grade_raw: row.grade_raw || row.incoming_code || row.assignment_code || null
-          }]
-        };
-
-        try {
-          await postHrRotaResolveMappings(impId, payload);
-
-          window.__toast && window.__toast('Role mapping saved. Reclassifying…');
-
-          if (typeof refreshHrRotaSummary === 'function') {
-            await refreshHrRotaSummary(impId);
+            resolveOnce({ clientId: cid, clientName: cname });
+            return true; // close modal
+          },
+          false,
+          null,
+          {
+            kind: 'hr-rota-client-picker',
+            noParentGate: true,
+            onDismiss: () => resolveOnce(null),
+            showSave: true
           }
+        );
+      });
 
-          const closeBtn = document.getElementById('btnCloseModal');
-          if (closeBtn) closeBtn.click();
-        } catch (err) {
-          console.error('[HR_ROTA][ROLE] save failed', err);
-          alert(err?.message || 'Failed to save role mapping.');
-        }
+      if (!picked || !picked.clientId) {
+        throw new Error('Daily import cancelled (no client selected).');
       }
+
+      clientId = String(picked.clientId).trim();
+      clientName = String(picked.clientName || '').trim();
+
+      st.hrRotaClientId = clientId;
+      st.hrRotaClientName = clientName;
+    }
+
+    if (summaryEl) {
+      summaryEl.textContent =
+        `Client: ${clientName || clientId} — uploading HR rota daily file to storage…`;
+    }
+
+    // 1) Upload file to R2
+    const { fileKey, filename } = await uploadImportFileToR2(file);
+
+    if (summaryEl) {
+      summaryEl.textContent = 'Registering HR rota daily import and parsing workbook…';
+    }
+
+    // 2) Call parse endpoint with JSON
+    const res = await authFetch(API('/api/imports/hr-rota/parse'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        file_r2_key: fileKey,
+        original_name: filename,
+        client_id: clientId,
+        tz_assumption: 'Europe/London'
+      })
     });
-  }, 0);
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `HR rota daily import upload failed (${res.status})`);
+    }
+
+    let parsed;
+    try { parsed = text ? JSON.parse(text) : {}; } catch { parsed = {}; }
+    const importId = parsed.import_id || parsed.id || null;
+    if (!importId) {
+      throw new Error('HR rota daily import did not return an import_id.');
+    }
+
+    if (summaryEl) {
+      summaryEl.textContent =
+        `File uploaded. Loading HR rota classification for import ${importId}…`;
+    }
+
+    // 3) Fetch preview / classification
+    const previewRes  = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/preview`));
+    const previewText = await previewRes.text();
+    if (!previewRes.ok) {
+      throw new Error(previewText || `HR rota daily preview failed (${previewRes.status})`);
+    }
+
+    let summaryState;
+    try { summaryState = previewText ? JSON.parse(previewText) : {}; } catch { summaryState = {}; }
+
+    // 4) Persist into modalCtx and render summary modal
+    window.modalCtx = window.modalCtx || {};
+    window.modalCtx.importsState = window.modalCtx.importsState || {};
+    window.modalCtx.importsState.hrRota = {
+      import_id: importId,
+      summary: summaryState
+    };
+
+    const total =
+      (summaryState.summary && typeof summaryState.summary.total_rows === 'number')
+        ? summaryState.summary.total_rows
+        : Array.isArray(summaryState.rows) ? summaryState.rows.length : 0;
+
+    if (summaryEl) {
+      summaryEl.textContent =
+        `Import ${importId} (${clientName || clientId}): ${total} rows parsed.`;
+    }
+
+    if (typeof renderImportSummaryModal === 'function') {
+      renderImportSummaryModal('HR_ROTA_DAILY', summaryState);
+    } else {
+      console.warn('[IMPORTS] renderImportSummaryModal is not defined; HR rota summary not shown.');
+    }
+  } catch (err) {
+    console.error('[IMPORTS][HR_ROTA] handleHrRotaFileDrop failed', err);
+    if (summaryEl) {
+      summaryEl.textContent =
+        `HR rota daily import failed: ${err?.message || 'Unknown error'}`;
+    }
+    alert(err?.message || 'HR rota daily import failed.');
+  }
 }
 
 function renderHrRotaDailySummary(type, importId, rows, ss) {
@@ -63329,6 +63187,15 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
   const total   = summary.total_rows || rows.length || 0;
 
   const impKey = String(importId || '').trim();
+
+  const clientId = String(ss?.client_id || rows?.[0]?.client_id || '').trim();
+  const clientName = String(ss?.client_name || rows?.[0]?.client_name || '').trim();
+
+  const EMAIL_REASON_CODES = new Set([
+    'actual_hours_mismatch',
+    'start_end_mismatch',
+    'break_minutes_mismatch'
+  ]);
 
   const counts = { OK: 0, FAILED: 0, UNMATCHED: 0 };
   rows.forEach(r => {
@@ -63345,6 +63212,13 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
   }
   const emailSel = window.__hrRotaEmailSelections[impKey];
 
+  // ✅ Per-issue Alternative Email (keyed by issue_fingerprint)
+  window.__hrRotaAltEmailByFp = window.__hrRotaAltEmailByFp || {};
+  if (!window.__hrRotaAltEmailByFp[impKey] || !(window.__hrRotaAltEmailByFp[impKey] instanceof Map)) {
+    window.__hrRotaAltEmailByFp[impKey] = new Map();
+  }
+  const altEmailByFp = window.__hrRotaAltEmailByFp[impKey];
+
   // ✅ Persist role selections across rerender/refresh (hr_row_id -> {target_id,label})
   window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
   if (!window.__hrRotaRoleSelections[impKey] || typeof window.__hrRotaRoleSelections[impKey] !== 'object') {
@@ -63352,11 +63226,14 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
   }
   const roleSel = window.__hrRotaRoleSelections[impKey];
 
-  // ✅ Reconcile email selection set to only contain REAL hr_row_id values present in this render
+  // ✅ Reconcile selection stores to only contain REAL keys present in this render
   const validHrRowIds = new Set();
+  const validFps = new Set();
   for (const r of (rows || [])) {
     const hrid = r && r.hr_row_id ? String(r.hr_row_id).trim() : '';
     if (hrid) validHrRowIds.add(hrid);
+    const fp = r && r.issue_fingerprint ? String(r.issue_fingerprint).trim() : '';
+    if (fp) validFps.add(fp);
   }
   for (const id of Array.from(emailSel)) {
     const s = String(id || '').trim();
@@ -63367,27 +63244,30 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
       delete roleSel[k];
     }
   }
+  for (const [fp] of Array.from(altEmailByFp.entries())) {
+    const f = String(fp || '').trim();
+    if (!f || !validFps.has(f)) altEmailByFp.delete(fp);
+  }
 
-  const needsRoleResolve = (r) => {
+  const needsTimesheetTargetResolve = (r) => {
     if (!r) return false;
+    if (r.timesheet_target_ambiguous === true) return true;
+
     const flag = (r.role_resolution_required === true) || (r.roleResolutionRequired === true);
     if (flag) return true;
 
     const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
-    if (reasonCode === 'role_unresolved' ||
-        reasonCode === 'role_ambiguous' ||
-        reasonCode === 'timesheet_target_unresolved' ||
-        reasonCode === 'timesheet_target_ambiguous' ||
-        reasonCode === 'band_unresolved' ||
-        reasonCode === 'band_ambiguous') return true;
+    if (reasonCode === 'timesheet_target_ambiguous' || reasonCode === 'timesheet_target_unresolved') return true;
 
-    const opts =
-      (Array.isArray(r.timesheet_target_options) ? r.timesheet_target_options :
-       Array.isArray(r.timesheetTargetOptions) ? r.timesheetTargetOptions :
-       Array.isArray(r.target_options) ? r.target_options :
-       Array.isArray(r.targetOptions) ? r.targetOptions :
-       []);
-    return Array.isArray(opts) && opts.length > 1;
+    const opts = Array.isArray(r.timesheet_target_options) ? r.timesheet_target_options : [];
+    return opts.length > 0;
+  };
+
+  const needsGradeResolve = (r) => {
+    if (!r) return false;
+    if (r.grade_mapping_required === true) return true;
+    const reasonCode = String(r.reason_code || '').toLowerCase();
+    return reasonCode === 'grade_mapping_required';
   };
 
   const selectedRoleLabelFor = (hrRowId) => {
@@ -63395,6 +63275,15 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
     if (!rec || typeof rec !== 'object') return '';
     const lbl = String(rec.label || '').trim();
     return lbl;
+  };
+
+  const getAltEmailForFp = (fp) => {
+    const f = String(fp || '').trim();
+    if (!f) return '';
+    if (altEmailByFp instanceof Map && altEmailByFp.has(f)) {
+      return String(altEmailByFp.get(f) || '').trim();
+    }
+    return '';
   };
 
   const rowsHtml = rows.length
@@ -63406,10 +63295,10 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         const st    = String(stRaw || '').toUpperCase();
         const reasonCode = String(r.reason_code || r.failure_reason || r.reason || '').toLowerCase();
 
-        const canAssignCand   = (reasonCode === 'candidate_unresolved');
-        const canAssignClient = (reasonCode === 'client_unresolved');
+        const canAssignCand = (reasonCode === 'candidate_unresolved');
 
-        const needRole = needsRoleResolve(r);
+        const needTarget = needsTimesheetTargetResolve(r);
+        const needGrade  = needsGradeResolve(r);
 
         const isTimeMismatch =
           reasonCode === 'actual_hours_mismatch' ||
@@ -63419,9 +63308,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
         let stCls = 'pill-info';
         if (st === 'OK' || st === 'VALIDATION_OK') {
           stCls = 'pill-ok';
-        } else if (reasonCode === 'candidate_unresolved' || reasonCode === 'client_unresolved') {
-          stCls = 'pill-bad';
-        } else if (needRole) {
+        } else if (reasonCode === 'candidate_unresolved' || needTarget || needGrade) {
           stCls = 'pill-bad';
         } else if (isTimeMismatch) {
           stCls = 'pill-warn';
@@ -63433,10 +63320,10 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           pillLabel = 'OK';
         } else if (reasonCode === 'candidate_unresolved') {
           pillLabel = 'CANDIDATE UNMATCHED';
-        } else if (reasonCode === 'client_unresolved') {
-          pillLabel = 'CLIENT UNMATCHED';
-        } else if (needRole) {
-          pillLabel = 'ROLE/TARGET UNRESOLVED';
+        } else if (needGrade) {
+          pillLabel = 'GRADE/ROLE UNRESOLVED';
+        } else if (needTarget) {
+          pillLabel = 'MATCH TIMESHEET';
         } else if (reasonCode === 'actual_hours_mismatch') {
           pillLabel = 'HOURS MISMATCH';
         } else if (reasonCode === 'start_end_mismatch') {
@@ -63447,65 +63334,121 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           pillLabel = (reasonCode || 'UNKNOWN').replace(/_/g, ' ').toUpperCase();
         }
 
-        // ✅ New backend fields
-        const canEmail = (r.can_email === true);
+        const hrRowId = r.hr_row_id ? String(r.hr_row_id).trim() : '';
+        const fp = r.issue_fingerprint ? String(r.issue_fingerprint).trim() : '';
+        const emailEligible = (r.email_eligible === true) ||
+          (!!r.timesheet_id && st !== 'OK' && st !== 'VALIDATION_OK' && EMAIL_REASON_CODES.has(reasonCode));
+
         const recipientMissing = (r.recipient_missing === true);
         const recipientEmail = (r.recipient_email != null) ? String(r.recipient_email).trim() : '';
         const emailAlreadySent = (r.email_already_sent === true);
 
-        // ✅ Must only ever use REAL hr_row_id for email selection
-        const hrRowId = r.hr_row_id ? String(r.hr_row_id).trim() : '';
+        const showEmailControls = !!hrRowId && !!fp && emailEligible;
+        const checked = (showEmailControls && emailSel instanceof Set && emailSel.has(hrRowId)) ? 'checked' : '';
 
-        let emailCellHtml;
+        const altVal = fp ? getAltEmailForFp(fp) : '';
+        const showAlt = showEmailControls && (recipientMissing || checked || !!altVal);
 
-        // If we cannot identify a real row id, never allow selecting it.
-        if (!hrRowId) {
-          emailCellHtml = '<span class="mini">—</span>';
-        } else if (recipientMissing) {
-          const title = recipientEmail
-            ? `Recipient email present but marked missing: ${recipientEmail}`
-            : 'Recipient email missing (clients.ts_queries_email not set).';
-          const iconHtml = emailAlreadySent
-            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
+        const iconHtml = emailAlreadySent
+          ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
+          : '';
+
+        let emailCellHtml = '<span class="mini">—</span>';
+        if (showEmailControls) {
+          const recipLine = recipientEmail
+            ? `<div class="mini" style="opacity:.85;margin-top:2px;word-break:break-word;">To: ${enc(recipientEmail)}</div>`
+            : `<div class="mini" style="opacity:.85;margin-top:2px;">To: <span class="pill pill-bad" style="padding:1px 6px;">MISSING</span></div>`;
+
+          const altHint = recipientMissing
+            ? `<div class="mini" style="margin-top:4px;opacity:.85;">Alternative Email required to send.</div>`
+            : `<div class="mini" style="margin-top:4px;opacity:.75;">Optional: override recipient.</div>`;
+
+          const altInput = showAlt
+            ? `
+              <div style="margin-top:6px;">
+                <input class="input"
+                       style="width:100%;"
+                       placeholder="Alternative Email (optional)"
+                       data-act="hr-rota-alt-email"
+                       data-fp="${enc(fp)}"
+                       value="${enc(altVal)}" />
+                ${altHint}
+              </div>
+            `
             : '';
+
+          emailCellHtml = `
+            <div class="hr-email-cell" style="display:flex;flex-direction:column;align-items:flex-start;gap:4px;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox"
+                       data-act="hr-rota-email"
+                       data-row-id="${enc(hrRowId)}"
+                       data-row-idx="${idx}"
+                       ${checked} />
+                ${iconHtml}
+              </div>
+              ${recipLine}
+              ${altInput}
+            </div>
+          `;
+        } else if (recipientMissing && emailEligible) {
           emailCellHtml = `
             <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:6px;">
-              <span class="pill pill-bad" title="${enc(title)}">RECIPIENT MISSING</span>
+              <span class="pill pill-bad" style="padding:2px 8px;">RECIPIENT MISSING</span>
               ${iconHtml}
             </div>
           `;
-        } else if (!canEmail) {
-          const iconHtml = emailAlreadySent
-            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
-            : '';
-          emailCellHtml = `
-            <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
-              <span class="mini">—</span>
-              ${iconHtml}
-            </div>
-          `;
-        } else {
-          const checked = (emailSel instanceof Set && emailSel.has(hrRowId)) ? 'checked' : '';
-          const iconHtml = emailAlreadySent
-            ? `<span class="email-icon" title="Email previously sent" style="font-size:0.8rem;opacity:0.7;">&#x2709;&#x2713;</span>`
-            : '';
-
-          emailCellHtml = `
-            <div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
-              <input type="checkbox"
-                     data-act="hr-rota-email"
-                     data-row-id="${enc(hrRowId)}"
-                     data-row-idx="${idx}"
-                     ${checked} />
-              ${iconHtml}
-            </div>
-          `;
+        } else if (emailAlreadySent) {
+          emailCellHtml = `<div class="hr-email-cell" style="display:flex;align-items:center;justify-content:center;gap:4px;">
+            <span class="mini">—</span>${iconHtml}
+          </div>`;
         }
 
         const roleLabel = hrRowId ? selectedRoleLabelFor(hrRowId) : '';
         const roleMini = roleLabel
           ? `<div class="mini" style="margin-top:4px;opacity:.85;">Selected: ${enc(roleLabel)}</div>`
           : '';
+
+        const gradeMini = (r.grade_raw || r.incoming_grade_norm)
+          ? `<div class="mini" style="margin-top:4px;opacity:.85;">Grade: <span class="mono">${enc(String(r.grade_raw || r.incoming_grade_norm || '').trim())}</span></div>`
+          : '';
+
+        const resolveBtns = `
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;">
+            ${
+              canAssignCand
+                ? `<button type="button"
+                           class="btn mini"
+                           data-act="resolve-candidate"
+                           data-row-idx="${idx}">
+                     Assign candidate…
+                   </button>`
+                : ''
+            }
+            ${
+              needGrade
+                ? `<button type="button"
+                           class="btn mini"
+                           data-act="resolve-grade"
+                           data-row-idx="${idx}">
+                     Resolve grade/role…
+                   </button>`
+                : ''
+            }
+            ${
+              needTarget
+                ? `<button type="button"
+                           class="btn mini"
+                           data-act="resolve-role"
+                           data-row-idx="${idx}">
+                     Select matching timesheet…
+                   </button>`
+                : ''
+            }
+          </div>
+          ${gradeMini}
+          ${roleMini}
+        `;
 
         return `
           <tr>
@@ -63526,41 +63469,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
                 ${enc(pillLabel || 'UNKNOWN')}
               </span>
             </td>
-            <td>
-              ${
-                canAssignCand
-                  ? `<button type="button"
-                             class="btn mini"
-                             data-act="resolve-candidate"
-                             data-row-idx="${idx}">
-                       Assign candidate…
-                     </button>`
-                  : ''
-              }
-              ${
-                canAssignClient
-                  ? `<button type="button"
-                             class="btn mini"
-                             style="margin-left:4px;"
-                             data-act="resolve-client"
-                             data-row-idx="${idx}">
-                       Assign client…
-                     </button>`
-                  : ''
-              }
-              ${
-                needRole
-                  ? `<button type="button"
-                             class="btn mini"
-                             style="${(canAssignCand || canAssignClient) ? 'margin-left:4px;' : ''}"
-                             data-act="resolve-role"
-                             data-row-idx="${idx}">
-                       Assign role…
-                     </button>
-                     ${roleMini}`
-                  : roleMini
-              }
-            </td>
+            <td>${resolveBtns}</td>
             <td>${emailCellHtml}</td>
           </tr>
         `;
@@ -63580,6 +63489,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
           <label>Overview</label>
           <div class="controls">
             <div class="mini">
+              Client: <strong>${enc(clientName || clientId || '—')}</strong><br/>
               Import ID: <span class="mono">${enc(importId || '—')}</span><br/>
               Total rows: ${total}<br/>
               OK: ${counts.OK} &nbsp; Failed: ${counts.FAILED} &nbsp; Unmatched: ${counts.UNMATCHED}
@@ -63599,7 +63509,7 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
                     <th>Date</th>
                     <th>Status</th>
                     <th>Resolve</th>
-                    <th>Send email</th>
+                    <th>Email</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -63625,9 +63535,8 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
               Finalise validations
             </button>
             <span class="mini" style="margin-left:8px;">
-              "Reclassify" re-runs checks and refreshes this summary.
-              "Finalise validations" updates validation status and, if boxes are ticked,
-              queues emails to Temp Staffing.
+              "Reclassify" refreshes the daily validation view.
+              "Finalise validations" applies validation status and queues selected emails (Mode A only).
             </span>
           </div>
         </div>
@@ -63635,260 +63544,401 @@ function renderHrRotaDailySummary(type, importId, rows, ss) {
     </div>
   `);
 
-  // Wiring (extended to include role resolve + apply gating)
   setTimeout(() => {
     try {
       const root = document.getElementById('hrRotaSummary');
       if (!root || type !== 'HR_ROTA_DAILY') return;
 
-      // Helper: build a minimal hint object from HR row staff fields (for seeding candidate picker)
-      const buildHintFromHrRow = (row) => {
-        const staff = String(row.staff_name || row.staff_raw || '').trim();
-        if (!staff) return null;
-
-        const parts = staff.split(/\s+/).filter(Boolean);
-        const first = parts.length ? parts[0] : '';
-        const sur   = parts.length > 1 ? parts[parts.length - 1] : '';
-
-        const email = String(row.staff_email || row.email || row.worker_email || '').trim();
-
-        const hint = {
-          source: 'hr_rota_daily',
-          display_name: staff,
-          first_name: first,
-          surname: sur
-        };
-        if (email) hint.email = email;
-
-        Object.keys(hint).forEach(k => { if (!hint[k]) delete hint[k]; });
-        return Object.keys(hint).length ? hint : null;
-      };
-
-      root.addEventListener('click', (ev) => {
+      root.addEventListener('click', async (ev) => {
         const btn = ev.target.closest('button[data-act]');
         if (!btn) return;
+
         const act = btn.getAttribute('data-act');
 
         const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
         if (!st) return;
 
-        const rows = Array.isArray(st.rows) ? st.rows : [];
-        const idx  = Number(btn.getAttribute('data-row-idx') || '-1');
-        const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
-        if (!row) return;
+        const rowsNow = Array.isArray(st.rows) ? st.rows : [];
+        const idx = Number(btn.getAttribute('data-row-idx') || '-1');
+        const row = (idx >= 0 && idx < rowsNow.length) ? rowsNow[idx] : null;
 
-        const reasonCode   = String(row.reason_code || row.failure_reason || row.reason || '').toLowerCase();
-        const hasTimesheet = !!row.timesheet_id;
+        if (act === 'hr-rota-reclassify') {
+          try {
+            if (!importId) throw new Error('No import_id');
+            await refreshHrRotaSummary(importId);
+          } catch (e) {
+            console.error('[IMPORTS][HR_ROTA] reclassify failed', e);
+            alert(e?.message || 'Reclassify failed.');
+          }
+          return;
+        }
 
-        const unit = row.unit || row.hospital_or_trust || row.hospital_norm || '';
-        const staff = row.staff_name || row.staff_raw || '';
+        if (act === 'resolve-candidate') {
+          if (!row) return;
+          if (typeof openHrRotaAssignCandidateModal !== 'function') {
+            alert('Assign candidate modal is not available.');
+            return;
+          }
+          openHrRotaAssignCandidateModal(importId, idx);
+          return;
+        }
 
         if (act === 'resolve-role') {
+          if (!row) return;
           if (typeof openHrRotaAssignRoleModal !== 'function') {
-            alert('Role assignment modal is not available.');
+            alert('Timesheet target selection modal is not available.');
             return;
           }
           openHrRotaAssignRoleModal(importId, idx);
           return;
         }
 
-        if (act === 'resolve-candidate') {
-          // HR-row resolution path (no TS / still candidate_unresolved)
-          if (reasonCode === 'candidate_unresolved' || !hasTimesheet) {
-            openHrRotaAssignCandidateModal(importId, idx);
+        // ✅ UPDATED: Use the new reusable grade/role modal
+        if (act === 'resolve-grade') {
+          if (!row) return;
+          if (typeof openHrRotaResolveGradeRoleModal !== 'function') {
+            alert('Grade/role resolve modal is not available.');
             return;
           }
-
-          // Timesheet-backed resolution path
-          if (hasTimesheet) {
-            const hint = buildHintFromHrRow(row);
-
-            if (typeof openResolveCandidatePicker === 'function') {
-              openResolveCandidatePicker({
-                timesheet_id: row.timesheet_id,
-                hospital_norm: unit,
-                occupant_key_norm: staff,
-                candidate_hint_text: hint
-              });
-              return;
-            }
-
-            if (typeof openResolveCandidateModal === 'function') {
-              openResolveCandidateModal({
-                timesheet_id:      row.timesheet_id,
-                occupant_key_norm: staff,
-                hospital_norm:     unit
-              });
-              return;
-            }
-
-            alert('Candidate resolve picker is not available.');
-          } else {
-            alert('No timesheet matched for this row; resolve candidate via imports/aliases instead.');
-          }
+          await openHrRotaResolveGradeRoleModal(importId, idx);
+          return;
         }
 
-        if (act === 'resolve-client') {
-          // HR-row resolution path (no TS / still client_unresolved)
-          if (reasonCode === 'client_unresolved' || !hasTimesheet) {
-            openHrRotaAssignClientModal(importId, idx);
-            return;
-          }
-
-          // Timesheet-backed resolution path
-          if (hasTimesheet) {
-            if (typeof openResolveClientPicker === 'function') {
-              openResolveClientPicker({
-                timesheet_id:  row.timesheet_id,
-                hospital_norm: unit
-              });
-              return;
-            }
-
-            if (typeof openResolveClientModal === 'function') {
-              openResolveClientModal({
-                timesheet_id:  row.timesheet_id,
-                hospital_norm: unit
-              });
-              return;
-            }
-
-            alert('Client resolve picker is not available.');
-          } else {
-            alert('No timesheet matched for this row; resolve client/site via imports/aliases instead.');
-          }
-        }
-      });
-
-      root.addEventListener('change', (ev) => {
-        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
-        if (!cb) return;
-
-        const rowId = String(cb.getAttribute('data-row-id') || '').trim();
-        if (!rowId) return;
-
-        window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
-        if (!window.__hrRotaEmailSelections[impKey] || !(window.__hrRotaEmailSelections[impKey] instanceof Set)) {
-          window.__hrRotaEmailSelections[impKey] = new Set();
-        }
-
-        if (cb.checked) {
-          window.__hrRotaEmailSelections[impKey].add(rowId);
-        } else {
-          window.__hrRotaEmailSelections[impKey].delete(rowId);
-        }
-      });
-
-      const btnReclass = root.querySelector('button[data-act="hr-rota-reclassify"]');
-      if (btnReclass && !btnReclass.__hrRotaReclassWired) {
-        btnReclass.__hrRotaReclassWired = true;
-        btnReclass.addEventListener('click', async () => {
-          try {
-            if (!importId) {
-              alert('No import_id in summary; cannot reclassify.');
-              return;
-            }
-            await refreshHrRotaSummary(importId);
-          } catch (err) {
-            console.error('[IMPORTS][HR_ROTA] reclassify failed', err);
-            alert(err?.message || 'Reclassify failed.');
-          }
-        });
-      }
-
-      const btnApply = root.querySelector('button[data-act="hr-rota-apply"]');
-      if (btnApply && !btnApply.__hrRotaApplyWired) {
-        btnApply.__hrRotaApplyWired = true;
-        btnApply.addEventListener('click', async () => {
+        if (act === 'hr-rota-apply') {
           try {
             if (!importId) {
               alert('No import_id in summary; cannot finalise.');
               return;
             }
 
-            // ✅ Gate apply: must not finalise while candidate or role/target resolution is missing
-            const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
-            const rowsNow = st && Array.isArray(st.rows) ? st.rows : [];
-
+            // Gate apply: candidate unresolved / grade mapping required / timesheet target ambiguous
             let missingCand = 0;
-            let missingRole = 0;
+            let missingGrade = 0;
+            let missingTarget = 0;
 
             for (const r of rowsNow) {
-              const reasonCode = String(r?.reason_code || r?.failure_reason || r?.reason || '').toLowerCase();
-              const candUnresolved = (reasonCode === 'candidate_unresolved') && !(r && r.candidate_id);
-              if (candUnresolved) missingCand++;
-
-              const needRole = needsRoleResolve(r);
-              if (needRole) {
-                const hrid = r && r.hr_row_id ? String(r.hr_row_id).trim() : '';
-                const picked = hrid && roleSel && roleSel[hrid] && String(roleSel[hrid].target_id || '').trim();
-                if (!picked) missingRole++;
-              }
+              const rc = String(r?.reason_code || '').toLowerCase();
+              if (rc === 'candidate_unresolved') missingCand++;
+              if (r?.grade_mapping_required === true || rc === 'grade_mapping_required') missingGrade++;
+              if (r?.timesheet_target_ambiguous === true) missingTarget++;
             }
 
-            if (missingCand || missingRole) {
+            if (missingCand || missingGrade || missingTarget) {
               const parts = [];
               if (missingCand) parts.push(`Candidate unresolved: ${missingCand}`);
-              if (missingRole) parts.push(`Role/target unresolved: ${missingRole}`);
+              if (missingGrade) parts.push(`Grade/role unresolved: ${missingGrade}`);
+              if (missingTarget) parts.push(`Timesheet match unresolved: ${missingTarget}`);
               alert(`Cannot finalise yet.\n\n${parts.join('\n')}\n\nResolve these rows first, then reclassify.`);
+              return;
+            }
+
+            // Build email_actions from selected hr_row_id checkboxes (dedupe by timesheet_id|issue_fingerprint)
+            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[impKey];
+            const selectedHrRowIds = (sel instanceof Set) ? Array.from(sel).map(x => String(x).trim()).filter(Boolean) : [];
+
+            const rowById = new Map();
+            for (const r of rowsNow) {
+              const id = r?.hr_row_id ? String(r.hr_row_id).trim() : '';
+              if (id) rowById.set(id, r);
+            }
+
+            const emailByKey = new Map();
+            for (const hrid of selectedHrRowIds) {
+              const r = rowById.get(hrid) || null;
+              if (!r) continue;
+
+              const stU = String(r.status || '').toUpperCase();
+              const reasonC = String(r.reason_code || '').toLowerCase();
+              const tsId = r.timesheet_id ? String(r.timesheet_id).trim() : '';
+              const fp = r.issue_fingerprint ? String(r.issue_fingerprint).trim() : '';
+              if (!tsId || !fp) continue;
+
+              if (stU === 'VALIDATION_OK' || stU === 'OK') continue;
+              if (!EMAIL_REASON_CODES.has(reasonC)) continue;
+
+              const alt = fp ? getAltEmailForFp(fp) : '';
+              const key = `${tsId}|${fp}`;
+
+              emailByKey.set(key, {
+                timesheet_id: tsId,
+                issue_fingerprint: fp,
+                reason_code: reasonC,
+                hr_row_id: hrid,
+                staff_norm: (String(r.staff_norm || '')).toLowerCase().trim() || null,
+                hospital_norm: (String(r.trust_norm || r.unit_norm || r.hospital_or_trust || '')).toLowerCase().trim() || null,
+                work_date: r.date_local || r.date || r.shift_date || null,
+                alternative_email: alt || null
+              });
+            }
+
+            const email_actions = Array.from(emailByKey.values());
+
+            // Enforce alt email where default recipient is missing
+            const badAlt = [];
+            for (const a of email_actions) {
+              const r = rowById.get(String(a.hr_row_id || '').trim()) || null;
+              const recipMissing = (r && r.recipient_missing === true);
+              const alt = String(a.alternative_email || '').trim();
+              if (recipMissing && !alt) badAlt.push(`${a.timesheet_id}|${a.issue_fingerprint}`);
+            }
+
+            if (badAlt.length) {
+              alert(
+                'Alternative Email is required for one or more selected emails (default recipient is unavailable).\n\n' +
+                'Please enter an Alternative Email for the selected mismatch group(s) before finalising.'
+              );
               return;
             }
 
             const ok = window.confirm('Are you sure you are ready to finalise?');
             if (!ok) return;
 
-            // ✅ Only REAL hr_row_id values are sent
-            const sel = window.__hrRotaEmailSelections && window.__hrRotaEmailSelections[impKey];
-            const sendEmailRowIds = (sel instanceof Set) ? Array.from(sel).map(x => String(x).trim()).filter(Boolean) : [];
+            const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/apply`), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                email_actions,
+                invalidation_actions: []
+              })
+            });
 
-            const result = await applyHrRotaValidation(importId, sendEmailRowIds) || {};
-
-            const lines = [];
-            lines.push(`HR Rota validations for import ${result.import_id || importId} have been processed.`);
-
-            if (typeof result.validations_ok === 'number') {
-              lines.push(`Valid rows: ${result.validations_ok}`);
-            }
-            if (typeof result.validations_failed === 'number') {
-              lines.push(`Rows still unresolved: ${result.validations_failed}`);
-            }
-            if (typeof result.emails_queued === 'number') {
-              lines.push(`Emails queued: ${result.emails_queued}`);
+            const text = await res.text().catch(() => '');
+            if (!res.ok) {
+              throw new Error(text || `Apply validations failed (${res.status})`);
             }
 
-            if (Array.isArray(result.reasons) && result.reasons.length) {
-              lines.push('');
-              lines.push('Remaining issues:');
-              for (const r of result.reasons) {
-                const rc    = String(r.reason_code || '').toLowerCase();
-                const count = r.count ?? 0;
-                let nice;
-                if      (rc === 'candidate_unresolved')         nice = 'Candidate unmatched';
-                else if (rc === 'client_unresolved')            nice = 'Client unmatched';
-                else if (rc === 'role_unresolved')              nice = 'Role/target unresolved';
-                else if (rc === 'timesheet_target_unresolved')  nice = 'Role/target unresolved';
-                else if (rc === 'actual_hours_mismatch')       nice = 'Hours mismatch';
-                else if (rc === 'start_end_mismatch')          nice = 'Start/end mismatch';
-                else if (rc === 'break_minutes_mismatch')      nice = 'Break mismatch';
-                else                                           nice = (rc || 'other').replace(/_/g, ' ');
-                lines.push(`- ${nice}: ${count}`);
-              }
-            }
+            let payload = {};
+            try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
 
-            alert(lines.join('\n'));
+            const apply = (payload && typeof payload.apply === 'object' && payload.apply) ? payload.apply : {};
+            const post  = (payload && typeof payload.post_commit === 'object' && payload.post_commit) ? payload.post_commit : {};
+
+            const validationsUpserted = Number(apply.validations_upserted ?? payload.validations_upserted ?? 0) || 0;
+            const emailsQueued = Number(post.emails_queued ?? payload.emails_queued ?? 0) || 0;
+            const emailFailuresCount = Array.isArray(post.email_failures) ? post.email_failures.length : 0;
+
+            const msg =
+              `Applied HR rota daily validations (${validationsUpserted} validations upserted, ${emailsQueued} emails queued` +
+              (emailFailuresCount ? `, ${emailFailuresCount} email failures` : '') +
+              ').';
+
+            if (window.__toast) window.__toast(msg);
+            alert(msg);
+
             await refreshHrRotaSummary(importId);
           } catch (err) {
             console.error('[IMPORTS][HR_ROTA] apply failed', err);
             alert(err?.message || 'Apply validations failed.');
           }
-        });
-      }
+          return;
+        }
+      });
+
+      root.addEventListener('change', (ev) => {
+        const cb = ev.target.closest('input[data-act="hr-rota-email"]');
+        if (cb) {
+          const rowId = String(cb.getAttribute('data-row-id') || '').trim();
+          if (!rowId) return;
+
+          window.__hrRotaEmailSelections = window.__hrRotaEmailSelections || {};
+          if (!window.__hrRotaEmailSelections[impKey] || !(window.__hrRotaEmailSelections[impKey] instanceof Set)) {
+            window.__hrRotaEmailSelections[impKey] = new Set();
+          }
+
+          if (cb.checked) {
+            window.__hrRotaEmailSelections[impKey].add(rowId);
+          } else {
+            window.__hrRotaEmailSelections[impKey].delete(rowId);
+          }
+          return;
+        }
+
+        const alt = ev.target.closest('input[data-act="hr-rota-alt-email"]');
+        if (alt) {
+          const fp = String(alt.getAttribute('data-fp') || '').trim();
+          const v = String(alt.value || '').trim();
+          if (!fp) return;
+          if (v) altEmailByFp.set(fp, v);
+          else altEmailByFp.delete(fp);
+          return;
+        }
+      });
     } catch (e) {
       console.warn('[IMPORTS] HR_ROTA wiring failed', e);
     }
   }, 0);
 
   return markup;
+}
+
+async function postHrRotaResolveMappings(importId, payload) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][HR_ROTA][RESOLVE]', ...a); };
+
+  if (!importId) {
+    throw new Error('Missing importId for postHrRotaResolveMappings');
+  }
+
+  const body = payload || {};
+
+  const candidate_mappings = Array.isArray(body.candidate_mappings) ? body.candidate_mappings : [];
+  const client_aliases     = Array.isArray(body.client_aliases)     ? body.client_aliases     : [];
+
+  // ✅ optional timesheet target mappings (hr_row_id → selected target id)
+  const role_mappings =
+    Array.isArray(body.role_mappings) ? body.role_mappings :
+    Array.isArray(body.timesheet_target_mappings) ? body.timesheet_target_mappings :
+    Array.isArray(body.roleMappings) ? body.roleMappings :
+    [];
+
+  // ✅ NEW: durable grade → role mappings (client_id is derived server-side from the import)
+  const grade_role_mappings =
+    Array.isArray(body.grade_role_mappings) ? body.grade_role_mappings :
+    Array.isArray(body.gradeRoleMappings) ? body.gradeRoleMappings :
+    [];
+
+  if (!candidate_mappings.length && !client_aliases.length && !role_mappings.length && !grade_role_mappings.length) {
+    L('no mappings to send; returning early', { importId });
+    return {
+      ok: true,
+      candidate_mappings_applied: 0,
+      client_aliases_applied: 0,
+      role_mappings_applied: 0,
+      grade_role_mappings_applied: 0
+    };
+  }
+
+  if (typeof authFetch !== 'function' || typeof API !== 'function') {
+    throw new Error('authFetch/API helper missing in postHrRotaResolveMappings');
+  }
+
+  const url = `/api/imports/hr-rota/${encodeURIComponent(importId)}/resolve-conflicts`;
+
+  const aliasDebug = client_aliases.map(a => ({
+    client_id: a?.client_id || null,
+    hr_row_ids: Array.isArray(a?.hr_row_ids) ? a.hr_row_ids : [],
+    hospital_norm: a?.hospital_norm || null
+  }));
+
+  const roleDebug = role_mappings.map(r => ({
+    hr_row_id: r?.hr_row_id || null,
+    target_id: r?.target_id || r?.timesheet_target_id || r?.timesheet_id || null
+  }));
+
+  const gradeDebug = grade_role_mappings.map(g => ({
+    incoming_grade_norm: g?.incoming_grade_norm || g?.grade_norm || g?.grade || null,
+    role_code: g?.role_code || g?.role || null,
+    band_norm: g?.band_norm || g?.band || null
+  }));
+
+  L('posting HR rota resolve-conflicts', {
+    importId,
+    url: API(url),
+    candidate_mappings_count: candidate_mappings.length,
+    client_aliases_count: client_aliases.length,
+    role_mappings_count: role_mappings.length,
+    grade_role_mappings_count: grade_role_mappings.length,
+    client_aliases_debug: aliasDebug,
+    role_mappings_debug: roleDebug,
+    grade_role_mappings_debug: gradeDebug
+  });
+
+  // ✅ Only include keys that exist (tight payload, matches new backend contract)
+  const postBody = {};
+  if (candidate_mappings.length) postBody.candidate_mappings = candidate_mappings;
+  if (client_aliases.length)     postBody.client_aliases = client_aliases;
+  if (role_mappings.length)      postBody.role_mappings = role_mappings;
+  if (grade_role_mappings.length) postBody.grade_role_mappings = grade_role_mappings;
+
+  const res = await authFetch(API(url), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(postBody)
+  });
+
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    const msg = text || `HR rota resolve-conflicts failed (${res.status})`;
+    throw new Error(msg);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  L('resolve-conflicts OK', json);
+  return json;
+}
+
+
+async function applyHrRotaValidation(importId, email_actions = [], invalidation_actions = []) {
+  const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
+  const L   = (...a) => { if (LOG) console.log('[IMPORTS][HR_ROTA][APPLY]', ...a); };
+
+  if (!importId) {
+    throw new Error('Missing importId for applyHrRotaValidation');
+  }
+
+  if (typeof authFetch !== 'function' || typeof API !== 'function') {
+    throw new Error('authFetch/API helper missing in applyHrRotaValidation');
+  }
+
+  const emailActions = Array.isArray(email_actions) ? email_actions : [];
+  const invalidActions = Array.isArray(invalidation_actions) ? invalidation_actions : [];
+
+  // Minimal hygiene: remove completely empty objects
+  const cleanedEmailActions = emailActions
+    .filter(x => x && typeof x === 'object' && !Array.isArray(x))
+    .map(x => ({
+      timesheet_id: (x.timesheet_id != null) ? String(x.timesheet_id).trim() : null,
+      issue_fingerprint: (x.issue_fingerprint != null) ? String(x.issue_fingerprint).trim() : null,
+      reason_code: (x.reason_code != null) ? String(x.reason_code).trim() : null,
+      hr_row_id: (x.hr_row_id != null) ? String(x.hr_row_id).trim() : null,
+      staff_norm: (x.staff_norm != null) ? String(x.staff_norm).trim() : null,
+      hospital_norm: (x.hospital_norm != null) ? String(x.hospital_norm).trim() : null,
+      work_date: (x.work_date != null) ? String(x.work_date).trim() : null,
+      alternative_email: (x.alternative_email != null && String(x.alternative_email).trim())
+        ? String(x.alternative_email).trim()
+        : null
+    }))
+    .filter(x => !!x.timesheet_id && !!x.issue_fingerprint);
+
+  const cleanedInvalidActions = invalidActions
+    .filter(x => x && typeof x === 'object' && !Array.isArray(x))
+    .map(x => ({
+      timesheet_id: (x.timesheet_id != null) ? String(x.timesheet_id).trim() : null,
+      comparison_key: (x.comparison_key != null) ? String(x.comparison_key).trim() : null,
+      invalidate: (x.invalidate === false || String(x.invalidate).toLowerCase() === 'false') ? false : true
+    }))
+    .filter(x => !!x.timesheet_id && !!x.comparison_key);
+
+  const url = `/api/imports/hr-rota/${encodeURIComponent(importId)}/apply`;
+
+  L('posting apply', {
+    importId,
+    url: API(url),
+    email_actions_count: cleanedEmailActions.length,
+    invalidation_actions_count: cleanedInvalidActions.length
+  });
+
+  const res = await authFetch(API(url), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      email_actions: cleanedEmailActions,
+      invalidation_actions: cleanedInvalidActions
+    })
+  });
+
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    throw new Error(text || `HR rota daily apply failed (${res.status})`);
+  }
+
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch {}
+
+  L('apply OK', json);
+  return json;
 }
 
 async function switchContractWeekToManual(weekId) {
