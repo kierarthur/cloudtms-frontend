@@ -69811,6 +69811,617 @@ async function resendQrTimesheetEmail(timesheetId) {
 }
 
 
+function renderHrWeeklyValidationSummary(type, importId, preview) {
+  const T = String(type || '').toUpperCase();
+  const impId = (importId != null) ? String(importId) : '';
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  const p = (preview && typeof preview === 'object') ? preview : {};
+  const sum = (p.summary && typeof p.summary === 'object') ? p.summary : {};
+
+  const modeRaw = (p.mode_summary || p.modeSummary || sum.mode_summary || sum.modeSummary || '');
+  let mode = String(modeRaw || '').trim().toUpperCase();
+
+  // Safety fallback: never default to "apply" semantics if backend didn't provide mode.
+  if (mode !== 'MODE_A_ONLY' && mode !== 'MODE_B_ONLY' && mode !== 'MIXED') {
+    const vgN = Array.isArray(p.validation_groups) ? p.validation_groups.length : 0;
+    const agN = Array.isArray(p.action_groups) ? p.action_groups.length : 0;
+    const aN  = Array.isArray(p.actions) ? p.actions.length : 0;
+    if (vgN > 0 && (agN > 0 || aN > 0)) mode = 'MIXED';
+    else if (vgN > 0) mode = 'MODE_A_ONLY';
+    else if (agN > 0 || aN > 0) mode = 'MODE_B_ONLY';
+    else mode = 'MODE_A_ONLY';
+  }
+
+  const niceYmd = (ymd) => {
+    const s = String(ymd || '').trim();
+    if (!s) return '';
+    if (typeof formatYmdToNiceDate === 'function' && /^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      try { return formatYmdToNiceDate(s); } catch {}
+    }
+    return s;
+  };
+
+  // Weekly preview payload fields
+  const vg = Array.isArray(p.validation_groups) ? p.validation_groups : [];
+  const allRows = Array.isArray(p.rows) ? p.rows : [];
+
+  // Resolve import-level client_id fallback for mapping modal seeding
+  const importClientId =
+    String(
+      (p.client_id || sum.client_id || p?.truth_meta?.client_id || sum?.truth_meta?.client_id || '') || ''
+    ).trim();
+
+  // UI store (emailSelection + invalidationSelection + altEmailByKey) used for checkbox/input state
+  const ui = (window.__weeklyImportUi &&
+              window.__weeklyImportUi.HR_WEEKLY &&
+              window.__weeklyImportUi.HR_WEEKLY[impId] &&
+              (window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Set
+                || window.__weeklyImportUi.HR_WEEKLY[impId].emailSelection instanceof Map
+                || window.__weeklyImportUi.HR_WEEKLY[impId].invalidationSelection instanceof Map
+                || window.__weeklyImportUi.HR_WEEKLY[impId].altEmailByKey instanceof Map))
+    ? window.__weeklyImportUi.HR_WEEKLY[impId]
+    : null;
+
+  // Back-compat:
+  // - emailSelection may be Set (historical: presence=checked)
+  // - OR Map (new: key -> boolean, where false means explicitly unticked)
+  const selStore = (ui && (ui.emailSelection instanceof Set || ui.emailSelection instanceof Map)) ? ui.emailSelection : null;
+  const invMap = (ui && ui.invalidationSelection instanceof Map) ? ui.invalidationSelection : new Map();
+  const altEmailMap = (ui && ui.altEmailByKey instanceof Map) ? ui.altEmailByKey : new Map();
+
+  const keyFor = (tsid, fp) => {
+    const a = String(tsid || '').trim();
+    const b = String(fp || '').trim();
+    if (!a || !b) return '';
+    return `${a}|${b}`;
+  };
+
+  const invKeyFor = (tsid, comparisonKey) => {
+    const a = String(tsid || '').trim();
+    const b = String(comparisonKey || '').trim();
+    if (!a || !b) return '';
+    return `${a}|${b}`;
+  };
+
+  const pillForStatus = (s) => {
+    const v = String(s || '').toUpperCase();
+    if (v === 'OK' || v === 'PASS' || v === 'VALIDATION_OK') return 'pill-ok';
+    if (v === 'AMBIGUOUS' || v === 'WARN' || v === 'WARNING') return 'pill-warn';
+    if (v === 'FAIL' || v === 'ERROR' || v === 'VALIDATION_ERROR' || v === 'MISSING_TIMESHEET' || v === 'AWAITING_AUTHORISATION') return 'pill-bad';
+    return 'pill-info';
+  };
+
+  const statusTextNice = (raw) => {
+    const a = String(raw || '').trim().toUpperCase();
+    if (!a) return 'Unknown';
+
+    if (a === 'REJECT_NO_CANDIDATE') return 'Reject – Candidate not found';
+    if (a === 'REJECT_NO_CLIENT') return 'Reject – Client/site not found';
+    if (a === 'REJECT_NO_CONTRACT') return 'Reject – No matching contract';
+    if (a === 'REJECT_NO_CONTRACT_BAND_MISMATCH') return 'Reject – Grade/band mapping missing';
+    if (a === 'REJECT_MISSING_EXTERNAL_ROW_KEY') return 'Reject – Missing row key';
+    if (a.startsWith('REJECT_')) return `Reject – ${a.replace(/^REJECT_/, '').replace(/_/g, ' ').toLowerCase()}`;
+
+    if (a === 'NO_CANDIDATE') return 'Reject – Candidate not found';
+    if (a === 'NO_CLIENT') return 'Reject – Client/site not found';
+    if (a === 'BAD_ROW') return 'Reject – Invalid row';
+
+    return a.replace(/_/g, ' ');
+  };
+
+  // Fallback: Flatten legacy days[].pairings[] => comparisons-like rows
+  const flattenComparisonsFromDays = (days) => {
+    const out = [];
+    const arr = Array.isArray(days) ? days : [];
+    for (const d of arr) {
+      const ymd = String(d?.work_date || d?.ymd || d?.date_local || d?.date || '').trim();
+      const pairings = Array.isArray(d?.pairings) ? d.pairings : [];
+      for (const p0 of pairings) {
+        const p2 = p0 || {};
+        const hr = p2?.hr || p2?.hr_entry || p2?.hrEntry || null;
+        const wk = p2?.worker || p2?.worker_entry || p2?.workerEntry || null;
+
+        const sd = p2?.start_diff_mins ?? p2?.startDiffMins ?? null;
+        const ed = p2?.end_diff_mins ?? p2?.endDiffMins ?? null;
+        const bd = p2?.break_diff_mins ?? p2?.breakDiffMins ?? null;
+
+        const matchStatus = String(p2?.match_status || p2?.matchStatus || '').trim().toUpperCase();
+        const diffsAllZero =
+          (sd == null || Number(sd) === 0) &&
+          (ed == null || Number(ed) === 0) &&
+          (bd == null || Number(bd) === 0);
+
+        const isMatch =
+          (matchStatus === 'MATCH' || matchStatus === 'OK' || matchStatus === 'PASS' || matchStatus === 'SAME' || matchStatus === 'MATCHED') ||
+          (matchStatus === '' && diffsAllZero);
+
+        const tsStart = wk?.start_local || wk?.start || wk?.start_utc || '';
+        const tsEnd   = wk?.end_local || wk?.end || wk?.end_utc || '';
+        const tsBreak = (wk?.break_mins ?? wk?.break_minutes ?? wk?.break ?? '');
+
+        const hrStart = hr?.start_local || hr?.start || hr?.start_utc || '';
+        const hrEnd   = hr?.end_local || hr?.end || hr?.end_utc || '';
+        const hrBreak = (hr?.break_mins ?? hr?.break_minutes ?? hr?.break ?? '');
+
+        out.push({
+          comparison_key: `${String(ymd || '').trim()}|${String(tsStart || '').trim()}|${String(tsEnd || '').trim()}|${String(tsBreak == null ? 0 : tsBreak)}`,
+          work_date: ymd,
+          match: !!isMatch,
+          match_status: matchStatus || (isMatch ? 'MATCH' : 'MISMATCH'),
+          timesheet_start: String(tsStart || '').trim(),
+          timesheet_end: String(tsEnd || '').trim(),
+          timesheet_break_mins: (tsBreak == null || tsBreak === '' ? null : Number(tsBreak)),
+          healthroster_start: String(hrStart || '').trim(),
+          healthroster_end: String(hrEnd || '').trim(),
+          healthroster_break_mins: (hrBreak == null || hrBreak === '' ? null : Number(hrBreak)),
+          invoice_locked: false,
+          invoice_locked_invoice_id: null,
+          is_destructive_invalidation: false,
+          default_invalidate_checked: false
+        });
+      }
+    }
+    return out;
+  };
+
+  // New contract: g.comparisons[] (preferred)
+  const normaliseComparisons = (arr) => {
+    const a = Array.isArray(arr) ? arr : [];
+    return a.map((c0) => {
+      const c = c0 && typeof c0 === 'object' ? c0 : {};
+      const wd = String(c.work_date || c.workDate || c.date || c.ymd || '').trim();
+
+      const matchVal = (c.match != null) ? c.match : (c.is_match != null ? c.is_match : c.isMatch);
+      const match = (matchVal === true || matchVal === 'true' || matchVal === 1 || matchVal === '1');
+
+      const tsStart = String(c.timesheet_start || c.timesheetStart || c.ts_start_hhmm || c.tsStart || '').trim();
+      const tsEnd   = String(c.timesheet_end || c.timesheetEnd || c.ts_end_hhmm || c.tsEnd || '').trim();
+
+      const hrStart = String(c.healthroster_start || c.healthrosterStart || c.hr_start_hhmm || c.hrStart || '').trim();
+      const hrEnd   = String(c.healthroster_end || c.healthrosterEnd || c.hr_end_hhmm || c.hrEnd || '').trim();
+
+      const tsBr = (c.timesheet_break_mins ?? c.timesheetBreakMins ?? c.ts_break_mins ?? c.tsBreakMins ?? null);
+      const hrBr = (c.healthroster_break_mins ?? c.healthrosterBreakMins ?? c.hr_break_mins ?? c.hrBreakMins ?? null);
+
+      const ms = String(c.match_status || c.matchStatus || '').trim().toUpperCase();
+
+      const ck = String(c.comparison_key || c.comparisonKey || '').trim();
+      const invoiceLockedVal = (c.invoice_locked != null) ? c.invoice_locked : (c.invoiceLocked != null ? c.invoiceLocked : null);
+      const invoiceLocked = (invoiceLockedVal === true || invoiceLockedVal === 'true' || invoiceLockedVal === 1 || invoiceLockedVal === '1');
+      const invoiceLockedId = String(c.invoice_locked_invoice_id || c.invoiceLockedInvoiceId || '').trim() || null;
+
+      const destrVal = (c.is_destructive_invalidation != null) ? c.is_destructive_invalidation : (c.isDestructiveInvalidation != null ? c.isDestructiveInvalidation : null);
+      const isDestructive = (destrVal === true || destrVal === 'true' || destrVal === 1 || destrVal === '1');
+
+      const defInvVal = (c.default_invalidate_checked != null) ? c.default_invalidate_checked : (c.defaultInvalidateChecked != null ? c.defaultInvalidateChecked : null);
+      const defaultInv = (defInvVal === true || defInvVal === 'true' || defInvVal === 1 || defInvVal === '1');
+
+      return {
+        comparison_key: ck || (wd ? `${wd}|${tsStart}|${tsEnd}|${String(tsBr == null ? 0 : tsBr)}` : ''),
+        work_date: wd,
+        match: !!match,
+        match_status: ms || (match ? 'MATCH' : 'MISMATCH'),
+        timesheet_start: tsStart,
+        timesheet_end: tsEnd,
+        timesheet_break_mins: (tsBr == null || tsBr === '' ? null : Number(tsBr)),
+        healthroster_start: hrStart,
+        healthroster_end: hrEnd,
+        healthroster_break_mins: (hrBr == null || hrBr === '' ? null : Number(hrBr)),
+        invoice_locked: !!invoiceLocked || !!invoiceLockedId,
+        invoice_locked_invoice_id: invoiceLockedId,
+        is_destructive_invalidation: !!isDestructive,
+        default_invalidate_checked: !!defaultInv
+      };
+    }).filter(x => x.work_date || x.timesheet_start || x.healthroster_start);
+  };
+
+  // Unresolved / rejected items (derive from preview.rows)
+  const unresolved = [];
+  for (let i = 0; i < allRows.length; i++) {
+    const r = allRows[i];
+    if (!r || typeof r !== 'object') continue;
+
+    const act = String(r.action || r.resolution_status || r.status || '').toUpperCase();
+    if (!act) continue;
+
+    const unresolvedHere =
+      act.startsWith('REJECT_') ||
+      act === 'NO_CANDIDATE' ||
+      act === 'NO_CLIENT' ||
+      act === 'BAD_ROW';
+
+    if (!unresolvedHere) continue;
+
+    unresolved.push({ idx: i, row: r, act });
+  }
+
+  const unresolvedTableFullWidth = () => {
+    if (!unresolved.length) return '';
+
+    const rowsHtml = unresolved.map(({ idx, row, act }) => {
+      const staff = row.staff_name || row.staff_raw || row.staff_norm || '';
+      const unit  = row.ward || row.unit || row.hospital_or_trust || row.trust_raw || row.unit_raw || '';
+      const wd    = row.work_date || row.date_local || row.date || '';
+      const we    = row.week_ending_date || row.weekEndingDate || '';
+      const code  = row.incoming_code || row.grade_raw || row.assignment_code || row.assignment_grade_norm || '';
+      const reason = row.reason || row.reason_text || row.reason_code || '';
+
+      const actNice = statusTextNice(act);
+
+      const canAssignCand = (act === 'NO_CANDIDATE' || act === 'REJECT_NO_CANDIDATE');
+      const needsBandMap =
+        (act === 'REJECT_NO_CONTRACT' || act === 'REJECT_NO_CONTRACT_BAND_MISMATCH');
+
+      const btnCand = canAssignCand
+        ? `<button type="button" class="btn mini" data-act="hr-weekly-val-resolve-candidate" data-row-idx="${enc(String(idx))}">Assign candidate…</button>`
+        : '';
+
+      const btnBand = needsBandMap
+        ? `<button type="button"
+                   class="btn mini"
+                   data-act="hr-weekly-val-fix-band"
+                   data-incoming-code="${enc(String(code || '').trim())}"
+                   data-client-id="${enc(String(row.client_id || importClientId || '').trim())}"
+                   data-candidate-id="${enc(String(row.candidate_id || '').trim())}"
+                   data-work-date="${enc(String(wd || '').trim())}"
+                   data-week-ending-date="${enc(String(we || '').trim())}"
+                   data-import-id="${enc(impId)}">
+             Fix band mapping…
+           </button>`
+        : '';
+
+      const btns = (btnCand || btnBand)
+        ? `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;">${btnCand}${btnBand}</div>`
+        : `<span class="mini">—</span>`;
+
+      const statusPill = `<span class="pill pill-bad" style="white-space:normal;word-break:break-word;display:inline-block;">${enc(actNice)}</span>`;
+
+      return `
+        <tr data-row-idx="${enc(String(idx))}">
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(staff || '—')}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(unit || '—')}</td>
+          <td class="mini">${enc(niceYmd(wd) || wd || '—')}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(code || '—')}</td>
+          <td class="mini">${statusPill}</td>
+          <td class="mini" style="white-space:normal;word-break:break-word;">${enc(String(reason || '').replace(/_/g,' '))}</td>
+          <td>${btns}</td>
+        </tr>
+      `;
+    }).join('');
+
+    return html(`
+      <div class="card" style="margin-top:10px;">
+        <div class="mini" style="margin-bottom:8px;">
+          Cannot validate yet — resolve these items then click <strong>Reclassify</strong>.
+        </div>
+
+        <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
+          <table class="grid" style="table-layout:auto; width:100%; min-width:1100px;">
+            <thead>
+              <tr>
+                <th style="width:180px;">Staff</th>
+                <th style="width:320px;">Unit / Site</th>
+                <th style="width:140px;">Date</th>
+                <th style="width:160px;">Grade / Code</th>
+                <th style="width:240px;">Status</th>
+                <th style="min-width:420px;">Reason</th>
+                <th style="width:260px;">Resolve</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+
+        <div class="hint" style="margin-top:8px;">
+          Candidate mapping teaches the system which person a rota name refers to. Band mapping teaches which contracts/bands a Grade code should match.
+        </div>
+      </div>
+    `);
+  };
+
+  // Helper: read explicit selection state (supports Set + Map)
+  // Returns: true | false | null (null => not explicitly chosen yet)
+  const getSelectionState = (k) => {
+    if (!k) return null;
+    if (selStore instanceof Map) {
+      if (selStore.has(k)) return !!selStore.get(k);
+      return null;
+    }
+    if (selStore instanceof Set) {
+      // Set cannot represent explicit false; treat missing as null (so we can default)
+      return selStore.has(k) ? true : null;
+    }
+    return null;
+  };
+
+  const getAltEmailValue = (k) => {
+    if (!k) return '';
+    if (altEmailMap instanceof Map && altEmailMap.has(k)) {
+      return String(altEmailMap.get(k) || '').trim();
+    }
+    // Back-compat: some UIs may store this on ui.altEmail (plain object)
+    try {
+      const obj = (ui && ui.altEmail && typeof ui.altEmail === 'object') ? ui.altEmail : null;
+      if (obj && Object.prototype.hasOwnProperty.call(obj, k)) {
+        return String(obj[k] || '').trim();
+      }
+    } catch {}
+    return '';
+  };
+
+  const groupsHtml = vg.length
+    ? vg.map((g) => {
+        const we = g?.week_ending_date || g?.weekEndingDate || null;
+        const candName = String(g?.candidate_name || g?.candidateName || '').trim();
+
+        const overall = g?.overall_status || g?.overallStatus || g?.status || 'UNKNOWN';
+        const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
+
+        const failureReasons = g?.failure_reasons || g?.failureReasons || [];
+
+        // Email controls (used for wiring only)
+        const tsid = g?.timesheet_id || g?.timesheetId || null;
+        const recip = String(g?.recipient_email || g?.recipientEmail || '').trim();
+        const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
+        const canEmail = (g?.can_email === true) || (g?.canEmail === true);
+        const fp = String(g?.issue_fingerprint || g?.issueFingerprint || '').trim();
+
+        const statusPill = `<span class="pill ${pillForStatus(overall)}" style="padding:2px 8px;">${enc(String(overall).toUpperCase())}</span>`;
+
+        // Prefer comparisons[] from backend. Fallback to legacy days/pairings.
+        const comparisonsNew = normaliseComparisons(g?.comparisons || g?.comparison_rows || g?.comparisonRows || []);
+        const comparisonsFallback = (comparisonsNew.length === 0)
+          ? flattenComparisonsFromDays(g?.days || [])
+          : [];
+        const comps = comparisonsNew.length ? comparisonsNew : comparisonsFallback;
+
+        const compTable = (() => {
+          if (!comps.length) {
+            return html(`<div class="mini">No detailed comparisons returned for this candidate/week.</div>`);
+          }
+
+          const body = comps.map((c) => {
+            const isMatch = (c.match === true);
+            const icon = isMatch ? '✅' : '❌';
+
+            const tsTxt = `${c.timesheet_start || '—'} → ${c.timesheet_end || '—'} (break ${c.timesheet_break_mins == null ? '—' : c.timesheet_break_mins})`;
+            const hrTxt = `${c.healthroster_start || '—'} → ${c.healthroster_end || '—'} (break ${c.healthroster_break_mins == null ? '—' : c.healthroster_break_mins})`;
+
+            const isDestructive = (c.is_destructive_invalidation === true);
+            const invoiceLocked = (c.invoice_locked === true);
+
+            const ck = String(c.comparison_key || '').trim();
+            const invKey = (tsid && ck) ? invKeyFor(tsid, ck) : '';
+            const invChecked = invKey ? (invMap.has(invKey) ? (invMap.get(invKey) === true) : true) : true;
+
+            const showInvalidateCheckbox = !!(isDestructive && !invoiceLocked && tsid && ck);
+
+            const rowStyle = isDestructive
+              ? 'background:rgba(255,0,0,0.06);'
+              : '';
+
+            const cbHtml = showInvalidateCheckbox
+              ? `<label class="inline mini" style="gap:6px; white-space:nowrap;">
+                   <input type="checkbox"
+                          data-act="hr-weekly-val-invalidate-toggle"
+                          data-timesheet-id="${enc(String(tsid || ''))}"
+                          data-comparison-key="${enc(String(ck || ''))}"
+                          ${invChecked ? 'checked' : ''}/>
+                   <span class="mini">Invalidate</span>
+                 </label>`
+              : (invoiceLocked && isDestructive
+                  ? `<span class="mini" title="Invoice locked: informative only">—</span>`
+                  : `<span class="mini">—</span>`);
+
+            return html(`
+              <tr style="${rowStyle}">
+                <td class="mini" style="width:90px; text-align:center;">${cbHtml}</td>
+                <td class="mini" style="width:80px; text-align:center;">${enc(icon)}</td>
+                <td class="mini" style="width:140px;">${enc(niceYmd(c.work_date) || c.work_date || '—')}</td>
+                <td class="mini" style="white-space:normal;word-break:break-word;">${enc(tsTxt)}</td>
+                <td class="mini" style="white-space:normal;word-break:break-word;">${enc(hrTxt)}</td>
+              </tr>
+            `);
+          }).join('');
+
+          return html(`
+            <div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">
+              <table class="grid" style="table-layout:auto; width:100%; min-width:980px;">
+                <thead>
+                  <tr>
+                    <th style="width:90px;">Invalidate</th>
+                    <th style="width:80px;">Match</th>
+                    <th style="width:140px;">Date</th>
+                    <th>Timesheet start/finish/break</th>
+                    <th>HealthRoster start/finish/break</th>
+                  </tr>
+                </thead>
+                <tbody>${body}</tbody>
+              </table>
+            </div>
+            <div class="hint" style="margin-top:6px;">
+              Red rows with “Invalidate” will remove previously stored reference numbers for missing shifts when you finalise.
+              Invoice-locked rows are informative only.
+            </div>
+          `);
+        })();
+
+        // Email block:
+        // - Always show Alternative Email textbox when mismatch exists
+        // - Checkbox is selection-driven and defaults:
+        //     - first-time email: checked
+        //     - re-email: unchecked
+        //   but explicit user toggle overrides both
+        const emailBlock = (() => {
+          if (!hasMismatch) return '';
+
+          const hasKeyInputs = !!(String(tsid || '').trim() && String(fp || '').trim());
+          const k = hasKeyInputs ? keyFor(tsid, fp) : '';
+
+          const altVal = (k ? getAltEmailValue(k) : '');
+
+          const explicit = k ? getSelectionState(k) : null;
+
+          const checked = (() => {
+            if (!k) return '';
+            if (explicit === true) return 'checked';
+            if (explicit === false) return '';
+            if (emailedAlready) return '';
+            return 'checked';
+          })();
+
+          const label = emailedAlready ? 'Re-email Temporary Staffing' : 'Email Temporary Staffing';
+
+          const recipientDisplay = String(recip || '').trim() ? recip : '—';
+
+          // Explainability: when can_email=false OR default recipient missing, alt email is required to send.
+          const needsAlt =
+            (canEmail !== true) || (!String(recip || '').trim());
+
+          const why =
+            !tsid ? 'Email unavailable (timesheet missing).' :
+            !String(fp || '').trim() ? 'Email unavailable (issue fingerprint missing).' :
+            (needsAlt ? 'Default recipient not available; enter Alternative Email to send.' : 'Email available.');
+
+          const showWhy = !!needsAlt;
+
+          const altId = `hrAltEmail_${impId}_${String(tsid || '').slice(0,8)}_${Math.random().toString(36).slice(2)}`;
+
+          return html(`
+            <div class="mini" style="margin-top:10px;">
+              <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+                <label class="inline mini" style="gap:6px; margin-right:6px;">
+                  <input type="checkbox"
+                         data-act="hr-weekly-val-email-toggle"
+                         data-timesheet-id="${enc(String(tsid || ''))}"
+                         data-issue-fingerprint="${enc(String(fp || ''))}"
+                         ${checked}
+                         ${hasKeyInputs ? '' : 'disabled'}/>
+                  <span>${enc(label)}</span>
+                </label>
+
+                <span class="mini" style="margin-left:0;">
+                  Recipient: <span class="mono">${enc(recipientDisplay)}</span>
+                  ${emailedAlready ? ` &nbsp;•&nbsp; <span class="pill pill-warn" style="padding:2px 8px;">Emailed already</span>` : ''}
+                </span>
+
+                <span class="mini" style="margin-left:0;">
+                  &nbsp;•&nbsp; Alternative Email:
+                  <input
+                    id="${enc(altId)}"
+                    type="email"
+                    class="input"
+                    placeholder="name@example.com"
+                    value="${enc(altVal)}"
+                    style="min-width:260px; margin-left:6px;"
+                    data-act="hr-weekly-val-alt-email"
+                    data-timesheet-id="${enc(String(tsid || ''))}"
+                    data-issue-fingerprint="${enc(String(fp || ''))}"
+                  />
+                </span>
+              </div>
+
+              ${showWhy ? html(`
+                <div class="mini" style="margin-top:6px; opacity:.85;">
+                  ${enc(why)}
+                </div>
+              `) : ''}
+            </div>
+          `);
+        })();
+
+        return html(`
+          <details style="margin:8px 0;">
+            <summary style="cursor:pointer;">
+              <span class="mini">${statusPill}</span>
+              <span class="mini" style="margin-left:8px;">
+                ${enc(candName || 'Unknown candidate')}
+                ${we ? ` • W/E ${enc(niceYmd(we))}` : ''}
+                ${hasMismatch ? ` • ${enc('Mismatch')}` : ''}
+              </span>
+            </summary>
+
+            <div style="margin-top:8px; padding-left:10px;">
+              ${Array.isArray(failureReasons) && failureReasons.length
+                ? html(`
+                    <div class="mini" style="margin-bottom:6px;">Notes</div>
+                    <ul class="mini" style="margin:0; padding-left:18px;">
+                      ${failureReasons.filter(Boolean).map(r => html(`<li>${enc(String(r))}</li>`)).join('')}
+                    </ul>
+                  `)
+                : html(`<div class="mini" style="margin-bottom:6px;">No mismatch notes.</div>`)
+              }
+
+              <div style="margin-top:10px;">
+                ${compTable}
+              </div>
+
+              ${emailBlock}
+            </div>
+          </details>
+        `);
+      }).join('')
+    : html(`<div class="mini">No validation groups were returned by the preview.</div>`);
+
+  const headerTitle = (() => {
+    if (mode === 'MIXED') return 'HealthRoster hours check + apply actions';
+    return 'HealthRoster hours check';
+  })();
+
+  const headerBlurb =
+    'This screen shows mismatches and allows optional emails to Temporary Staffing with a copy of the candidate timesheet to request hours are amended.';
+
+  const finaliseLabel = (mode === 'MIXED')
+    ? 'Finalise (apply actions + emails)'
+    : 'Finalise validations';
+
+  return html(`
+    <div id="hrWeeklyValidationSummary" data-import-id="${enc(impId)}" data-mode="${enc(mode)}">
+      <div class="card">
+        <div class="row">
+          <label>${enc(headerTitle)}</label>
+          <div class="controls">
+            <div class="mini">
+              Import ID: <span class="mono">${enc(impId || '—')}</span><br/>
+              Validation groups: <span class="mono">${enc(String(vg.length))}</span>
+            </div>
+            <div class="hint" style="margin-top:8px;">
+              ${enc(headerBlurb)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px;">
+        <div class="row">
+          <label>Groups</label>
+          <div class="controls">
+            ${groupsHtml}
+          </div>
+        </div>
+      </div>
+
+      ${unresolvedTableFullWidth()}
+
+      <div class="row" style="margin-top:10px;">
+        <label></label>
+        <div class="controls">
+          <button type="button" class="btn" data-act="hr-weekly-val-reclassify">Reclassify</button>
+          <button type="button" class="btn btn-primary" style="margin-left:8px;" data-act="hr-weekly-val-finalise">${enc(finaliseLabel)}</button>
+          <span class="mini" style="margin-left:8px;">
+            Reclassify refreshes validation after mapping changes. Finalise sends selected emails (and applies actions if mixed).
+          </span>
+        </div>
+      </div>
+    </div>
+  `);
+}
 
 async function refuseQrHours(timesheetId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][QR][REFUSE]');
