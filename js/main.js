@@ -36967,6 +36967,297 @@ this._markDirty();
     </div>
   `;
 }
+async function authoriseTimesheet(ctxOrId, expectedTimesheetId) {
+  const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUTH]');
+  GC('authoriseTimesheet');
+
+  const mc  = window.modalCtx || {};
+  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
+  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
+
+  if (!tsId) {
+    L('ERROR: missing timesheetId');
+    GE();
+    throw new Error('authoriseTimesheet: timesheetId is required');
+  }
+
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
+    String(tsId);
+
+  const encId   = encodeURIComponent(tsId);
+  const urlPath = `/api/timesheets/${encId}/authorise`;
+
+  const payload = { expected_timesheet_id: expected };
+
+  // Helpers
+  const normCodes = (arr) => (Array.isArray(arr) ? arr.map(x => String(x || '').trim()).filter(Boolean) : []);
+  const uniq = (arr) => Array.from(new Set((arr || []).filter(Boolean)));
+  const toastWarn = (msg) => {
+    if (typeof window.toast === 'function') window.toast(msg, { kind: 'warn' });
+    else if (typeof window.showToast === 'function') window.showToast(msg, 'warn');
+    else window.alert(msg);
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW RULE: Unsigned QR cannot be authorised.
+  // Block client-side (UX), matching the truth model.
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const dts = mc.timesheetDetails?.timesheet || {};
+    const qrStatusU = String(dts.qr_status ?? row.qr_status ?? '').trim().toUpperCase();
+
+    const qrToken = (dts.qr_token != null ? String(dts.qr_token).trim() : '');
+    const qrGen = dts.qr_generated_at || null;
+    const qrLastSentHash = (dts.qr_last_sent_hash != null ? String(dts.qr_last_sent_hash).trim() : '');
+    const qrScannedAt = dts.qr_scanned_at || null;
+
+    const hasIssuedProof = (
+      ((qrToken && qrGen) ? true : false) ||
+      (!!qrLastSentHash)
+    );
+
+    const qrAwaitingSignatureUpload =
+      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt);
+
+    const codes = uniq([
+      ...normCodes(row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.issue_codes),
+    ]);
+
+    const hasIssueCode = codes.includes('Awaiting signed QR timesheet');
+
+    if (qrAwaitingSignatureUpload || hasIssueCode) {
+      toastWarn('Cannot authorise until the signed QR timesheet is received.');
+      GE();
+      return { ok: false, blocked: true, reason: 'QR_UNSIGNED' };
+    }
+  } catch (e) {
+    if (LOGM) L('[TS][AUTH] unsigned-QR block check failed (non-fatal)', e);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Warn-confirm if invoice-precheck is blocked by missing timesheet evidence
+  // Condition comes from DB issues: "Timesheet evidence missing"
+  // Only warn when there are worked hours (non-expenses-only)
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const codes = uniq([
+      ...normCodes(row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.issue_codes),
+    ]);
+
+    const hasEvidenceMissing = codes.includes('Timesheet evidence missing');
+
+    const hoursRaw =
+      mc.timesheetDetails?.tsfin?.total_hours ??
+      mc.timesheetDetails?.row?.total_hours ??
+      row?.total_hours ??
+      0;
+
+    const hours = Number(hoursRaw);
+    const hasHours = Number.isFinite(hours) ? (hours > 0) : true;
+
+    if (hasEvidenceMissing && hasHours) {
+      const ok = window.confirm(
+        'No Timesheet evidence has been attached.\n\n' +
+        'Do you wish to proceed? (This will be blocked from invoicing.)'
+      );
+      if (!ok) {
+        GE();
+        return { ok: false, cancelled: true };
+      }
+    }
+  } catch (e) {
+    if (LOGM) L('[TS][AUTH] missing-evidence confirm check failed (non-fatal)', e);
+  }
+
+  L('REQUEST', { url: API(urlPath), tsId, payload });
+
+  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
+  const json = await apiPostJson(urlPath, payload);
+
+  L('authorise result', json);
+
+  // ✅ Surface backend warnings (defence-in-depth)
+  try {
+    const warnings = Array.isArray(json?.warnings) ? json.warnings.map(x => String(x || '').trim()).filter(Boolean) : [];
+    if (warnings.includes('NO_TIMESHEET_EVIDENCE_INVOICE_BLOCKED')) {
+      toastWarn('Authorised, but invoicing is blocked until timesheet evidence is attached.');
+    }
+  } catch {}
+
+  const newId =
+    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
+      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
+      : null;
+
+  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
+
+  // Refresh details so Overview, Lines, Finance reflect new status
+  let newDetails = mc.timesheetDetails;
+  try {
+    newDetails = await fetchTimesheetDetails(resolvedId);
+    window.modalCtx.timesheetDetails = newDetails;
+  } catch (err) {
+    L('refresh details failed (non-fatal)', err);
+  }
+
+  // Update summary row if present
+  const tsfin = newDetails?.tsfin || {};
+  const summaryStageFromDetails =
+    (newDetails && typeof newDetails === 'object' && newDetails.summary_stage) ? newDetails.summary_stage :
+    (tsfin && typeof tsfin === 'object' && tsfin.summary_stage) ? tsfin.summary_stage :
+    (newDetails && typeof newDetails === 'object' && newDetails.row && newDetails.row.summary_stage) ? newDetails.row.summary_stage :
+    (mc.data?.summary_stage ?? row.summary_stage ?? null);
+
+  const updatedRow = {
+    ...(mc.data || row),
+    summary_stage: (json && json.summary_stage) ? json.summary_stage : summaryStageFromDetails,
+    processing_status: tsfin.processing_status || mc.data?.processing_status || row.processing_status,
+    total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
+    total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
+    margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
+    timesheet_id: resolvedId,
+    id: resolvedId,
+    issue_codes: (newDetails?.row?.issue_codes ?? mc.data?.issue_codes ?? row.issue_codes ?? null)
+  };
+
+  window.modalCtx.data = updatedRow;
+
+  // ✅ keep guarded-write expected id aligned
+  if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
+    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
+  }
+
+  try {
+    window.__pendingFocus = {
+      section: 'timesheets',
+      ids: [String(resolvedId)],
+      primaryIds: [String(resolvedId)]
+    };
+  } catch {}
+
+  // ✅ Keep the summary grid consistent
+  try {
+    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
+      await refreshTimesheetsSummaryAfterRotation(resolvedId);
+    }
+  } catch (e) {
+    L('summary refresh failed (non-fatal)', e);
+  }
+
+  L('UPDATED ROW', updatedRow);
+  GE();
+  return { ok: true, updatedRow, details: newDetails, json };
+}
+
+
+async function contractWeekAuthorise(week_id, expectedTimesheetId /* optional */) {
+  const expected =
+    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
+    (window.modalCtx?.timesheetMeta?.expected_timesheet_id
+      ? String(window.modalCtx.timesheetMeta.expected_timesheet_id)
+      : '');
+
+  if (!expected) throw new Error('contractWeekAuthorise: expected_timesheet_id is required');
+
+  const mc = window.modalCtx || {};
+  const row = mc.data || {};
+  const dts = mc.timesheetDetails?.timesheet || {};
+
+  const normCodes = (arr) => (Array.isArray(arr) ? arr.map(x => String(x || '').trim()).filter(Boolean) : []);
+  const uniq = (arr) => Array.from(new Set((arr || []).filter(Boolean)));
+  const toastWarn = (msg) => {
+    if (typeof window.toast === 'function') window.toast(msg, { kind: 'warn' });
+    else if (typeof window.showToast === 'function') window.showToast(msg, 'warn');
+    else window.alert(msg);
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW RULE: Unsigned QR cannot be authorised.
+  // Block client-side before calling backend.
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const qrStatusU = String(dts.qr_status ?? row.qr_status ?? '').trim().toUpperCase();
+
+    const qrToken = (dts.qr_token != null ? String(dts.qr_token).trim() : '');
+    const qrGen = dts.qr_generated_at || null;
+    const qrLastSentHash = (dts.qr_last_sent_hash != null ? String(dts.qr_last_sent_hash).trim() : '');
+    const qrScannedAt = dts.qr_scanned_at || null;
+
+    const hasIssuedProof = (
+      ((qrToken && qrGen) ? true : false) ||
+      (!!qrLastSentHash)
+    );
+
+    const qrAwaitingSignatureUpload =
+      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt);
+
+    const codes = uniq([
+      ...normCodes(row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.issue_codes),
+    ]);
+
+    const hasIssueCode = codes.includes('Awaiting signed QR timesheet');
+
+    if (qrAwaitingSignatureUpload || hasIssueCode) {
+      toastWarn('Cannot authorise until the signed QR timesheet is received.');
+      return { ok: false, blocked: true, reason: 'QR_UNSIGNED' };
+    }
+  } catch {}
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ NEW: Warn-confirm if invoice-precheck is blocked by missing timesheet evidence
+  // Condition comes from DB issues: "Timesheet evidence missing"
+  // Only warn when there are worked hours (non-expenses-only)
+  // ─────────────────────────────────────────────────────────────
+  try {
+    const codes = uniq([
+      ...normCodes(row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.row?.issue_codes),
+      ...normCodes(mc.timesheetDetails?.issue_codes),
+    ]);
+
+    const hasEvidenceMissing = codes.includes('Timesheet evidence missing');
+
+    const hoursRaw =
+      mc.timesheetDetails?.tsfin?.total_hours ??
+      mc.timesheetDetails?.row?.total_hours ??
+      row?.total_hours ??
+      0;
+
+    const hours = Number(hoursRaw);
+    const hasHours = Number.isFinite(hours) ? (hours > 0) : true;
+
+    if (hasEvidenceMissing && hasHours) {
+      const ok = window.confirm(
+        'No Timesheet evidence has been attached.\n\n' +
+        'Do you wish to proceed? (This will be blocked from invoicing.)'
+      );
+      if (!ok) return { ok: false, cancelled: true };
+    }
+  } catch {}
+
+  const json = await apiPostJson(`/api/contract-weeks/${_enc(week_id)}/manual-authorise`, {
+    expected_timesheet_id: expected
+  });
+
+  // ✅ Surface backend warnings
+  try {
+    const warnings = Array.isArray(json?.warnings) ? json.warnings.map(x => String(x || '').trim()).filter(Boolean) : [];
+    if (warnings.includes('NO_TIMESHEET_EVIDENCE_INVOICE_BLOCKED')) {
+      toastWarn('Authorised, but invoicing is blocked until timesheet evidence is attached.');
+    }
+  } catch {}
+
+  return json;
+}
+
 
 function renderTimesheetIssuesTab(ctx) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][ISSUES]');
@@ -36996,8 +37287,6 @@ function renderTimesheetIssuesTab(ctx) {
       if (LOGM) L('[ISSUES] computeTimesheetProcessingState failed (non-fatal)', e);
     }
   } else {
-    // If helper is not yet implemented, do not invent alternate state logic here.
-    // The tab must still render without crashing.
     ps = { key: 'UNPROCESSED', label: 'Unprocessed' };
   }
 
@@ -37062,7 +37351,6 @@ function renderTimesheetIssuesTab(ctx) {
     return '';
   };
 
-  // Facts used only for issues list (not for Processing State label)
   const procStatusRaw =
     tsfin.processing_status ||
     details.processing_status ||
@@ -37081,226 +37369,119 @@ function renderTimesheetIssuesTab(ctx) {
   }
 
   const issues = [];
+  const addIssue = (msg) => {
+    const s = String(msg || '').trim();
+    if (!s) return;
+    if (!issues.includes(s)) issues.push(s);
+  };
 
   // ─────────────────────────────────────────────────────────────
-  // ✅ NEW: Awaiting signed QR timesheet issue line
-  // Matches the shared truth model:
-  // qr_status=PENDING AND issued proof exists AND qr_scanned_at is null
-  // (optionally show once hours exist)
+  // ✅ DB-provided issue codes are authoritative for invoice blockers
   // ─────────────────────────────────────────────────────────────
-  try {
-    const qrStatusU = String(ts?.qr_status ?? row?.qr_status ?? '').trim().toUpperCase();
-    const qrToken = (ts?.qr_token != null) ? String(ts.qr_token).trim() : '';
-    const qrGen = ts?.qr_generated_at || null;
-    const qrLastSentHash = (ts?.qr_last_sent_hash != null) ? String(ts.qr_last_sent_hash).trim() : '';
-    const qrScannedAt = ts?.qr_scanned_at || null;
+  const rawCodes =
+    Array.isArray(row?.issue_codes) ? row.issue_codes :
+    (Array.isArray(details?.row?.issue_codes) ? details.row.issue_codes :
+    (Array.isArray(details?.issue_codes) ? details.issue_codes : []));
 
-    const hasIssuedProof = (
-      ((qrToken && qrGen) ? true : false) ||
-      (!!qrLastSentHash)
-    );
+  const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
 
-    const totalHours = Number(tsfin?.total_hours ?? details?.total_hours ?? row?.total_hours ?? 0);
-    const hasHours = Number.isFinite(totalHours) ? (totalHours > 0) : true;
+  const hasCode = (c) => codes.includes(String(c || '').trim());
 
-    const qrAwaitingSignatureUpload =
-      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt && hasHours);
-
-    if (qrAwaitingSignatureUpload) {
-      issues.push('Awaiting signed QR timesheet: this can be authorised for pay, but invoicing is blocked until the signed QR copy is received.');
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] QR awaiting signature detection failed (non-fatal)', e);
+  // Map key invoice-blocker codes to friendly sentences (no duplicates)
+  if (hasCode('Timesheet evidence missing')) {
+    addIssue('Timesheet evidence missing: invoicing is blocked until a timesheet PDF/evidence is attached.');
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // ✅ Validation framework detection + coherent UX
-  // ─────────────────────────────────────────────────────────────
-  const hrValidationRequired =
-    boolish(tsfin.client_hr_validation_required) ||
-    boolish(tsfin.hr_validation_required_for_invoice) ||
-    boolish(details.client_hr_validation_required) ||
-    boolish(details.hr_validation_required_for_invoice) ||
-    boolish(row.client_hr_validation_required) ||
-    boolish(row.hr_validation_required_for_invoice) ||
-    false;
+  if (hasCode("Refs - Can't invoice")) {
+    addIssue("Reference numbers are missing: invoicing is blocked until references are added.");
+  } else if (hasCode('Refs - Send Invoice will be blocked')) {
+    addIssue('Reference numbers are missing: invoices can be created, but cannot be issued until references are added.');
+  }
 
-  const validationStatusRaw =
-    tsfin.validation_status ||
-    details.validation_status ||
-    row.validation_status ||
-    details.timesheet_validation_status ||
-    row.timesheet_validation_status ||
-    null;
+  if (hasCode('Expenses evidence')) {
+    addIssue('Expenses evidence missing: required receipts are missing.');
+  }
+  if (hasCode('Mileage evidence')) {
+    addIssue('Mileage evidence missing: required mileage evidence is missing.');
+  }
 
-  const validationStatus = String(validationStatusRaw || '').trim().toUpperCase();
+  if (hasCode('Awaiting validation')) {
+    addIssue('Awaiting validation (HealthRoster): validation must be completed before invoicing.');
+  }
+  if (hasCode('Validation failed')) {
+    addIssue('Validation failed (HealthRoster): this timesheet is blocked until corrected or overridden.');
+  }
 
-  const validationFrameworkInUse = !!hrValidationRequired;
+  if (hasCode('Awaiting signed QR timesheet')) {
+    addIssue('Awaiting signed QR timesheet: cannot be authorised until the signed QR copy is received, and invoicing is blocked.');
+  }
 
-  const validationIsOk =
-    (validationStatus === 'VALIDATION_OK' || validationStatus === 'OK' || validationStatus === 'PASS' || validationStatus === 'OVERRIDDEN');
+  if (hasCode('Rate')) {
+    addIssue('Rate missing: no pay/charge rates found for this client/role/band on this date.');
+  }
+  if (hasCode('Pay channel')) {
+    addIssue('Pay channel missing: candidate bank/umbrella details are incomplete for this timesheet.');
+  }
+  if (hasCode('Candidate ID')) {
+    addIssue('Candidate unresolved: this timesheet has not been fully matched to a candidate yet.');
+  }
+  if (hasCode('Client ID')) {
+    addIssue('Client unresolved: this timesheet could not be linked to a client correctly.');
+  }
+  if (hasCode('On hold')) {
+    addIssue('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
+  }
+  if (hasCode('Hours mismatch HR')) {
+    addIssue('Timesheet hours mismatch with HealthRoster.');
+  }
+  if (hasCode('HR hours missing')) {
+    addIssue('Timesheet has hours not yet on HealthRoster.');
+  }
+  if (hasCode('Duplicate contracts')) {
+    addIssue('Multiple contracts cover the same period for this client.');
+  }
 
-  const validationIsError =
-    (validationStatus === 'VALIDATION_ERROR' || validationStatus === 'ERROR' || validationStatus === 'FAIL');
+  // If DB surfaced "Refs - Timesheet PDF invalid", explain it
+  if (hasCode('Refs - Timesheet PDF invalid')) {
+    const smUpper = String(ts?.submission_mode || '').trim().toUpperCase();
+    const qrIssued =
+      (
+        (ts?.qr_token && String(ts.qr_token).trim() && ts?.qr_generated_at)
+        || (ts?.qr_last_sent_hash && String(ts.qr_last_sent_hash).trim())
+      ) ? true : false;
 
-  if (validationFrameworkInUse) {
-    if (validationIsError) {
-      issues.push('Validation failed (HealthRoster): this timesheet is not consistent with HealthRoster and is blocked until corrected or overridden.');
-    } else if (validationIsOk) {
-      // Do not show "OK" as an issue line.
-    } else if (validationStatus) {
-      issues.push(`Validation status: ${validationStatus}.`);
+    if (smUpper === 'ELECTRONIC') {
+      addIssue('Refs changed since PDF was generated — system will regenerate automatically.');
+    } else if (qrIssued) {
+      addIssue('Refs changed since QR PDF was issued — issued/signed QR evidence may not match current refs.');
     } else {
-      issues.push('Validation is required for this client, but no validation result is recorded yet.');
+      addIssue('Refs changed since timesheet PDF was generated.');
     }
   }
 
   // ─────────────────────────────────────────────────────────────
-  // ✅ Reference blocker issue + per-day/segment detail
+  // Additional pipeline issues that may not always appear as issue_codes
   // ─────────────────────────────────────────────────────────────
-  try {
-    const rawCodes =
-      Array.isArray(row?.issue_codes) ? row.issue_codes :
-      (Array.isArray(details?.issue_codes) ? details.issue_codes : []);
-
-    const codes = rawCodes.map(x => String(x || '').trim()).filter(Boolean);
-
-    if (codes.includes('Refs - Timesheet PDF invalid')) {
-      const smUpper = String(ts?.submission_mode || '').trim().toUpperCase();
-
-      const qrIssued =
-        (
-          (ts?.qr_token && String(ts.qr_token).trim() && ts?.qr_generated_at)
-          || (ts?.qr_last_sent_hash && String(ts.qr_last_sent_hash).trim())
-        ) ? true : false;
-
-      if (smUpper === 'ELECTRONIC') {
-        issues.push('Refs changed since PDF generated — system will regenerate automatically.');
-      } else if (qrIssued) {
-        issues.push('Refs changed since QR PDF issued — signed/issued QR evidence may not match current refs.');
-      } else {
-        issues.push('Refs changed since timesheet PDF generated.');
-      }
-    }
-
-    const REF_PRECEDENCE = [
-      'Refs (Invoice and Issue Blocked)',
-      'Refs (Invoicing Blocked)',
-      'Refs (Issue Invoice Blocked)'
-    ];
-
-    let refChosen = '';
-    for (const k of REF_PRECEDENCE) {
-      if (codes.includes(k)) { refChosen = k; break; }
-    }
-
-    if (refChosen) {
-      if (refChosen === 'Refs (Invoice and Issue Blocked)') {
-        issues.push('Reference numbers are missing — invoicing and issuing invoices are both blocked until references are added.');
-      } else if (refChosen === 'Refs (Invoicing Blocked)') {
-        issues.push('Reference numbers are missing — invoicing is blocked until references are added.');
-      } else if (refChosen === 'Refs (Issue Invoice Blocked)') {
-        issues.push('Reference numbers are missing — invoices can be created, but cannot be issued until references are added.');
-      }
-
-      let items = details?.refs_missing_items_json ?? null;
-      if (typeof items === 'string') {
-        try { items = JSON.parse(items); } catch { items = null; }
-      }
-      if (!Array.isArray(items)) items = [];
-
-      const countRaw = details?.refs_missing_items_count;
-      const count = Number(countRaw);
-      const countNum = Number.isFinite(count) ? count : null;
-
-      if (items.length > 0) {
-        issues.push(`Missing reference numbers on ${items.length} day(s)/segment(s):`);
-
-        const sorted = items.slice().sort((a, b) => {
-          const ad = normStr(a?.day_ymd || a?.day_date || a?.date);
-          const bd = normStr(b?.day_ymd || b?.day_date || b?.date);
-          if (ad !== bd) return ad.localeCompare(bd);
-          const ak = normStr(a?.kind);
-          const bk = normStr(b?.kind);
-          if (ak !== bk) return ak.localeCompare(bk);
-          const ai = Number(a?.segment_index);
-          const bi = Number(b?.segment_index);
-          const aok = Number.isFinite(ai);
-          const bok = Number.isFinite(bi);
-          if (aok && bok) return ai - bi;
-          if (aok) return -1;
-          if (bok) return 1;
-          return 0;
-        });
-
-        for (const it of sorted) {
-          const kind = String(it?.kind || '').trim().toUpperCase();
-          let day = normStr(it?.day_ymd || it?.day_date || it?.date);
-
-          if (!day) {
-            const s1 = normStr(it?.start_utc || it?.start);
-            const m = s1.match(/^(\d{4}-\d{2}-\d{2})/);
-            if (m && m[1]) day = m[1];
-          }
-
-          const dmy = day ? fmtYmdToDmy(day) : '';
-          const dow = day ? fmtDow(day) : '';
-
-          if (kind === 'TIMESHEET') {
-            const st = normStr(it?.start_utc || it?.start);
-            const en = normStr(it?.end_utc || it?.end);
-            const t1 = fmtHHMM(st);
-            const t2 = fmtHHMM(en);
-            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (Daily timesheet).`);
-          } else if (kind === 'FREEFORM') {
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'} (Weekly day reference).`);
-          } else if (kind === 'SEGMENT') {
-            const idx0 = Number(it?.segment_index);
-            const idx = Number.isFinite(idx0) ? (idx0 + 1) : null;
-
-            const st = normStr(it?.start);
-            const en = normStr(it?.end);
-            const t1 = fmtHHMM(st);
-            const t2 = fmtHHMM(en);
-            const tr = (t1 && t2) ? `${t1}–${t2}` : '';
-
-            const segLabel = idx != null ? `Segment ${idx}` : 'Segment';
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}${tr ? ` (${tr})` : ''} (${segLabel}).`);
-          } else {
-            issues.push(`Missing reference: ${dow ? dow + ' ' : ''}${dmy || day || 'Unknown date'}.`);
-          }
-        }
-      } else if (countNum != null && countNum > 0) {
-        issues.push(`Missing reference numbers on ${countNum} day(s)/segment(s).`);
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] reference missing detail mapping failed (non-fatal)', e);
+  if (procStatus === 'RATE_MISSING' && !hasCode('Rate')) {
+    addIssue('Rate missing: no pay/charge rates found for this client/role/band on this date.');
+  }
+  if (procStatus === 'PAY_CHANNEL_MISSING' && !hasCode('Pay channel')) {
+    addIssue('Pay channel missing: candidate bank/umbrella details are incomplete for this timesheet.');
+  }
+  if (procStatus === 'CLIENT_UNRESOLVED' && !hasCode('Client ID')) {
+    addIssue('Client unresolved: timesheet could not be linked to a client correctly.');
+  }
+  if (procStatus === 'UNASSIGNED' && !hasCode('Candidate ID')) {
+    addIssue('Unassigned: this timesheet has not been fully matched or processed yet.');
   }
 
-  // Processing-status based issues (keep concise)
-  if (procStatus === 'RATE_MISSING') {
-    issues.push('Rate missing: no pay/charge rates found for this client/role/band on this date.');
-  }
-  if (procStatus === 'PAY_CHANNEL_MISSING') {
-    issues.push('Pay channel missing: candidate bank/umbrella details incomplete for this timesheet.');
-  }
-  if (procStatus === 'CLIENT_UNRESOLVED') {
-    issues.push('Client unresolved: timesheet could not be linked to a client correctly.');
-  }
-  if (procStatus === 'UNASSIGNED') {
-    issues.push('Unassigned: this timesheet has not been fully matched or processed yet.');
-  }
-
-  // Pay hold (sheet-level, from row or tsfin)
-  const payOnHold = !!(tsfin.pay_on_hold ?? row.pay_on_hold);
-  if (payOnHold) {
-    issues.push('Pay is currently on hold for this timesheet. It will be excluded from pay runs until released.');
+  // Authorisation required but not yet authorised (issue line)
+  if (authInfo.requires && !authInfo.authorised) {
+    addIssue('Awaiting authorisation by team.');
   }
 
   // ─────────────────────────────────────────────────────────────
-  // ✅ SEGMENTS-mode per-day delays (unchanged)
+  // SEGMENTS-mode per-day delays (unchanged)
   // ─────────────────────────────────────────────────────────────
   try {
     const weYmd = (ts.week_ending_date || row.week_ending_date || null);
@@ -37327,7 +37508,7 @@ function renderTimesheetIssuesTab(ctx) {
         const segDate = String(seg.date || '').slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(segDate)) continue;
 
-        // --- pay delay (exclude_from_pay) ---
+        // pay delay (exclude_from_pay)
         if (boolish(seg.exclude_from_pay)) {
           const reason = (seg.held_back_reason != null && String(seg.held_back_reason).trim())
             ? String(seg.held_back_reason).trim()
@@ -37335,7 +37516,7 @@ function renderTimesheetIssuesTab(ctx) {
           payDelayed.push({ date: segDate, reason });
         }
 
-        // --- invoice delay (exactly your SQL rule) ---
+        // invoice delay
         const lockedRaw = seg.invoice_locked_invoice_id;
         const lockedId  = (lockedRaw == null) ? '' : String(lockedRaw).trim();
 
@@ -37361,7 +37542,7 @@ function renderTimesheetIssuesTab(ctx) {
 
       if (invoiceDelayed.length) {
         const allInvDelayed = (invoiceDelayed.length === segs.length);
-        issues.push(allInvDelayed
+        addIssue(allInvDelayed
           ? 'Whole invoice is delayed: all dated lines are being held back for invoicing.'
           : `Some invoice issuing delays: ${invoiceDelayed.length} dated line(s) are being held back for invoicing.`
         );
@@ -37370,16 +37551,16 @@ function renderTimesheetIssuesTab(ctx) {
           const dmy = fmtYmdToDmy(it.date);
           const dow = fmtDow(it.date);
           if (it.permanent) {
-            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — permanently delayed.`);
+            addIssue(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — permanently delayed.`);
           } else {
-            issues.push(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — delayed until week starting ${fmtYmdToDmy(it.targetWeekStart)}.`);
+            addIssue(`Invoice delayed: ${dow ? dow + ' ' : ''}${dmy} — delayed until week starting ${fmtYmdToDmy(it.targetWeekStart)}.`);
           }
         }
       }
 
       if (payDelayed.length) {
         const allPayDelayed = (payDelayed.length === segs.length);
-        issues.push(allPayDelayed
+        addIssue(allPayDelayed
           ? 'All pay is on hold (line-level): all dated lines are excluded from pay.'
           : `Some pay is on hold (line-level): ${payDelayed.length} dated line(s) are excluded from pay.`
         );
@@ -37388,7 +37569,7 @@ function renderTimesheetIssuesTab(ctx) {
           const dmy = fmtYmdToDmy(it.date);
           const dow = fmtDow(it.date);
           const extra = it.reason ? ` (Reason: ${it.reason})` : '';
-          issues.push(`Pay excluded: ${dow ? dow + ' ' : ''}${dmy}${extra}.`);
+          addIssue(`Pay excluded: ${dow ? dow + ' ' : ''}${dmy}${extra}.`);
         }
       }
     }
@@ -37396,41 +37577,9 @@ function renderTimesheetIssuesTab(ctx) {
     if (LOGM) L('[ISSUES] SEGMENTS delay scan failed (non-fatal)', e);
   }
 
-  // HR cross-check issues (from TSFIN)
-  // ✅ If validation framework is in use and validation is OK, suppress HR_HOURS_MISSING to avoid contradictory UX.
-  try {
-    const hrIssuesArr = Array.isArray(tsfin.hr_crosscheck_issues) ? tsfin.hr_crosscheck_issues : [];
-    const hrIssues = hrIssuesArr.map(c => String(c || '').toUpperCase()).filter(Boolean);
-
-    const seen = new Set();
-    for (const code of hrIssues) {
-      if (seen.has(code)) continue;
-      seen.add(code);
-
-      if (code === 'HOURS_MISMATCH_HR') {
-        issues.push('Timesheet hours mismatch with HealthRoster.');
-      } else if (code === 'HR_HOURS_MISSING') {
-        if (validationFrameworkInUse && validationIsOk) {
-          // intentionally suppressed
-        } else {
-          issues.push('Timesheet has hours not yet on HealthRoster.');
-        }
-      } else if (code === 'DUPLICATE_CONTRACTS') {
-        issues.push('Multiple contracts cover the same period for this client.');
-      }
-    }
-  } catch (e) {
-    if (LOGM) L('[ISSUES] hr_crosscheck_issues mapping failed (non-fatal)', e);
-  }
-
-  // Authorisation required but not yet authorised (issue line)
-  if (authInfo.requires && !authInfo.authorised) {
-    issues.push('Awaiting authorisation by team.');
-  }
-
   const issuesHtml = issues.length
     ? `<ul class="mini">${issues.map(i => `<li>${esc(i)}</li>`).join('')}</ul>`
-    : `<span class="mini">No issues detected.</span>`;
+    : `<span class="mini">OK</span>`;
 
   GE();
 
@@ -37456,201 +37605,8 @@ function renderTimesheetIssuesTab(ctx) {
     </div>
   `;
 }
-async function authoriseTimesheet(ctxOrId, expectedTimesheetId) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][AUTH]');
-  GC('authoriseTimesheet');
-
-  const mc  = window.modalCtx || {};
-  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
-  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
-
-  if (!tsId) {
-    L('ERROR: missing timesheetId');
-    GE();
-    throw new Error('authoriseTimesheet: timesheetId is required');
-  }
-
-  const expected =
-    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
-    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
-    String(tsId);
-
-  const encId   = encodeURIComponent(tsId);
-  const urlPath = `/api/timesheets/${encId}/authorise`;
-
-  const payload = { expected_timesheet_id: expected };
-
-  // ─────────────────────────────────────────────────────────────
-  // ✅ NEW RULE: Unsigned QR cannot be authorised.
-  // Block client-side (UX), matching the truth model:
-  // qr_status=PENDING AND (issued proof exists) AND qr_scanned_at is null
-  // Prefer details.timesheet fields when available; fallback to issue_codes.
-  // ─────────────────────────────────────────────────────────────
-  try {
-    const dts = mc.timesheetDetails?.timesheet || {};
-    const qrStatusU = String(dts.qr_status ?? row.qr_status ?? '').trim().toUpperCase();
-
-    const qrToken = (dts.qr_token != null ? String(dts.qr_token).trim() : '');
-    const qrGen = dts.qr_generated_at || null;
-    const qrLastSentHash = (dts.qr_last_sent_hash != null ? String(dts.qr_last_sent_hash).trim() : '');
-    const qrScannedAt = dts.qr_scanned_at || null;
-
-    const hasIssuedProof = (
-      ((qrToken && qrGen) ? true : false) ||
-      (!!qrLastSentHash)
-    );
-
-    const qrAwaitingSignatureUpload =
-      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt);
-
-    let hasIssueCode = false;
-    try {
-      const codes = Array.isArray(row?.issue_codes) ? row.issue_codes : [];
-      hasIssueCode = codes.map(x => String(x || '').trim()).includes('Awaiting signed QR timesheet');
-    } catch {}
-
-    if (qrAwaitingSignatureUpload || hasIssueCode) {
-      const msg = 'Cannot authorise until the signed QR timesheet is received.';
-      if (typeof window.toast === 'function') window.toast(msg, { kind: 'warn' });
-      else if (typeof window.showToast === 'function') window.showToast(msg, 'warn');
-      else window.alert(msg);
-
-      GE();
-      return { ok: false, blocked: true, reason: 'QR_UNSIGNED' };
-    }
-  } catch (e) {
-    // Non-fatal; do not block authorisation if block logic fails.
-    if (LOGM) L('[TS][AUTH] unsigned-QR block check failed (non-fatal)', e);
-  }
-
-  L('REQUEST', { url: API(urlPath), tsId, payload });
-
-  // ✅ Use apiPostJson so 409 errors preserve err.status + err.json for TIMESHEET_MOVED handling
-  const json = await apiPostJson(urlPath, payload);
-
-  L('authorise result', json);
-
-  const newId =
-    (json && (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id))
-      ? (json.current_timesheet_id || json.new_timesheet_id || json.timesheet_id)
-      : null;
-
-  const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
-
-  // Refresh details so Overview, Lines, Finance reflect new status
-  let newDetails = mc.timesheetDetails;
-  try {
-    newDetails = await fetchTimesheetDetails(resolvedId);
-    window.modalCtx.timesheetDetails = newDetails;
-  } catch (err) {
-    L('refresh details failed (non-fatal)', err);
-  }
-
-  // Update summary row if present
-  const tsfin = newDetails?.tsfin || {};
-  const summaryStageFromDetails =
-    (newDetails && typeof newDetails === 'object' && newDetails.summary_stage) ? newDetails.summary_stage :
-    (tsfin && typeof tsfin === 'object' && tsfin.summary_stage) ? tsfin.summary_stage :
-    (newDetails && typeof newDetails === 'object' && newDetails.row && newDetails.row.summary_stage) ? newDetails.row.summary_stage :
-    (mc.data?.summary_stage ?? row.summary_stage ?? null);
-
-  const updatedRow = {
-    ...(mc.data || row),
-    summary_stage: (json && json.summary_stage) ? json.summary_stage : summaryStageFromDetails,
-    processing_status: tsfin.processing_status || mc.data?.processing_status || row.processing_status,
-    total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
-    total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
-    margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
-    timesheet_id: resolvedId,
-    id: resolvedId
-  };
-
-  window.modalCtx.data = updatedRow;
-
-  // ✅ keep guarded-write expected id aligned
-  if (window.modalCtx?.timesheetMeta && typeof window.modalCtx.timesheetMeta === 'object') {
-    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
-  }
-
-  try {
-    window.__pendingFocus = {
-      section: 'timesheets',
-      ids: [String(resolvedId)],
-      primaryIds: [String(resolvedId)]
-    };
-  } catch {}
-
-  // ✅ Keep the summary grid consistent
-  try {
-    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-      await refreshTimesheetsSummaryAfterRotation(resolvedId);
-    }
-  } catch (e) {
-    L('summary refresh failed (non-fatal)', e);
-  }
-
-  L('UPDATED ROW', updatedRow);
-  GE();
-  return { ok: true, updatedRow, details: newDetails, json };
-}
 
 
-async function contractWeekAuthorise(week_id, expectedTimesheetId /* optional */) {
-  const expected =
-    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
-    (window.modalCtx?.timesheetMeta?.expected_timesheet_id
-      ? String(window.modalCtx.timesheetMeta.expected_timesheet_id)
-      : '');
-
-  if (!expected) throw new Error('contractWeekAuthorise: expected_timesheet_id is required');
-
-  // ─────────────────────────────────────────────────────────────
-  // ✅ NEW RULE: Unsigned QR cannot be authorised.
-  // Block client-side, matching the truth model, before calling backend.
-  // Prefer modal details if available; fallback to issue_codes.
-  // ─────────────────────────────────────────────────────────────
-  try {
-    const mc = window.modalCtx || {};
-    const row = mc.data || {};
-    const dts = mc.timesheetDetails?.timesheet || {};
-
-    const qrStatusU = String(dts.qr_status ?? row.qr_status ?? '').trim().toUpperCase();
-
-    const qrToken = (dts.qr_token != null ? String(dts.qr_token).trim() : '');
-    const qrGen = dts.qr_generated_at || null;
-    const qrLastSentHash = (dts.qr_last_sent_hash != null ? String(dts.qr_last_sent_hash).trim() : '');
-    const qrScannedAt = dts.qr_scanned_at || null;
-
-    const hasIssuedProof = (
-      ((qrToken && qrGen) ? true : false) ||
-      (!!qrLastSentHash)
-    );
-
-    const qrAwaitingSignatureUpload =
-      (qrStatusU === 'PENDING' && hasIssuedProof && !qrScannedAt);
-
-    let hasIssueCode = false;
-    try {
-      const codes = Array.isArray(row?.issue_codes) ? row.issue_codes : [];
-      hasIssueCode = codes.map(x => String(x || '').trim()).includes('Awaiting signed QR timesheet');
-    } catch {}
-
-    if (qrAwaitingSignatureUpload || hasIssueCode) {
-      const msg = 'Cannot authorise until the signed QR timesheet is received.';
-      if (typeof window.toast === 'function') window.toast(msg, { kind: 'warn' });
-      else if (typeof window.showToast === 'function') window.showToast(msg, 'warn');
-      else window.alert(msg);
-
-      return { ok: false, blocked: true, reason: 'QR_UNSIGNED' };
-    }
-  } catch {}
-
-  const json = await apiPostJson(`/api/contract-weeks/${_enc(week_id)}/manual-authorise`, {
-    expected_timesheet_id: expected
-  });
-
-  return json;
-}
 
 function renderSummary(rows){
   currentRows = rows;
@@ -67683,30 +67639,36 @@ function renderTimesheetEvidenceTab(ctx) {
     return false;
   };
 
- // ✅ Evidence "Type" — DO NOT fall back to display_name (that's Filename)
-const typeLabel = (ev) => {
-  const k = String(ev?.kind || '').trim().toUpperCase();
-  if (!k) return 'Unknown';
+  // ✅ Evidence "Type" — DO NOT fall back to display_name (that's Filename)
+  const typeLabel = (ev) => {
+    const k = String(ev?.kind || '').trim().toUpperCase();
+    if (!k) return 'Unknown';
 
-  const map = {
-    TIMESHEET: 'Timesheet',
-    MILEAGE: 'Mileage',
-    TRAVEL: 'Travel',
-    ACCOMMODATION: 'Accommodation',
-    OTHER: 'Other',
-    QR: 'QR',
-    PDF: 'PDF',
-    ELECTRONIC_SIGNATURES: 'Electronic signatures',
-    HEALTHROSTER: 'HealthRoster',
-    NHSP: 'NHSP'
+    const map = {
+      TIMESHEET: 'Timesheet',
+      MILEAGE: 'Mileage',
+      TRAVEL: 'Travel',
+      ACCOMMODATION: 'Accommodation',
+      OTHER: 'Other',
+      QR: 'QR',
+      PDF: 'PDF',
+      ELECTRONIC_SIGNATURES: 'Electronic signatures',
+      HEALTHROSTER: 'HealthRoster',
+      NHSP: 'NHSP',
+
+      // ✅ NEW: system authorisation marker
+      AUTHORISATION: 'Timesheet Authorisation'
+    };
+
+    return map[k] || (k.charAt(0) + k.slice(1).toLowerCase());
   };
 
-  return map[k] || (k.charAt(0) + k.slice(1).toLowerCase());
-};
-
-
-  // ✅ NEW: Filename column (prefer explicit filename; fall back to display_name as legacy)
+  // ✅ NEW: Filename column
+  // For AUTHORISATION system rows, show "—" (we do not treat it as a file).
   const filenameLabel = (ev) => {
+    const k = String(ev?.kind || '').trim().toUpperCase();
+    if (k === 'AUTHORISATION') return '—';
+
     const fn = String(ev?.filename || '').trim();
     if (fn) return fn;
 
@@ -67725,7 +67687,17 @@ const typeLabel = (ev) => {
   };
 
   // "Uploaded by" comes from backend enrichment (preferred), otherwise falls back
+  // For AUTHORISATION system rows, show actor_display if provided, else System.
   const uploadedByLabel = (ev) => {
+    const k = String(ev?.kind || '').trim().toUpperCase();
+    if (k === 'AUTHORISATION') {
+      const actor =
+        (ev?.meta_json && typeof ev.meta_json === 'object' && ev.meta_json.actor_display != null)
+          ? String(ev.meta_json.actor_display).trim()
+          : '';
+      return actor || 'System';
+    }
+
     const isSystem = !!ev?.system;
     if (isSystem) return 'System';
 
@@ -67759,17 +67731,23 @@ const typeLabel = (ev) => {
         const type = escapeHtml(typeLabel(ev));
         const uploadedBy = escapeHtml(uploadedByLabel(ev));
 
-        const viewBtn = `
-          <button type="button"
-                  class="btn mini subtle"
-                  style="background:transparent;border:1px solid rgba(255,255,255,.18);"
-                  data-evidence-view="${escapeHtml(id)}">
-            View
-          </button>
-        `;
+        const kindU = String(ev?.kind || '').trim().toUpperCase();
+        const isAuthorisationRow = (kindU === 'AUTHORISATION');
+
+        // ✅ AUTHORISATION: no View button (there is nothing to view)
+        const viewBtn = isAuthorisationRow
+          ? ''
+          : `
+            <button type="button"
+                    class="btn mini subtle"
+                    style="background:transparent;border:1px solid rgba(255,255,255,.18);"
+                    data-evidence-view="${escapeHtml(id)}">
+              View
+            </button>
+          `;
 
         // ✅ Download button (imports + PDFs) — calls the global helper installed by refreshTimesheetEvidenceIntoModalState
-        const dlBtn = hasDownloadableKey(ev)
+        const dlBtn = (!isAuthorisationRow && hasDownloadableKey(ev))
           ? `
             <button type="button"
                     class="btn mini subtle"
@@ -67854,6 +67832,7 @@ const typeLabel = (ev) => {
     </div>
   `;
 }
+
 
 async function openTimesheetEvidenceUploadDialog(file) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][EVIDENCE][UPLOAD_DIALOG]');
