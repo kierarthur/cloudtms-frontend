@@ -16405,8 +16405,6 @@ function endGlobalLoading() {
   } catch {}
 }
 
-
-
 async function unauthoriseTimesheet(ctxOrId, expectedTimesheetId) {
   const { LOGM, L, GC, GE } = getTsLoggers('[TS][UNAUTH]');
   GC('unauthoriseTimesheet');
@@ -16448,6 +16446,7 @@ async function unauthoriseTimesheet(ctxOrId, expectedTimesheetId) {
 
   const resolvedId = (newId && String(newId).trim()) ? String(newId) : String(tsId);
 
+  // Refresh details so Overview/Finance reflect new status
   let newDetails = mc.timesheetDetails;
   try {
     newDetails = await fetchTimesheetDetails(resolvedId);
@@ -16457,15 +16456,36 @@ async function unauthoriseTimesheet(ctxOrId, expectedTimesheetId) {
   }
 
   const tsfin = newDetails?.tsfin || {};
+  const detRow = (newDetails && typeof newDetails === 'object' && newDetails.row) ? newDetails.row : null;
+
+  // ✅ CRITICAL FIX:
+  // mc.data.authorised_at_server can be stale (it was the source of truth for footer gating).
+  // Force it to NULL here so _updateButtons computes isAuthorisedNow correctly.
   const updatedRow = {
     ...(mc.data || row),
-    summary_stage: json.summary_stage || mc.data?.summary_stage || 'PENDING_AUTH',
-    processing_status: tsfin.processing_status || mc.data?.processing_status,
+
+    timesheet_id: resolvedId,
+    id: resolvedId,
+
+    authorised_at_server: null,                 // ✅ FIX: clear stale authorised stamp
+    processing_status: tsfin.processing_status || 'PENDING_AUTH',
+
+    // Keep stage consistent if provided; otherwise default to PENDING_AUTH (safe)
+    summary_stage:
+      (json && json.summary_stage) ? json.summary_stage :
+      (detRow && detRow.summary_stage) ? detRow.summary_stage :
+      (mc.data?.summary_stage ?? row.summary_stage ?? 'PENDING_AUTH'),
+
+    // Keep financial numbers in sync
     total_pay_ex_vat: tsfin.total_pay_ex_vat ?? mc.data?.total_pay_ex_vat,
     total_charge_ex_vat: tsfin.total_charge_ex_vat ?? mc.data?.total_charge_ex_vat,
     margin_ex_vat: tsfin.margin_ex_vat ?? mc.data?.margin_ex_vat,
-    timesheet_id: resolvedId,
-    id: resolvedId
+
+    // ✅ Keep issues in sync (used by various UI gates)
+    issue_codes:
+      (detRow && Array.isArray(detRow.issue_codes)) ? detRow.issue_codes :
+      (Array.isArray(mc.data?.issue_codes) ? mc.data.issue_codes :
+      (Array.isArray(row?.issue_codes) ? row.issue_codes : []))
   };
 
   window.modalCtx.data = updatedRow;
