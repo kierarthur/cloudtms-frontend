@@ -62498,9 +62498,9 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             <div class="controls" style="display:flex; gap:12px; flex-wrap:wrap;">
               <div style="flex:1; min-width:240px;">
                 <div class="mini" style="opacity:.85; margin-bottom:6px;">Nurse</div>
-               ${nurseUrl
-  ? `<img src="${nurseUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#fff;" />`
-  : `<div class="mini" style="opacity:.85;">Not available</div>`}
+                ${nurseUrl
+                  ? `<img src="${nurseUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#fff;" />`
+                  : `<div class="mini" style="opacity:.85;">Not available</div>`}
               </div>
 
               <div style="flex:1; min-width:240px;">
@@ -62508,8 +62508,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
                 ${authUrl
                   ? `<img src="${authUrl}" style="max-width:100%; max-height:260px; border:1px solid var(--line); border-radius:8px; background:#fff;" />`
                   : `<div class="mini" style="opacity:.85;">Not available</div>`}
-
-
               </div>
             </div>
           </div>
@@ -62543,9 +62541,8 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
   const tsIdForPdf = String(tsIdNow() || tsId);
   const evidenceIdUpper = String(evidenceId || '').trim().toUpperCase();
-  const storageKeyUpper = String(storageKey || '').trim().toUpperCase();
 
-  // ✅ NEW: If this is the SYSTEM-GENERATED timesheet PDF, do NOT presign storage_key directly.
+  // ✅ If this is the SYSTEM-GENERATED timesheet PDF, do NOT presign storage_key directly.
   // Route via getTimesheetPdfUrl(timesheetId) so the backend can ensure a non-dirty PDF.
   const isSystemGeneratedTimesheetPdf =
     isSystem && (
@@ -62567,6 +62564,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     isSystemGeneratedTimesheetPdf
   });
 
+  // ✅ FIX: signedUrl must be a STRING URL. getTimesheetPdfUrl returns an object { url, ... }.
   let signedUrl = null;
 
   if (isSystemGeneratedTimesheetPdf) {
@@ -62575,9 +62573,20 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         GE();
         throw new Error('getTimesheetPdfUrl is not available.');
       }
-      signedUrl = await getTimesheetPdfUrl(tsIdForPdf);
+
+      const pdfInfo = await getTimesheetPdfUrl(tsIdForPdf);
+
+      // Back-compat: allow getTimesheetPdfUrl to return either a string or an object
+      if (typeof pdfInfo === 'string') {
+        signedUrl = pdfInfo;
+      } else if (pdfInfo && typeof pdfInfo === 'object') {
+        signedUrl = pdfInfo.url || null;
+      } else {
+        signedUrl = null;
+      }
+
+      if (!signedUrl) throw new Error('No URL returned for timesheet PDF.');
     } catch (err) {
-      // Best effort: if timesheet rotated while viewing, let caller refresh state
       if (await handleMovedInViewer(err, 'evidence-viewer-open-sys-pdf')) {
         GE();
         return;
@@ -62596,8 +62605,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
   const otherId     = `${instanceId}-other`;
 
   const title = `Evidence ${String(tsId).slice(0, 8)}…`;
-
-  const OPTIONS = ['Timesheet', 'Mileage', 'Travel', 'Accommodation', 'Other'];
 
   const kindTrim = String(kind || '').trim();
   const kindUpper = kindTrim.toUpperCase();
