@@ -2165,6 +2165,345 @@ async function refreshHrRotaSummary(importId) {
 }
 
 
+async function openHrRotaAssignRoleModal(importId, rowIndex) {
+  const impId = String(importId || '').trim();
+  const idx = Number(rowIndex);
+  if (!impId) {
+    alert('Missing import_id for role assignment.');
+    return;
+  }
+  if (!Number.isFinite(idx) || idx < 0) {
+    alert('Invalid row index for role assignment.');
+    return;
+  }
+
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  const htmlWrap = (typeof html === 'function') ? html : (s) => String(s ?? '');
+
+  // ✅ Prefer RAW daily preview; fallback to adapted only if RAW not present
+  const ss = (window.__importSummaryState && typeof window.__importSummaryState === 'object') ? window.__importSummaryState : {};
+  const st =
+    (ss['HR_ROTA_DAILY_RAW'] && typeof ss['HR_ROTA_DAILY_RAW'] === 'object') ? ss['HR_ROTA_DAILY_RAW'] :
+    (ss['HR_ROTA_DAILY'] && typeof ss['HR_ROTA_DAILY'] === 'object') ? ss['HR_ROTA_DAILY'] :
+    null;
+
+  const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  const row = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+  if (!row) {
+    alert('Row not found for role assignment.');
+    return;
+  }
+
+  const hrRowId = row.hr_row_id ? String(row.hr_row_id).trim() : '';
+  if (!hrRowId) {
+    alert('This row has no hr_row_id, so a timesheet target selection cannot be saved safely.');
+    return;
+  }
+
+  const staff = String(row.staff_name || row.staff_raw || row.staff_norm || '').trim();
+  const unit  = String(row.unit || row.hospital_or_trust || row.hospital_norm || row.trust_norm || '').trim();
+  const date  = String(row.date_local || row.date || row.shift_date || row.work_date || '').trim();
+  const grade = String(row.grade_raw || row.incoming_code || row.assignment_code || row.incoming_grade_norm || '').trim();
+
+  const detail = (row.details && typeof row.details === 'object') ? row.details : {};
+
+  // ✅ Prefer backend-provided details.timesheet_target_options; fallback to other keys defensively
+  const optionsRaw =
+    (Array.isArray(detail.timesheet_target_options) ? detail.timesheet_target_options :
+     Array.isArray(detail.timesheetTargetOptions) ? detail.timesheetTargetOptions :
+     Array.isArray(row.timesheet_target_options) ? row.timesheet_target_options :
+     Array.isArray(row.timesheetTargetOptions) ? row.timesheetTargetOptions :
+     Array.isArray(row.target_options) ? row.target_options :
+     Array.isArray(row.targetOptions) ? row.targetOptions :
+     []);
+
+  const toStr = (v) => String(v == null ? '' : v).trim();
+  const pick = (obj, keys) => {
+    for (const k of keys) {
+      if (!obj) continue;
+      const v = obj[k];
+      if (v != null && String(v).trim() !== '') return v;
+    }
+    return null;
+  };
+
+  const options = (Array.isArray(optionsRaw) ? optionsRaw : []).map((o) => {
+    const obj = (o && typeof o === 'object') ? o : {};
+
+    const id = toStr(
+      pick(obj, [
+        'timesheet_id', 'timesheetId',
+        'target_id', 'targetId',
+        'id'
+      ]) || ''
+    );
+
+    // Prefer explicit local times if present; fall back to ISO or any label-like field
+    const startLocal = toStr(pick(obj, ['start_local', 'startLocal', 'ts_start_local', 'tsStartLocal', 'worked_start_local', 'workedStartLocal']) || '');
+    const endLocal   = toStr(pick(obj, ['end_local', 'endLocal', 'ts_end_local', 'tsEndLocal', 'worked_end_local', 'workedEndLocal']) || '');
+
+    const startIso = toStr(pick(obj, ['worked_start_iso', 'workedStartIso', 'start_utc', 'startUtc', 'start_iso', 'startIso']) || '');
+    const endIso   = toStr(pick(obj, ['worked_end_iso', 'workedEndIso', 'end_utc', 'endUtc', 'end_iso', 'endIso']) || '');
+
+    const breakMins = pick(obj, ['break_minutes', 'breakMinutes', 'break_mins', 'breakMins', 'ts_break_mins', 'tsBreakMins']);
+    const band = toStr(pick(obj, ['band_norm', 'bandNorm', 'band', 'band_text', 'bandText']) || '');
+    const ref  = toStr(pick(obj, ['reference_number', 'referenceNumber', 'ref_num', 'refNum']) || '');
+    const ward = toStr(pick(obj, ['ward', 'ward_norm', 'wardNorm', 'unit', 'unit_norm', 'unitNorm']) || '');
+    const job  = toStr(pick(obj, ['job_title', 'jobTitle', 'role_code', 'roleCode', 'role', 'role_text', 'roleText']) || '');
+
+    // Use provided label/display if available, otherwise construct from useful fields
+    const labelRaw = toStr(pick(obj, ['label', 'display_label', 'displayLabel']) || '');
+    const timeLabel = (startLocal || endLocal) ? `${startLocal || '—'} → ${endLocal || '—'}` : (startIso || endIso ? `${startIso || '—'} → ${endIso || '—'}` : '');
+    const parts = [];
+    if (timeLabel) parts.push(timeLabel);
+    if (job) parts.push(job);
+    if (band) parts.push(band);
+    if (ward) parts.push(ward);
+    if (ref) parts.push(`Ref ${ref}`);
+    const label = labelRaw || (parts.length ? parts.join(' • ') : id);
+
+    return {
+      id,
+      label,
+      startLocal,
+      endLocal,
+      startIso,
+      endIso,
+      breakMins: (breakMins == null || breakMins === '') ? null : Number(breakMins),
+      band,
+      reference_number: ref,
+      ward,
+      job_title: job
+    };
+  }).filter(x => x && x.id);
+
+  if (!options.length) {
+    alert('No timesheet target options were provided for this row.');
+    return;
+  }
+
+  // Persistent selection store per import (UI convenience only)
+  window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
+  if (!window.__hrRotaRoleSelections[impId] || typeof window.__hrRotaRoleSelections[impId] !== 'object') {
+    window.__hrRotaRoleSelections[impId] = {};
+  }
+
+  const existing = window.__hrRotaRoleSelections[impId][hrRowId] || null;
+  const initialSelectedId = existing && existing.target_id ? String(existing.target_id).trim() : '';
+
+  window.__hrRotaAssignRoleState = {
+    importId: impId,
+    rowIndex: idx,
+    hr_row_id: hrRowId,
+    selectedTargetId: initialSelectedId || (options.length === 1 ? options[0].id : ''),
+    options
+  };
+
+  const state = () => window.__hrRotaAssignRoleState || {};
+
+  const renderTab = (key) => {
+    if (key !== 'main') return '';
+    const s = state();
+    const selected = String(s.selectedTargetId || '').trim();
+
+    const rowsHtml = s.options.map((o) => {
+      const isSel = String(o.id) === selected;
+      const time = (o.startLocal || o.endLocal) ? `${o.startLocal || '—'} → ${o.endLocal || '—'}` :
+                   (o.startIso || o.endIso) ? `${o.startIso || '—'} → ${o.endIso || '—'}` : '—';
+
+      const metaBits = [];
+      if (o.job_title) metaBits.push(o.job_title);
+      if (o.band) metaBits.push(o.band);
+      if (o.ward) metaBits.push(o.ward);
+      if (o.reference_number) metaBits.push(`Ref ${o.reference_number}`);
+      if (o.breakMins != null && Number.isFinite(o.breakMins)) metaBits.push(`Break ${o.breakMins}`);
+
+      return `
+        <tr class="${isSel ? 'active' : ''}"
+            style="cursor:pointer;"
+            data-act="hr-rota-role-pick"
+            data-target-id="${enc(o.id)}">
+          <td class="mini" style="white-space:normal;word-break:break-word;">
+            <strong>${enc(time)}</strong>
+            ${metaBits.length ? `<div class="mini" style="opacity:.85;margin-top:2px;">${enc(metaBits.join(' • '))}</div>` : ``}
+          </td>
+          <td class="mini" style="width:240px;white-space:nowrap;">
+            <span class="mono">${enc(o.id)}</span>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    return htmlWrap(`
+      <div class="form" id="hrRotaAssignRole">
+        <div class="card">
+          <div class="row">
+            <label>Select matching timesheet</label>
+            <div class="controls">
+              <div class="mini">
+                Import: <span class="mono">${enc(impId)}</span><br/>
+                Staff: <strong>${enc(staff || '—')}</strong><br/>
+                Unit / Site: <span class="mini">${enc(unit || '—')}</span><br/>
+                Date: <span class="mini">${enc(date || '—')}</span>
+                ${grade ? `<br/>Grade: <span class="mono">${enc(grade)}</span>` : ``}
+              </div>
+              <div class="hint mini" style="margin-top:6px;">
+                Choose the correct timesheet for this day. This selection is saved against this import row so validation can proceed.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Timesheet options</label>
+            <div class="controls">
+              <div style="max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:10px; padding:6px;">
+                <table class="grid" style="table-layout:auto; width:100%;">
+                  <thead>
+                    <tr>
+                      <th>Timesheet</th>
+                      <th style="width:240px;">Timesheet ID</th>
+                    </tr>
+                  </thead>
+                  <tbody id="hrRotaRoleTargets">
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="row" style="margin-top:10px;">
+                <label></label>
+                <div class="controls">
+                  <button type="button" class="btn btn-primary" data-act="hr-rota-role-save">
+                    Save selection
+                  </button>
+                  <button type="button" class="btn" style="margin-left:8px;" data-act="hr-rota-role-cancel">
+                    Cancel
+                  </button>
+                  <span class="mini" style="margin-left:8px;">
+                    After saving, the daily preview will reclassify.
+                  </span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+  };
+
+  showModal(
+    'Select matching timesheet (HR Rota Daily)',
+    [{ key: 'main', label: 'Select' }],
+    renderTab,
+    null,
+    false,
+    null,
+    { kind: 'hr-rota-assign-role', noParentGate: true, stayOpenOnSave: false }
+  );
+
+  setTimeout(() => {
+    const root = document.getElementById('modalBody');
+    if (!root) return;
+
+    const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+    if (!fr || fr.kind !== 'hr-rota-assign-role') return;
+
+    const host = root.querySelector('#hrRotaAssignRole');
+    if (!host) return;
+
+    // De-dupe (per import + hr_row_id)
+    root.__hrRotaAssignRoleWired ||= new Set();
+    const wKey = `hr-rota-assign-role:${impId}:${hrRowId}`;
+    if (root.__hrRotaAssignRoleWired.has(wKey)) return;
+    root.__hrRotaAssignRoleWired.add(wKey);
+
+    host.addEventListener('click', async (ev) => {
+      const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-act="hr-rota-role-pick"]') : null;
+      if (tr) {
+        const targetId = String(tr.getAttribute('data-target-id') || '').trim();
+        if (!targetId) return;
+
+        window.__hrRotaAssignRoleState = state();
+        window.__hrRotaAssignRoleState.selectedTargetId = targetId;
+
+        // Re-render selection highlight (best-effort)
+        try {
+          const fr2 = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
+          if (fr2 && fr2.kind === 'hr-rota-assign-role' && typeof fr2.setTab === 'function') fr2.setTab('main');
+        } catch {}
+        return;
+      }
+
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+      if (!btn) return;
+      const act = String(btn.getAttribute('data-act') || '');
+
+      if (act === 'hr-rota-role-cancel') {
+        const closeBtn = document.getElementById('btnCloseModal');
+        if (closeBtn) closeBtn.click();
+        return;
+      }
+
+      if (act === 'hr-rota-role-save') {
+        const s = state();
+        const selectedId = String(s.selectedTargetId || '').trim();
+        if (!selectedId) {
+          alert('Select a timesheet first.');
+          return;
+        }
+
+        const chosen = (Array.isArray(s.options) ? s.options : []).find(o => String(o.id) === selectedId) || null;
+
+        // Persist locally (survives rerender)
+        window.__hrRotaRoleSelections = window.__hrRotaRoleSelections || {};
+        if (!window.__hrRotaRoleSelections[impId] || typeof window.__hrRotaRoleSelections[impId] !== 'object') {
+          window.__hrRotaRoleSelections[impId] = {};
+        }
+        window.__hrRotaRoleSelections[impId][hrRowId] = {
+          target_id: selectedId,
+          label: String((chosen && chosen.label) ? chosen.label : selectedId)
+        };
+
+        if (typeof postHrRotaResolveMappings !== 'function') {
+          alert('postHrRotaResolveMappings is not defined (cannot persist timesheet selection).');
+          return;
+        }
+
+        // ✅ Required payload shape: role_mappings with hr_row_id + target_id only
+        const payload = {
+          role_mappings: [{
+            hr_row_id: hrRowId,
+            target_id: selectedId
+          }]
+        };
+
+        try {
+          await postHrRotaResolveMappings(impId, payload);
+
+          if (window.__toast) window.__toast('Timesheet selection saved. Reclassifying…');
+
+          if (typeof refreshHrRotaSummary === 'function') {
+            await refreshHrRotaSummary(impId);
+          }
+
+          const closeBtn = document.getElementById('btnCloseModal');
+          if (closeBtn) closeBtn.click();
+        } catch (err) {
+          console.error('[HR_ROTA][ROLE] save failed', err);
+          alert(err?.message || 'Failed to save timesheet selection.');
+        }
+      }
+    }, true);
+  }, 0);
+}
 
 function openHrRotaAssignCandidateModal(importId, rowIndex) {
   const LOG = (typeof window.__LOG_IMPORTS === 'boolean') ? window.__LOG_IMPORTS : true;
@@ -2175,13 +2514,19 @@ function openHrRotaAssignCandidateModal(importId, rowIndex) {
       throw new Error('Missing importId in openHrRotaAssignCandidateModal');
     }
 
-    const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
+    // ✅ Prefer RAW daily preview; fallback to adapted only if RAW not present
+    const ss = (window.__importSummaryState && typeof window.__importSummaryState === 'object') ? window.__importSummaryState : {};
+    const st =
+      (ss['HR_ROTA_DAILY_RAW'] && typeof ss['HR_ROTA_DAILY_RAW'] === 'object') ? ss['HR_ROTA_DAILY_RAW'] :
+      (ss['HR_ROTA_DAILY'] && typeof ss['HR_ROTA_DAILY'] === 'object') ? ss['HR_ROTA_DAILY'] :
+      null;
+
     const rows = st && Array.isArray(st.rows) ? st.rows : [];
     const idx  = Number(rowIndex);
-    const row  = (idx >= 0 && idx < rows.length) ? rows[idx] : null;
+    const row  = (Number.isFinite(idx) && idx >= 0 && idx < rows.length) ? rows[idx] : null;
 
     if (!row) {
-      throw new Error(`Row index ${rowIndex} is out of range for HR_ROTA_DAILY summary`);
+      throw new Error(`Row index ${rowIndex} is out of range for HR rota summary`);
     }
 
     const staffRaw = row.staff_name || row.staff_raw || '';
@@ -2235,6 +2580,203 @@ function openHrRotaAssignCandidateModal(importId, rowIndex) {
     if (window.__toast) window.__toast(msg); else alert(msg);
   }
 }
+
+async function openHrRotaResolveGradeRoleModal(importId, rowIndex) {
+  const enc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+
+  if (!importId) {
+    alert('Missing importId.');
+    return;
+  }
+
+  // ✅ Prefer RAW daily preview; fallback to adapted only if RAW not present
+  const ss = (window.__importSummaryState && typeof window.__importSummaryState === 'object') ? window.__importSummaryState : {};
+  const st =
+    (ss['HR_ROTA_DAILY_RAW'] && typeof ss['HR_ROTA_DAILY_RAW'] === 'object') ? ss['HR_ROTA_DAILY_RAW'] :
+    (ss['HR_ROTA_DAILY'] && typeof ss['HR_ROTA_DAILY'] === 'object') ? ss['HR_ROTA_DAILY'] :
+    null;
+
+  const rows = st && Array.isArray(st.rows) ? st.rows : [];
+  const idx = Number(rowIndex);
+  const row = (Number.isFinite(idx) && idx >= 0 && idx < rows.length) ? rows[idx] : null;
+
+  if (!row) {
+    alert('Row not found for grade/role resolution.');
+    return;
+  }
+
+  const incomingGradeNorm = String(row.incoming_grade_norm || '').trim();
+  const gradeRaw = String(row.grade_raw || incomingGradeNorm || '').trim();
+  if (!incomingGradeNorm) {
+    alert('This row is missing incoming_grade_norm, so it cannot be resolved.');
+    return;
+  }
+
+  // Prefer candidate roles if preview supplies them. We do NOT fetch anything extra here.
+  const rawRoles =
+    Array.isArray(row.candidate_roles) ? row.candidate_roles :
+    Array.isArray(row.candidateRoles) ? row.candidateRoles :
+    Array.isArray(row.roles) ? row.roles :
+    null;
+
+  const roleOptions = Array.isArray(rawRoles)
+    ? rawRoles
+        .map((x) => {
+          if (x == null) return '';
+          if (typeof x === 'string') return x;
+          if (typeof x === 'object' && x && x.code) return x.code;
+          return '';
+        })
+        .map((s) => String(s || '').trim().toUpperCase())
+        .filter(Boolean)
+    : [];
+
+  const clientName = String(st?.client_name || st?.summary?.client_name || row.client_name || '').trim();
+  const clientId = String(st?.client_id || st?.summary?.client_id || row.client_id || '').trim();
+
+  if (typeof showModal !== 'function') {
+    alert('showModal is not available.');
+    return;
+  }
+
+  const ROLE_SELECT_ID = 'hrRotaGradeRoleSelect';
+  const ROLE_INPUT_ID  = 'hrRotaGradeRoleInput';
+  const BAND_INPUT_ID  = 'hrRotaGradeBandInput';
+
+  const optionsHtml = roleOptions.length
+    ? roleOptions.map((r) => `<option value="${enc(r)}">${enc(r)}</option>`).join('')
+    : '';
+
+  const renderBody = () => {
+    const roleControl = roleOptions.length
+      ? `
+        <select class="input" id="${ROLE_SELECT_ID}">
+          <option value="">-- choose role --</option>
+          ${optionsHtml}
+        </select>
+        <div class="hint mini" style="margin-top:6px;">
+          Role options are taken from candidate roles (when provided in preview).
+        </div>
+      `
+      : `
+        <input class="input" id="${ROLE_INPUT_ID}" placeholder="Role code (e.g. RMN)" />
+        <div class="hint mini" style="margin-top:6px;">
+          No candidate roles were provided in preview for this row, so enter the role code manually.
+        </div>
+      `;
+
+    return `
+      <div class="form" id="hrRotaGradeResolve">
+        <div class="card">
+          <div class="row">
+            <label>Context</label>
+            <div class="controls">
+              <div class="mini">
+                Client: <strong>${enc(clientName || clientId || '—')}</strong><br/>
+                Import ID: <span class="mono">${enc(importId)}</span><br/>
+                Row: <span class="mono">${enc(String(idx + 1))}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Incoming grade</label>
+            <div class="controls">
+              <div class="mini">
+                Raw: <span class="mono">${enc(gradeRaw || '—')}</span><br/>
+                Normalised key: <span class="mono">${enc(incomingGradeNorm)}</span>
+              </div>
+              <div class="hint mini" style="margin-top:6px;">
+                This mapping is saved as (client_id, incoming_grade_norm) so you won’t be asked again for this client+grade.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px;">
+          <div class="row">
+            <label>Role</label>
+            <div class="controls">
+              ${roleControl}
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Band</label>
+            <div class="controls">
+              <input class="input" id="${BAND_INPUT_ID}" placeholder="Optional (e.g. Band 5)" />
+              <div class="hint mini" style="margin-top:6px;">
+                Leave blank unless band is required for rate resolution.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const saveFn = async () => {
+    const roleCode = roleOptions.length
+      ? String(document.getElementById(ROLE_SELECT_ID)?.value || '').trim().toUpperCase()
+      : String(document.getElementById(ROLE_INPUT_ID)?.value || '').trim().toUpperCase();
+
+    const bandNorm = String(document.getElementById(BAND_INPUT_ID)?.value || '').trim();
+
+    if (!roleCode) {
+      alert('Role is required.');
+      return false;
+    }
+
+    const payload = {
+      grade_role_mappings: [{
+        incoming_grade_norm: incomingGradeNorm,
+        role_code: roleCode,
+        band_norm: bandNorm || null
+      }]
+    };
+
+    if (typeof postHrRotaResolveMappings === 'function') {
+      await postHrRotaResolveMappings(importId, payload);
+    } else {
+      if (typeof authFetch !== 'function' || typeof API !== 'function') {
+        throw new Error('authFetch/API not available to persist grade mapping.');
+      }
+      const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/resolve-conflicts`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const txt = await res.text().catch(() => '');
+      if (!res.ok) throw new Error(txt || `Resolve grade/role failed (${res.status})`);
+    }
+
+    if (typeof refreshHrRotaSummary === 'function') {
+      await refreshHrRotaSummary(importId);
+    }
+
+    return true;
+  };
+
+  showModal(
+    'Resolve grade to role (daily)',
+    [{ key: 'main', label: 'Resolve' }],
+    (k) => (k === 'main' ? renderBody() : ''),
+    saveFn,
+    false,
+    null,
+    {
+      kind: 'hr-rota-grade-resolve',
+      noParentGate: true,
+      showSave: true,
+      onDismiss: () => {}
+    }
+  );
+}
+
 
 
 function openHrRotaAssignClientModal(importId, rowIndex) {
@@ -7856,16 +8398,18 @@ function renderImportSummaryModal(importType, summaryState) {
   } catch {}
 }
 
-
 function adaptHrDailyPreviewToWeeklyModeA(preview) {
   const p0 = (preview && typeof preview === 'object') ? preview : {};
   const sum0 = (p0.summary && typeof p0.summary === 'object') ? p0.summary : {};
   const rows0 = Array.isArray(p0.rows) ? p0.rows : [];
 
+  // Email-eligible mismatch reasons (controls whether mismatch block + email UI appears).
+  // NOTE: hasMismatch must NOT depend on fingerprint; fingerprint may be intentionally removed to block emailing.
   const EMAIL_REASON_CODES = new Set([
     'actual_hours_mismatch',
     'start_end_mismatch',
-    'break_minutes_mismatch'
+    'break_minutes_mismatch',
+    'missing_from_import'
   ]);
 
   const asYmd = (v) => {
@@ -7875,20 +8419,41 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
       if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
       if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
     }
+    try {
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return null;
+      const yyyy = d.getUTCFullYear();
+      const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(d.getUTCDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch {
+      return null;
+    }
+  };
+
+  const safeStr = (v) => String(v == null ? '' : v).trim();
+
+  const parseWeekEndingWeekday = (v) => {
+    const n = Number(v);
+    if (Number.isInteger(n) && n >= 0 && n <= 6) return n;
     return null;
   };
 
-  const weekEndingSundayYmd = (ymd) => {
+  // Compute week ending date based on client week_ending_weekday (0=Sun..6=Sat)
+  // This mirrors backend weekEndingFor(...) behaviour: find the next matching weekday ON or AFTER work_date.
+  const weekEndingYmd = (ymd, weekEndingWeekday) => {
     const s = asYmd(ymd);
     if (!s) return null;
-    const [Y, M, D] = s.split('-').map(n => Number(n));
-    if (!Number.isFinite(Y) || !Number.isFinite(M) || !Number.isFinite(D)) return null;
 
-    // Use UTC to avoid DST issues; we only care about the date label.
-    const dt = new Date(Date.UTC(Y, M - 1, D));
-    const dow = dt.getUTCDay(); // 0=Sun..6=Sat
-    const add = (7 - dow) % 7;  // days to Sunday
-    dt.setUTCDate(dt.getUTCDate() + add);
+    const wew = parseWeekEndingWeekday(weekEndingWeekday);
+    const dowTarget = (wew == null) ? 0 : wew;
+
+    const dt = new Date(`${s}T00:00:00Z`);
+    if (Number.isNaN(dt.getTime())) return null;
+
+    while (dt.getUTCDay() !== dowTarget) {
+      dt.setUTCDate(dt.getUTCDate() + 1);
+    }
 
     const yyyy = dt.getUTCFullYear();
     const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
@@ -7896,10 +8461,30 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
     return `${yyyy}-${mm}-${dd}`;
   };
 
-  const safeStr = (v) => String(v == null ? '' : v).trim();
-
   const client_id = safeStr(p0.client_id || sum0.client_id || '');
   const client_name = safeStr(p0.client_name || sum0.client_name || '');
+
+  // Week-ending weekday snapshot (preferred from backend daily preview)
+  const weekEndingWeekdaySnapshot =
+    parseWeekEndingWeekday(
+      p0.week_ending_weekday_snapshot ??
+      p0.weekEndingWeekdaySnapshot ??
+      sum0.week_ending_weekday_snapshot ??
+      sum0.weekEndingWeekdaySnapshot ??
+      p0?.truth_meta?.week_ending_weekday_snapshot ??
+      p0?.truth_meta?.weekEndingWeekdaySnapshot ??
+      sum0?.truth_meta?.week_ending_weekday_snapshot ??
+      sum0?.truth_meta?.weekEndingWeekdaySnapshot ??
+      p0?.truth_meta?.week_ending_weekday ??
+      p0?.truth_meta?.weekEndingWeekday ??
+      sum0?.truth_meta?.week_ending_weekday ??
+      sum0?.truth_meta?.weekEndingWeekday ??
+      p0.week_ending_weekday ??
+      p0.weekEndingWeekday ??
+      sum0.week_ending_weekday ??
+      sum0.weekEndingWeekday ??
+      null
+    );
 
   // Compute file_date_min/max from daily rows (for weekly UI store defaults)
   const allDates = [];
@@ -7922,10 +8507,24 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
     const reason = safeStr(r?.reason_code || '').toLowerCase();
     const statusU = safeStr(r?.status || '').toUpperCase();
 
+    // Missing-from-import rows are NOT "resolve before apply" items; they are handled via destructive invalidation.
+    if (reason === 'missing_from_import') continue;
+
     const staff = safeStr(r?.staff_name || r?.staff_raw || r?.staff_norm || '');
-    const unit  = safeStr(r?.hospital_or_trust || r?.unit || r?.unit_raw || r?.hospital_norm || r?.trust_norm || '');
+    const unit = safeStr(
+      r?.hospital_or_trust ||
+      r?.unit ||
+      r?.unit_raw ||
+      r?.hospital_norm ||
+      r?.trust_norm ||
+      ''
+    );
+
     const work_date = asYmd(r?.date_local || r?.work_date || r?.date || r?.shift_date || null);
-    const week_ending_date = weekEndingSundayYmd(work_date);
+
+    const week_ending_date =
+      asYmd(r?.week_ending_date || r?.weekEndingDate || null) ||
+      weekEndingYmd(work_date, weekEndingWeekdaySnapshot);
 
     const incoming_code = safeStr(r?.incoming_grade_norm || r?.grade_raw || '');
 
@@ -7934,18 +8533,27 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
     const hr_row_id = safeStr(r?.hr_row_id || '');
 
     const timesheet_target_ambiguous = (r?.timesheet_target_ambiguous === true);
-    const grade_mapping_required = (r?.grade_mapping_required === true) || (reason === 'grade_mapping_required');
+
+    // Support both boolean and reason_code based gating for grade mapping
+    const grade_mapping_required =
+      (r?.grade_mapping_required === true) ||
+      (reason === 'grade_mapping_required');
+
+    // Support timesheet-not-found/ambiguous reason as "needs timesheet selection" even if boolean flag isn't set
+    const timesheet_not_found_or_ambiguous =
+      (reason === 'timesheet_not_found_or_ambiguous') ||
+      (reason === 'timesheet_target_ambiguous');
 
     let action = '';
 
     // Candidate missing -> show Assign candidate button
     if (reason === 'candidate_unresolved') action = 'REJECT_NO_CANDIDATE';
 
-    // Grade mapping missing -> show Fix band mapping button (we will repurpose click handling in daily wiring)
+    // Grade mapping missing -> show Fix band mapping button (repurposed in daily wiring)
     else if (grade_mapping_required) action = 'REJECT_NO_CONTRACT_BAND_MISMATCH';
 
-    // Timesheet ambiguous -> also use Fix band button slot so we can open "Select matching timesheet" from daily wiring
-    else if (timesheet_target_ambiguous || statusU === 'UNMATCHED') action = 'REJECT_NO_CONTRACT';
+    // Timesheet unresolved/ambiguous -> also use Fix band button slot (repurposed in daily wiring)
+    else if (timesheet_target_ambiguous || timesheet_not_found_or_ambiguous || statusU === 'UNMATCHED') action = 'REJECT_NO_CONTRACT';
 
     if (!action) continue;
 
@@ -7977,7 +8585,7 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
       hr_row_id: hr_row_id || null,
 
       // daily-only routing hints for daily wiring
-      _daily_timesheet_target_ambiguous: !!timesheet_target_ambiguous,
+      _daily_timesheet_target_ambiguous: !!(timesheet_target_ambiguous || timesheet_not_found_or_ambiguous),
       _daily_grade_mapping_required: !!grade_mapping_required
     });
   }
@@ -7995,18 +8603,23 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
     const reason = safeStr(r?.reason_code || '').toLowerCase();
 
     const work_date = asYmd(r?.date_local || r?.work_date || r?.date || r?.shift_date || null);
-    const week_ending_date = weekEndingSundayYmd(work_date);
+
+    const detail = (r?.details && typeof r.details === 'object') ? r.details : {};
+
+    const week_ending_date =
+      asYmd(r?.week_ending_date || r?.weekEndingDate || detail.week_ending_date || detail.weekEndingDate || null) ||
+      weekEndingYmd(work_date, weekEndingWeekdaySnapshot);
 
     const fp = safeStr(r?.issue_fingerprint || '');
     const recipient_email = safeStr(r?.recipient_email || '');
-    const emailed_already = (r?.email_already_sent === true);
+    const emailed_already = (r?.email_already_sent === true) || (r?.email_already === true);
     const can_email = (r?.can_email === true);
 
-    const hasMismatch = (!ok && EMAIL_REASON_CODES.has(reason) && !!fp);
+    // ✅ Mismatch visibility must NOT depend on fingerprint; fingerprint may be intentionally removed to block email.
+    const hasMismatch = (!ok && EMAIL_REASON_CODES.has(reason));
 
     const staffLabel = safeStr(r?.staff_name || r?.staff_raw || r?.staff_norm || '');
 
-    const detail = (r?.details && typeof r.details === 'object') ? r.details : {};
     const hrStart = safeStr(detail.start_local || detail.hr_start || r?.start_local || '');
     const hrEnd   = safeStr(detail.end_local || detail.hr_end || r?.end_local || '');
     const hrBreak = (detail.hr_break_mins ?? detail.healthroster_break_mins ?? detail.healthrosterBreakMins ?? null);
@@ -8015,6 +8628,9 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
     const tsEnd   = safeStr(detail.timesheet_end || detail.timesheet_end_local || detail.ts_end || detail.ts_end_local || '');
     const tsBreak = (detail.ts_break_mins ?? detail.timesheet_break_mins ?? detail.timesheetBreakMins ?? null);
 
+    const refBefore = safeStr(detail.ref_before || detail.refBefore || r?.ref_before || r?.refBefore || '');
+    const refAfter  = safeStr(detail.ref_after  || detail.refAfter  || r?.ref_after  || r?.refAfter  || '');
+
     const comparison_key = work_date
       ? `${work_date}|${tsStart}|${tsEnd}|${String(tsBreak == null ? 0 : tsBreak)}`
       : `${tsStart}|${tsEnd}|${String(tsBreak == null ? 0 : tsBreak)}`;
@@ -8022,27 +8638,68 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
     const invoiceLocked = (r?.tsfin_is_invoiced === true) || !!safeStr(r?.tsfin_locked_by_invoice_id || '');
     const invoiceLockedId = safeStr(r?.tsfin_locked_by_invoice_id || '');
 
+    // ✅ Match status: prefer backend-provided match_status (needed for UNMATCHED missing shifts),
+    // but force MATCH when overall is OK.
+    const msRaw = safeStr(detail.match_status || detail.matchStatus || r?.match_status || r?.matchStatus || '').toUpperCase();
+    const match_status = ok
+      ? 'MATCH'
+      : ((msRaw === 'UNMATCHED' || msRaw === 'MISMATCH' || msRaw === 'MATCH') ? msRaw : 'MISMATCH');
+
+    const invoiceLockedBool = !!(invoiceLocked || invoiceLockedId);
+
+    // ✅ Destructive invalidation flags mirror weekly SQL:
+    // (UNMATCHED + had prior ref + not invoice locked)
+    const isDestructive =
+      (match_status === 'UNMATCHED') &&
+      !!refBefore &&
+      !invoiceLockedBool;
+
+    const defaultInv = isDestructive;
+
+    // ✅ match boolean mirrors weekly semantics:
+    // - base on time_match
+    // - but if invoice-locked AND ref changed, treat as NOT match
+    const time_match = (match_status === 'MATCH');
+    const refChanged = !!(refBefore && refAfter && (refBefore !== refAfter));
+    const match = time_match && !(invoiceLockedBool && refChanged);
+
     const comparisons = [{
       comparison_key: comparison_key,
       work_date: work_date || null,
-      match: !!ok,
-      match_status: ok ? 'MATCH' : 'MISMATCH',
+
+      match: !!match,
+      time_match: !!time_match,
+      match_status: match_status,
+
       timesheet_start: tsStart || null,
       timesheet_end: tsEnd || null,
       timesheet_break_mins: (tsBreak == null || tsBreak === '' ? null : Number(tsBreak)),
+
       healthroster_start: hrStart || null,
       healthroster_end: hrEnd || null,
       healthroster_break_mins: (hrBreak == null || hrBreak === '' ? null : Number(hrBreak)),
-      invoice_locked: !!invoiceLocked || !!invoiceLockedId,
-      invoice_locked_invoice_id: invoiceLockedId || null,
-      is_destructive_invalidation: false,
-      default_invalidate_checked: false
+
+      invoice_locked: invoiceLockedBool,
+      invoice_locked_invoice_id: (invoiceLockedId || null),
+
+      ref_before: (refBefore ? refBefore : null),
+      ref_after: (refAfter ? refAfter : null),
+
+      is_destructive_invalidation: !!isDestructive,
+      default_invalidate_checked: !!defaultInv
     }];
 
     const failure_reasons = [];
     if (!ok) {
       const nice = reason ? reason.replace(/_/g, ' ') : 'validation failed';
       failure_reasons.push(`Daily validation: ${nice}`);
+
+      // ✅ Surface "email blocked" warning if provided by backend decoration
+      const blocked =
+        safeStr(detail.email_blocked_reason || detail.emailBlockedReason || r?.email_blocked_reason || r?.emailBlockedReason || '');
+      if (blocked) {
+        failure_reasons.push(blocked);
+      }
     }
 
     validation_groups.push({
@@ -8054,8 +8711,9 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
       has_mismatch: !!hasMismatch,
       failure_reasons: failure_reasons,
 
-      issue_fingerprint: fp || null,
-      recipient_email: recipient_email || null,
+      // Fingerprint may be intentionally blank to block emailing; keep value as-is.
+      issue_fingerprint: (fp ? fp : null),
+      recipient_email: (recipient_email ? recipient_email : null),
       emailed_already: !!emailed_already,
       can_email: !!can_email,
 
@@ -8077,6 +8735,12 @@ function adaptHrDailyPreviewToWeeklyModeA(preview) {
   if (client_id) truth_meta.client_id = client_id;
   if (file_date_min) truth_meta.file_date_min = file_date_min;
   if (file_date_max) truth_meta.file_date_max = file_date_max;
+
+  // Carry week-ending weekday snapshot through for any downstream UI/helpers
+  if (weekEndingWeekdaySnapshot != null) {
+    truth_meta.week_ending_weekday_snapshot = weekEndingWeekdaySnapshot;
+    truth_meta.weekEndingWeekdaySnapshot = weekEndingWeekdaySnapshot;
+  }
 
   // camel aliases used elsewhere
   if (file_date_min) truth_meta.fileDateMin = truth_meta.file_date_min;
@@ -8274,386 +8938,615 @@ function wireHrRotaDailyValidationSummaryActions(type, importId) {
   const T = String(type || '').toUpperCase();
   if (T !== 'HR_ROTA_DAILY') return;
 
-  const impId = (importId != null) ? String(importId) : '';
+  const impId = String(importId || '').trim();
   if (!impId) return;
 
-  // Root element created by renderHrWeeklyValidationSummary()
-  const root = document.getElementById('hrWeeklyValidationSummary');
-  if (!root) return;
+  // Mirror weekly wiring: bind to modalBody (stable across rerenders)
+  setTimeout(() => {
+    try {
+      const root = document.getElementById('modalBody');
+      if (!root) return;
 
-  // Prevent double-binding across rerenders / refreshes
-  window.__hrRotaDailyWired = window.__hrRotaDailyWired || new Set();
-  const wiredKey = `hr-rota-daily:${impId}`;
-  if (window.__hrRotaDailyWired.has(wiredKey)) return;
-  window.__hrRotaDailyWired.add(wiredKey);
+      root.__hrRotaDailyValSummaryWired = root.__hrRotaDailyValSummaryWired || new Set();
+      const wiredKey = `hr-rota-daily-val-summary:${impId}`;
+      if (root.__hrRotaDailyValSummaryWired.has(wiredKey)) return;
+      root.__hrRotaDailyValSummaryWired.add(wiredKey);
 
-  // Ensure weekly UI store exists (renderHrWeeklyValidationSummary reads this store)
-  window.__weeklyImportUi = window.__weeklyImportUi || {};
-  window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
-  if (!window.__weeklyImportUi.HR_WEEKLY[impId] || typeof window.__weeklyImportUi.HR_WEEKLY[impId] !== 'object') {
-    window.__weeklyImportUi.HR_WEEKLY[impId] = {};
-  }
-  const ui = window.__weeklyImportUi.HR_WEEKLY[impId];
+      const safeStr = (v) => String(v == null ? '' : v).trim();
 
-  if (!(ui.emailSelection instanceof Map) && !(ui.emailSelection instanceof Set)) {
-    // Use Map so we can represent explicit false (unticked) as well.
-    ui.emailSelection = new Map();
-  }
-  if (!(ui.invalidationSelection instanceof Map)) ui.invalidationSelection = new Map();
-  if (!(ui.altEmailByKey instanceof Map)) ui.altEmailByKey = new Map();
+      const getContainer = (ev) => {
+        const c = ev?.target && ev.target.closest ? ev.target.closest('#hrWeeklyValidationSummary') : null;
+        if (!c) return null;
+        const cImp = safeStr(c.getAttribute('data-import-id') || '');
+        if (cImp && cImp !== impId) return null;
+        return c;
+      };
 
-  const keyFor = (tsid, fp) => {
-    const a = String(tsid || '').trim();
-    const b = String(fp || '').trim();
-    if (!a || !b) return '';
-    return `${a}|${b}`;
-  };
+      const getAdaptedPreview = () => {
+        const st = (window.__importSummaryState && typeof window.__importSummaryState === 'object')
+          ? window.__importSummaryState
+          : {};
+        const pv = st.HR_ROTA_DAILY;
+        return (pv && typeof pv === 'object') ? pv : {};
+      };
 
-  const invKeyFor = (tsid, comparisonKey) => {
-    const a = String(tsid || '').trim();
-    const b = String(comparisonKey || '').trim();
-    if (!a || !b) return '';
-    return `${a}|${b}`;
-  };
+      const getRawDaily = () => {
+        const st = (window.__importSummaryState && typeof window.__importSummaryState === 'object')
+          ? window.__importSummaryState
+          : {};
+        const pv = st.HR_ROTA_DAILY_RAW;
+        return (pv && typeof pv === 'object') ? pv : null;
+      };
 
-  // Use raw daily preview for metadata + gating + row-index mapping.
-  const getRawDaily = () => {
-    const st = window.__importSummaryState || {};
-    return (st.HR_ROTA_DAILY_RAW && typeof st.HR_ROTA_DAILY_RAW === 'object')
-      ? st.HR_ROTA_DAILY_RAW
-      : null;
-  };
+      const ensureUi = () => {
+        window.__weeklyImportUi = window.__weeklyImportUi || {};
+        window.__weeklyImportUi.HR_WEEKLY = window.__weeklyImportUi.HR_WEEKLY || {};
 
-  const buildRawRowMap = (rawDaily) => {
-    const m = new Map();
-    const arr = Array.isArray(rawDaily?.rows) ? rawDaily.rows : [];
-    for (const r of arr) {
-      const tsid = r?.timesheet_id ? String(r.timesheet_id).trim() : '';
-      const fp = r?.issue_fingerprint ? String(r.issue_fingerprint).trim() : '';
-      if (tsid && fp) {
-        m.set(keyFor(tsid, fp), r);
-      }
-    }
-    return m;
-  };
+        let ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
 
-  const findRawRowIndexByHrRowId = (rawDaily, hrRowId) => {
-    const id = String(hrRowId || '').trim();
-    if (!id) return -1;
-    const arr = Array.isArray(rawDaily?.rows) ? rawDaily.rows : [];
-    for (let i = 0; i < arr.length; i++) {
-      const r = arr[i];
-      if (r && String(r.hr_row_id || '').trim() === id) return i;
-    }
-    return -1;
-  };
-
-  const getAdaptedPreview = () => {
-    const st = window.__importSummaryState || {};
-    const pv = st.HR_ROTA_DAILY;
-    return (pv && typeof pv === 'object') ? pv : null;
-  };
-
-  const gatedByRawDaily = (rawDaily) => {
-    const arr = Array.isArray(rawDaily?.rows) ? rawDaily.rows : [];
-    let cand = 0, grade = 0, target = 0, unmatched = 0;
-
-    for (const r of arr) {
-      const rc = String(r?.reason_code || '').toLowerCase();
-      const st = String(r?.status || '').toUpperCase();
-
-      if (st === 'UNMATCHED') unmatched++;
-      if (rc === 'candidate_unresolved') cand++;
-      if (rc === 'grade_mapping_required' || r?.grade_mapping_required === true) grade++;
-      if (r?.timesheet_target_ambiguous === true) target++;
-    }
-    return { cand, grade, target, unmatched };
-  };
-
-  const refreshDaily = async () => {
-    if (typeof refreshHrRotaSummary === 'function') {
-      await refreshHrRotaSummary(impId);
-      return;
-    }
-    // Fallback: call preview and re-render import summary if helpers exist
-    if (typeof authFetch === 'function' && typeof API === 'function' && typeof renderImportSummaryModal === 'function') {
-      const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(impId)}/preview`));
-      const txt = await res.text().catch(() => '');
-      if (!res.ok) throw new Error(txt || `Daily preview failed (${res.status})`);
-      const json = txt ? JSON.parse(txt) : {};
-      renderImportSummaryModal('HR_ROTA_DAILY', json);
-      return;
-    }
-    throw new Error('No refreshHrRotaSummary/renderImportSummaryModal available to reclassify.');
-  };
-
-  // ─────────────────────────────────────────────────────────────
-  // CHANGE HANDLERS (checkboxes + alt email)
-  // ─────────────────────────────────────────────────────────────
-  root.addEventListener('change', (ev) => {
-    const el = ev.target;
-
-    // Email checkbox toggle
-    if (el && el.matches && el.matches('input[data-act="hr-weekly-val-email-toggle"]')) {
-      const tsid = String(el.getAttribute('data-timesheet-id') || '').trim();
-      const fp = String(el.getAttribute('data-issue-fingerprint') || '').trim();
-      const k = keyFor(tsid, fp);
-      if (!k) return;
-
-      if (ui.emailSelection instanceof Map) {
-        ui.emailSelection.set(k, !!el.checked);
-      } else if (ui.emailSelection instanceof Set) {
-        // Back-compat if some other code used Set
-        if (el.checked) ui.emailSelection.add(k);
-        else ui.emailSelection.delete(k);
-      }
-      return;
-    }
-
-    // Alternative email input
-    if (el && el.matches && el.matches('input[data-act="hr-weekly-val-alt-email"]')) {
-      const tsid = String(el.getAttribute('data-timesheet-id') || '').trim();
-      const fp = String(el.getAttribute('data-issue-fingerprint') || '').trim();
-      const k = keyFor(tsid, fp);
-      if (!k) return;
-
-      const v = String(el.value || '').trim();
-      if (v) ui.altEmailByKey.set(k, v);
-      else ui.altEmailByKey.delete(k);
-      return;
-    }
-
-    // Invalidation checkbox toggle
-    if (el && el.matches && el.matches('input[data-act="hr-weekly-val-invalidate-toggle"]')) {
-      const tsid = String(el.getAttribute('data-timesheet-id') || '').trim();
-      const ck = String(el.getAttribute('data-comparison-key') || '').trim();
-      const k = invKeyFor(tsid, ck);
-      if (!k) return;
-
-      ui.invalidationSelection.set(k, !!el.checked);
-      return;
-    }
-  });
-
-  // ─────────────────────────────────────────────────────────────
-  // CLICK HANDLERS (resolve + reclassify + finalise)
-  // ─────────────────────────────────────────────────────────────
-  root.addEventListener('click', async (ev) => {
-    const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
-    if (!btn) return;
-
-    const act = String(btn.getAttribute('data-act') || '').trim();
-    if (!act) return;
-
-    // DAILY: Reclassify
-    if (act === 'hr-weekly-val-reclassify') {
-      try {
-        await refreshDaily();
-      } catch (e) {
-        console.error('[HR_DAILY_WIRE] reclassify failed', e);
-        alert(e?.message || 'Reclassify failed.');
-      }
-      return;
-    }
-
-    // DAILY: Resolve candidate from unresolved table
-    if (act === 'hr-weekly-val-resolve-candidate') {
-      try {
-        const idxStr = String(btn.getAttribute('data-row-idx') || '').trim();
-        const idx = Number(idxStr);
-        if (!Number.isFinite(idx) || idx < 0) return;
-
-        const adapted = getAdaptedPreview();
-        const unr = (adapted && Array.isArray(adapted.rows)) ? adapted.rows : [];
-        const urow = (idx >= 0 && idx < unr.length) ? unr[idx] : null;
-        const hrRowId = urow && urow.hr_row_id ? String(urow.hr_row_id).trim() : '';
-
-        const rawDaily = getRawDaily();
-        if (!rawDaily) throw new Error('Missing HR_ROTA_DAILY_RAW preview state.');
-
-        const rawIdx = findRawRowIndexByHrRowId(rawDaily, hrRowId);
-        if (rawIdx < 0) throw new Error('Could not locate the daily row to resolve candidate.');
-
-        if (typeof openHrRotaAssignCandidateModal !== 'function') {
-          throw new Error('openHrRotaAssignCandidateModal is not available.');
+        // Ensure store exists (renderImportSummaryModal usually does this; keep defensive)
+        if (!ui && typeof ensureWeeklyUiStore === 'function') {
+          try {
+            const p0 = getAdaptedPreview();
+            ensureWeeklyUiStore('HR_WEEKLY', impId, p0 || {});
+          } catch {}
+          ui = window.__weeklyImportUi.HR_WEEKLY[impId] || null;
         }
 
-        openHrRotaAssignCandidateModal(impId, rawIdx);
-      } catch (e) {
-        console.error('[HR_DAILY_WIRE] resolve candidate failed', e);
-        alert(e?.message || 'Resolve candidate failed.');
-      }
-      return;
-    }
+        if (!ui || typeof ui !== 'object' || Array.isArray(ui)) {
+          ui = {
+            options: { missingShiftsEnabled: true, dateFrom: null, dateTo: null },
+            actionSelection: new Set(),
 
-    // DAILY: "Fix band mapping" button is repurposed:
-    //  - if _daily_grade_mapping_required => open grade→role resolve modal
-    //  - if _daily_timesheet_target_ambiguous => open timesheet target selector modal
-    if (act === 'hr-weekly-val-fix-band') {
-      try {
-        const idxStr = String(btn.getAttribute('data-row-idx') || '').trim();
-        const idx = Number(idxStr);
-        if (!Number.isFinite(idx) || idx < 0) return;
+            // ✅ Map supports explicit untick
+            emailSelection: new Map(),
 
-        const adapted = getAdaptedPreview();
-        const unr = (adapted && Array.isArray(adapted.rows)) ? adapted.rows : [];
-        const urow = (idx >= 0 && idx < unr.length) ? unr[idx] : null;
-        if (!urow) return;
+            // `${timesheet_id}|${comparison_key}` -> boolean
+            invalidationSelection: new Map(),
 
-        const hrRowId = urow && urow.hr_row_id ? String(urow.hr_row_id).trim() : '';
+            // `${timesheet_id}|${issue_fingerprint}` -> string
+            altEmailByKey: new Map(),
 
-        const rawDaily = getRawDaily();
-        if (!rawDaily) throw new Error('Missing HR_ROTA_DAILY_RAW preview state.');
+            filters: { showOnlyRed: false, showOnlyUnticked: false, showOnlyCancellations: false, search: '' },
+            hydratedFlags: { didInitDefaultActionChecks: true, didInitDefaultEmailChecks: false, didInitDefaultInvalidationChecks: false }
+          };
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        }
 
-        const rawIdx = findRawRowIndexByHrRowId(rawDaily, hrRowId);
-        if (rawIdx < 0) throw new Error('Could not locate the daily row for this resolution.');
+        if (!(ui.actionSelection instanceof Set)) ui.actionSelection = new Set();
 
-        if (urow._daily_timesheet_target_ambiguous === true) {
-          if (typeof openHrRotaAssignRoleModal !== 'function') {
-            throw new Error('openHrRotaAssignRoleModal is not available.');
+        // Back-compat: convert Set -> Map(true)
+        if (ui.emailSelection instanceof Set) {
+          const m = new Map();
+          for (const k of Array.from(ui.emailSelection)) {
+            const kk = safeStr(k);
+            if (kk) m.set(kk, true);
           }
-          openHrRotaAssignRoleModal(impId, rawIdx);
+          ui.emailSelection = m;
+        }
+        if (!(ui.emailSelection instanceof Map)) ui.emailSelection = new Map();
+
+        if (!(ui.invalidationSelection instanceof Map)) ui.invalidationSelection = new Map();
+        if (!(ui.altEmailByKey instanceof Map)) ui.altEmailByKey = new Map();
+
+        if (!ui.hydratedFlags || typeof ui.hydratedFlags !== 'object' || Array.isArray(ui.hydratedFlags)) ui.hydratedFlags = {};
+        if (typeof ui.hydratedFlags.didInitDefaultEmailChecks !== 'boolean') ui.hydratedFlags.didInitDefaultEmailChecks = false;
+        if (typeof ui.hydratedFlags.didInitDefaultInvalidationChecks !== 'boolean') ui.hydratedFlags.didInitDefaultInvalidationChecks = false;
+
+        if (!ui.options || typeof ui.options !== 'object' || Array.isArray(ui.options)) ui.options = {};
+        ui.options.missingShiftsEnabled = true;
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+        return ui;
+      };
+
+      const parseEmailKey = (k) => {
+        const s = String(k || '');
+        const i = s.indexOf('|');
+        if (i <= 0) return null;
+        const ts = s.slice(0, i).trim();
+        const fp = s.slice(i + 1).trim();
+        if (!ts || !fp) return null;
+        return { ts, fp };
+      };
+
+      const buildDefaultRecipientByKey = (p0) => {
+        const out = new Map();
+        const vg0 = Array.isArray(p0?.validation_groups) ? p0.validation_groups : [];
+        for (const g of vg0) {
+          const tsid = g?.timesheet_id || g?.timesheetId || null;
+          const fp = safeStr(g?.issue_fingerprint || g?.issueFingerprint || '');
+          if (!tsid || !fp) continue;
+          const k = `${String(tsid).trim()}|${fp}`;
+          const recip = safeStr(g?.recipient_email || g?.recipientEmail || '');
+          const canEmail = (g?.can_email === true) || (g?.canEmail === true);
+          out.set(k, { recipient_email: recip, can_email: !!canEmail });
+        }
+        return out;
+      };
+
+      const hydrateDefaultsFromPreview = () => {
+        const ui = ensureUi();
+        const p0 = getAdaptedPreview();
+
+        const vg0 = Array.isArray(p0?.validation_groups) ? p0.validation_groups : [];
+
+        // Default email selection:
+        // - first-time: checked
+        // - re-email: unchecked
+        // - never override existing explicit selection
+        for (const g of vg0) {
+          const hasMismatch = (g?.has_mismatch === true) || (g?.hasMismatch === true);
+          if (!hasMismatch) continue;
+
+          const tsid = g?.timesheet_id || g?.timesheetId || null;
+          const fp = safeStr(g?.issue_fingerprint || g?.issueFingerprint || '');
+          if (!tsid || !fp) continue;
+
+          const k = `${String(tsid).trim()}|${fp}`;
+          if (ui.emailSelection.has(k)) continue;
+
+          const emailedAlready = (g?.emailed_already === true) || (g?.emailedAlready === true);
+          ui.emailSelection.set(k, emailedAlready ? false : true);
+        }
+
+        // Default invalidation selection:
+        // - destructive invalidations default checked
+        // - never override existing explicit selection
+        for (const g of vg0) {
+          const tsid = g?.timesheet_id || g?.timesheetId || null;
+          if (!tsid) continue;
+
+          const comps = Array.isArray(g?.comparisons) ? g.comparisons
+            : (Array.isArray(g?.comparison_rows) ? g.comparison_rows : []);
+
+          for (const c of comps) {
+            const isDestr =
+              (c?.is_destructive_invalidation === true) ||
+              (c?.isDestructiveInvalidation === true) ||
+              (c?.is_destructive_invalidation === 'true');
+
+            if (!isDestr) continue;
+
+            const invoiceLocked =
+              (c?.invoice_locked === true) ||
+              (c?.invoiceLocked === true) ||
+              (safeStr(c?.invoice_locked_invoice_id || c?.invoiceLockedInvoiceId || '').length > 0);
+
+            if (invoiceLocked) continue;
+
+            const ck = safeStr(c?.comparison_key || c?.comparisonKey || '');
+            if (!ck) continue;
+
+            const key = `${String(tsid).trim()}|${ck}`;
+            if (!ui.invalidationSelection.has(key)) {
+              ui.invalidationSelection.set(key, true);
+            }
+          }
+        }
+
+        ui.hydratedFlags.didInitDefaultEmailChecks = true;
+        ui.hydratedFlags.didInitDefaultInvalidationChecks = true;
+
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+      };
+
+      const buildRawRowMap = (rawDaily) => {
+        const m = new Map();
+        const arr = Array.isArray(rawDaily?.rows) ? rawDaily.rows : [];
+        for (const r of arr) {
+          const tsid = r?.timesheet_id ? String(r.timesheet_id).trim() : '';
+          const fp = r?.issue_fingerprint ? String(r.issue_fingerprint).trim() : '';
+          if (tsid && fp) {
+            m.set(`${tsid}|${fp}`, r);
+          }
+        }
+        return m;
+      };
+
+      const findRawRowIndexByHrRowId = (rawDaily, hrRowId) => {
+        const id = safeStr(hrRowId || '');
+        if (!id) return -1;
+        const arr = Array.isArray(rawDaily?.rows) ? rawDaily.rows : [];
+        for (let i = 0; i < arr.length; i++) {
+          const r = arr[i];
+          if (r && safeStr(r.hr_row_id || '') === id) return i;
+        }
+        return -1;
+      };
+
+      const gatedByRawDaily = (rawDaily) => {
+        const arr = Array.isArray(rawDaily?.rows) ? rawDaily.rows : [];
+        let cand = 0, grade = 0, target = 0, unmatched = 0;
+
+        for (const r of arr) {
+          const rc = String(r?.reason_code || '').toLowerCase();
+          const st = String(r?.status || '').toUpperCase();
+
+          // UNMATCHED here is reserved for "resolve before apply" cases, not missing-shift invalidations.
+          if (st === 'UNMATCHED') unmatched++;
+
+          if (rc === 'candidate_unresolved') cand++;
+
+          if (rc === 'grade_mapping_required' || r?.grade_mapping_required === true) grade++;
+
+          if (r?.timesheet_target_ambiguous === true || rc === 'timesheet_not_found_or_ambiguous') target++;
+        }
+
+        return { cand, grade, target, unmatched };
+      };
+
+      const refreshDaily = async () => {
+        if (typeof refreshHrRotaSummary === 'function') {
+          await refreshHrRotaSummary(impId);
           return;
         }
 
-        // default: treat as grade mapping
-        if (typeof openHrRotaResolveGradeRoleModal !== 'function') {
-          throw new Error('openHrRotaResolveGradeRoleModal is not available.');
-        }
-        await openHrRotaResolveGradeRoleModal(impId, rawIdx);
-      } catch (e) {
-        console.error('[HR_DAILY_WIRE] resolve grade/target failed', e);
-        alert(e?.message || 'Resolve action failed.');
-      }
-      return;
-    }
-
-    // DAILY: Finalise (apply validations + emails)
-    if (act === 'hr-weekly-val-finalise') {
-      try {
-        const rawDaily = getRawDaily();
-        if (!rawDaily) throw new Error('Missing HR_ROTA_DAILY_RAW preview state.');
-
-        // Mode-A gating (server will also enforce, but we prevent pointless calls)
-        const g = gatedByRawDaily(rawDaily);
-        if (g.unmatched || g.cand || g.grade || g.target) {
-          const parts = [];
-          if (g.cand) parts.push(`Candidate unresolved: ${g.cand}`);
-          if (g.grade) parts.push(`Grade/role unresolved: ${g.grade}`);
-          if (g.target) parts.push(`Timesheet match unresolved: ${g.target}`);
-          if (g.unmatched) parts.push(`Unmatched rows: ${g.unmatched}`);
-          alert(`Cannot finalise yet.\n\n${parts.join('\n')}\n\nResolve these items and click Reclassify.`);
+        if (typeof authFetch === 'function' && typeof API === 'function' && typeof renderImportSummaryModal === 'function') {
+          const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(impId)}/preview`));
+          const txt = await res.text().catch(() => '');
+          if (!res.ok) throw new Error(txt || `Daily preview failed (${res.status})`);
+          const json = txt ? JSON.parse(txt) : {};
+          renderImportSummaryModal('HR_ROTA_DAILY', json);
           return;
         }
 
-        if (typeof applyHrRotaValidation !== 'function') {
-          throw new Error('applyHrRotaValidation is not available.');
-        }
+        throw new Error('No refreshHrRotaSummary/renderImportSummaryModal available to reclassify.');
+      };
 
-        // Build lookup for metadata by (timesheet_id|issue_fingerprint)
-        const rawMap = buildRawRowMap(rawDaily);
+      // Seed defaults into UI store so finalise uses store truth (not DOM defaults)
+      hydrateDefaultsFromPreview();
 
-        // Build email_actions from the DOM checkboxes that are checked
-        const emailActions = [];
-        const missingAltRequired = [];
+      // ─────────────────────────────────────────────────────────────
+      // INPUT (alt email textbox) → UI store
+      // ─────────────────────────────────────────────────────────────
+      root.addEventListener('input', (ev) => {
+        const container = getContainer(ev);
+        if (!container) return;
 
-        const emailInputs = root.querySelectorAll('input[data-act="hr-weekly-val-email-toggle"]');
-        for (const cb of Array.from(emailInputs || [])) {
-          if (!cb || cb.checked !== true) continue;
+        const altIn = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-alt-email"]')
+          : null;
 
-          const tsid = String(cb.getAttribute('data-timesheet-id') || '').trim();
-          const fp = String(cb.getAttribute('data-issue-fingerprint') || '').trim();
-          const k = keyFor(tsid, fp);
-          if (!k) continue;
+        if (!altIn) return;
 
-          const rawRow = rawMap.get(k) || null;
-          if (!rawRow) continue;
+        const tsid = safeStr(altIn.getAttribute('data-timesheet-id') || '');
+        const fp = safeStr(altIn.getAttribute('data-issue-fingerprint') || '');
+        if (!tsid || !fp) return;
 
-          const reasonCode = String(rawRow.reason_code || '').toLowerCase();
-          const statusU = String(rawRow.status || '').toUpperCase();
-          if (statusU === 'VALIDATION_OK' || statusU === 'OK') continue;
+        const key = `${tsid}|${fp}`;
+        const ui = ensureUi();
 
-          // Only mismatch reasons allowed for email
-          if (!(reasonCode === 'actual_hours_mismatch' || reasonCode === 'start_end_mismatch' || reasonCode === 'break_minutes_mismatch')) {
-            continue;
-          }
+        const v = safeStr(altIn.value || '');
+        if (v) ui.altEmailByKey.set(key, v);
+        else ui.altEmailByKey.delete(key);
 
-          // Alt email from input or store
-          let alt = '';
-          const altEl = root.querySelector(`input[data-act="hr-weekly-val-alt-email"][data-timesheet-id="${tsid}"][data-issue-fingerprint="${fp}"]`);
-          if (altEl) alt = String(altEl.value || '').trim();
-          if (!alt && ui.altEmailByKey instanceof Map && ui.altEmailByKey.has(k)) {
-            alt = String(ui.altEmailByKey.get(k) || '').trim();
-          }
+        window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+      }, true);
 
-          const recipientMissing = (rawRow.recipient_missing === true);
-          if (recipientMissing && !alt) {
-            missingAltRequired.push(k);
-          }
+      // ─────────────────────────────────────────────────────────────
+      // CHANGE (checkboxes) → UI store
+      // ─────────────────────────────────────────────────────────────
+      root.addEventListener('change', (ev) => {
+        const container = getContainer(ev);
+        if (!container) return;
 
-          emailActions.push({
-            timesheet_id: tsid,
-            issue_fingerprint: fp,
-            reason_code: reasonCode,
-            hr_row_id: rawRow.hr_row_id ? String(rawRow.hr_row_id) : null,
-            staff_norm: rawRow.staff_norm ? String(rawRow.staff_norm) : null,
-            hospital_norm: rawRow.trust_norm ? String(rawRow.trust_norm) : null,
-            work_date: rawRow.date_local || rawRow.work_date || rawRow.date || rawRow.shift_date || null,
-            alternative_email: alt || null
-          });
-        }
+        const cbEmail = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-email-toggle"]')
+          : null;
 
-        if (missingAltRequired.length) {
-          alert(
-            'Alternative Email is required for one or more selected emails (default recipient is unavailable).\n\n' +
-            'Please enter an Alternative Email for the selected mismatch group(s) before finalising.'
-          );
+        if (cbEmail) {
+          const tsid = safeStr(cbEmail.getAttribute('data-timesheet-id') || '');
+          const fp = safeStr(cbEmail.getAttribute('data-issue-fingerprint') || '');
+          if (!tsid || !fp) return;
+
+          const ui = ensureUi();
+          const key = `${tsid}|${fp}`;
+          ui.emailSelection.set(key, !!cbEmail.checked);
+
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
           return;
         }
 
-        // Build invalidation_actions from DOM invalidate toggles that are checked
-        const invalidationActions = [];
-        const invInputs = root.querySelectorAll('input[data-act="hr-weekly-val-invalidate-toggle"]');
-        for (const cb of Array.from(invInputs || [])) {
-          if (!cb || cb.checked !== true) continue;
+        const cbInv = ev.target && ev.target.closest
+          ? ev.target.closest('input[data-act="hr-weekly-val-invalidate-toggle"]')
+          : null;
 
-          const tsid = String(cb.getAttribute('data-timesheet-id') || '').trim();
-          const ck = String(cb.getAttribute('data-comparison-key') || '').trim();
-          if (!tsid || !ck) continue;
+        if (cbInv) {
+          const tsid = safeStr(cbInv.getAttribute('data-timesheet-id') || '');
+          const ck = safeStr(cbInv.getAttribute('data-comparison-key') || '');
+          if (!tsid || !ck) return;
 
-          invalidationActions.push({
-            timesheet_id: tsid,
-            comparison_key: ck,
-            invalidate: true
-          });
+          const ui = ensureUi();
+          const key = `${tsid}|${ck}`;
+          ui.invalidationSelection.set(key, !!cbInv.checked);
+
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+          return;
+        }
+      }, true);
+
+      // ─────────────────────────────────────────────────────────────
+      // CLICK (buttons) → actions
+      // ─────────────────────────────────────────────────────────────
+      root.addEventListener('click', async (ev) => {
+        const container = getContainer(ev);
+        if (!container) return;
+
+        const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+        if (!btn) return;
+
+        const act = safeStr(btn.getAttribute('data-act') || '');
+        if (!act) return;
+
+        // Reclassify (daily preview refresh)
+        if (act === 'hr-weekly-val-reclassify') {
+          try {
+            await refreshDaily();
+            // After refresh, re-seed any new default keys (without overriding explicit selections)
+            hydrateDefaultsFromPreview();
+          } catch (e) {
+            console.error('[HR_DAILY_WIRE] reclassify failed', e);
+            const msg = e?.message || 'Reclassify failed.';
+            if (window.__toast) window.__toast(msg); else alert(msg);
+          }
+          return;
         }
 
-        const ok = window.confirm('Are you sure you are ready to finalise validations?');
-        if (!ok) return;
+        // Resolve candidate
+        if (act === 'hr-weekly-val-resolve-candidate') {
+          try {
+            const idx = Number(safeStr(btn.getAttribute('data-row-idx') || ''));
+            if (!Number.isFinite(idx) || idx < 0) throw new Error('Invalid row index for Assign candidate.');
 
-        const result = await applyHrRotaValidation(impId, emailActions, invalidationActions);
+            const adapted = getAdaptedPreview();
+            const unr = Array.isArray(adapted?.rows) ? adapted.rows : [];
+            const urow = (idx >= 0 && idx < unr.length) ? unr[idx] : null;
+            const hrRowId = urow && urow.hr_row_id ? String(urow.hr_row_id).trim() : '';
+            if (!hrRowId) throw new Error('Missing hr_row_id for Assign candidate.');
 
-        // Minimal user feedback (the caller can show richer messages elsewhere)
-        const apply = (result && typeof result.apply === 'object') ? result.apply : {};
-        const post = (result && typeof result.post_commit === 'object') ? result.post_commit : {};
+            const rawDaily = getRawDaily();
+            if (!rawDaily) throw new Error('Missing HR_ROTA_DAILY_RAW preview state.');
 
-        const validationsUpserted = Number(apply.validations_upserted ?? 0) || 0;
-        const emailsQueued = Number(post.emails_queued ?? 0) || 0;
-        const emailFailuresCount = Array.isArray(post.email_failures) ? post.email_failures.length : 0;
+            const rawIdx = findRawRowIndexByHrRowId(rawDaily, hrRowId);
+            if (rawIdx < 0) throw new Error('Could not locate the daily row to resolve candidate.');
 
-        alert(
-          `Applied daily validation.\n\n` +
-          `Validations upserted: ${validationsUpserted}\n` +
-          `Emails queued: ${emailsQueued}` +
-          (emailFailuresCount ? `\nEmail failures: ${emailFailuresCount}` : '')
-        );
+            if (typeof openHrRotaAssignCandidateModal !== 'function') {
+              throw new Error('openHrRotaAssignCandidateModal is not available.');
+            }
 
-        await refreshDaily();
-      } catch (e) {
-        console.error('[HR_DAILY_WIRE] finalise failed', e);
-        alert(e?.message || 'Finalise failed.');
-      }
-      return;
+            openHrRotaAssignCandidateModal(impId, rawIdx);
+          } catch (e) {
+            console.error('[HR_DAILY_WIRE] resolve-candidate failed', e);
+            const msg = e?.message || 'Assign candidate failed.';
+            if (window.__toast) window.__toast(msg); else alert(msg);
+          }
+          return;
+        }
+
+        // "Fix band mapping" button is repurposed for daily:
+        // - grade mapping required -> grade→role modal
+        // - timesheet unresolved/ambiguous -> timesheet target selector modal
+        if (act === 'hr-weekly-val-fix-band') {
+          try {
+            const idx = Number(safeStr(btn.getAttribute('data-row-idx') || ''));
+            if (!Number.isFinite(idx) || idx < 0) throw new Error('Invalid row index for resolver.');
+
+            const adapted = getAdaptedPreview();
+            const unr = Array.isArray(adapted?.rows) ? adapted.rows : [];
+            const urow = (idx >= 0 && idx < unr.length) ? unr[idx] : null;
+            if (!urow) throw new Error('Could not locate unresolved row.');
+
+            const hrRowId = urow && urow.hr_row_id ? String(urow.hr_row_id).trim() : '';
+            if (!hrRowId) throw new Error('Missing hr_row_id for resolver.');
+
+            const rawDaily = getRawDaily();
+            if (!rawDaily) throw new Error('Missing HR_ROTA_DAILY_RAW preview state.');
+
+            const rawIdx = findRawRowIndexByHrRowId(rawDaily, hrRowId);
+            if (rawIdx < 0) throw new Error('Could not locate the daily row for this resolver.');
+
+            if (urow._daily_timesheet_target_ambiguous === true) {
+              if (typeof openHrRotaAssignRoleModal !== 'function') {
+                throw new Error('openHrRotaAssignRoleModal is not available.');
+              }
+              openHrRotaAssignRoleModal(impId, rawIdx);
+              return;
+            }
+
+            if (typeof openHrRotaResolveGradeRoleModal !== 'function') {
+              throw new Error('openHrRotaResolveGradeRoleModal is not available.');
+            }
+            openHrRotaResolveGradeRoleModal(impId, rawIdx);
+          } catch (e) {
+            console.error('[HR_DAILY_WIRE] fix-band/resolve failed', e);
+            const msg = e?.message || 'Resolve action failed.';
+            if (window.__toast) window.__toast(msg); else alert(msg);
+          }
+          return;
+        }
+
+        // Finalise (apply daily validation)
+        if (act === 'hr-weekly-val-finalise') {
+          const ui = ensureUi();
+
+          // In-flight guard (per import, stored on UI state)
+          if (ui._hrRotaDailyApplying === true) return;
+          ui._hrRotaDailyApplying = true;
+          window.__weeklyImportUi.HR_WEEKLY[impId] = ui;
+
+          try {
+            const rawDaily = getRawDaily();
+            if (!rawDaily) throw new Error('Missing HR_ROTA_DAILY_RAW preview state.');
+
+            const g = gatedByRawDaily(rawDaily);
+            if (g.unmatched || g.cand || g.grade || g.target) {
+              const parts = [];
+              if (g.cand) parts.push(`Candidate unresolved: ${g.cand}`);
+              if (g.grade) parts.push(`Grade/role unresolved: ${g.grade}`);
+              if (g.target) parts.push(`Timesheet match unresolved: ${g.target}`);
+              if (g.unmatched) parts.push(`Unmatched rows: ${g.unmatched}`);
+              throw new Error(`Cannot finalise yet.\n\n${parts.join('\n')}\n\nResolve these items and click Reclassify.`);
+            }
+
+            if (typeof applyHrRotaValidation !== 'function') {
+              throw new Error('applyHrRotaValidation is not available.');
+            }
+
+            const adapted = getAdaptedPreview();
+            const recipByKey = buildDefaultRecipientByKey(adapted);
+            const rawMap = buildRawRowMap(rawDaily);
+
+            const EMAIL_ELIGIBLE_REASONS = new Set([
+              'actual_hours_mismatch',
+              'start_end_mismatch',
+              'break_minutes_mismatch',
+              'missing_from_import'
+            ]);
+
+            // Build email_actions from canonical UI store (NOT DOM)
+            const emailActions = [];
+            const missingAlt = [];
+            const blockedEmail = [];
+
+            const selMap = (ui.emailSelection instanceof Map) ? ui.emailSelection : new Map();
+            const altMap = (ui.altEmailByKey instanceof Map) ? ui.altEmailByKey : new Map();
+
+            for (const [k, v] of selMap.entries()) {
+              if (v !== true) continue;
+
+              const it = parseEmailKey(k);
+              if (!it) continue;
+
+              const rawRow = rawMap.get(k) || null;
+              if (!rawRow) continue;
+
+              const reasonCode = String(rawRow.reason_code || '').toLowerCase();
+              if (!EMAIL_ELIGIBLE_REASONS.has(reasonCode)) continue;
+
+              // Frontend enforcement for "email blocked" (backend will also enforce)
+              const detail = (rawRow.details && typeof rawRow.details === 'object') ? rawRow.details : {};
+              const blockedReason = safeStr(
+                detail.email_blocked_reason ||
+                detail.emailBlockedReason ||
+                rawRow.email_blocked_reason ||
+                rawRow.emailBlockedReason ||
+                ''
+              );
+
+              const blockedFlag =
+                (rawRow.email_blocked === true) ||
+                (detail.email_blocked === true) ||
+                (detail.emailBlocked === true) ||
+                !!blockedReason;
+
+              if (blockedFlag) {
+                blockedEmail.push(k);
+                continue;
+              }
+
+              const alt = safeStr(altMap.get(k) || '');
+
+              // Alt required when default recipient unavailable OR can_email is false
+              const recipMeta = recipByKey.get(k) || null;
+              const recipEmail = recipMeta ? safeStr(recipMeta.recipient_email || '') : safeStr(rawRow.recipient_email || '');
+              const canEmailDefault = recipMeta ? (recipMeta.can_email === true) : (rawRow.can_email === true);
+
+              const needsAlt = (canEmailDefault !== true) || !recipEmail;
+              if (needsAlt && !alt) {
+                missingAlt.push(k);
+                continue;
+              }
+
+              emailActions.push({
+                timesheet_id: it.ts,
+                issue_fingerprint: it.fp,
+                reason_code: reasonCode || null,
+
+                hr_row_id: (rawRow.hr_row_id != null && String(rawRow.hr_row_id).trim()) ? String(rawRow.hr_row_id).trim() : null,
+                staff_norm: (rawRow.staff_norm != null && String(rawRow.staff_norm).trim()) ? String(rawRow.staff_norm).trim() : null,
+                hospital_norm: (rawRow.trust_norm != null && String(rawRow.trust_norm).trim())
+                  ? String(rawRow.trust_norm).trim()
+                  : ((rawRow.hospital_norm != null && String(rawRow.hospital_norm).trim()) ? String(rawRow.hospital_norm).trim() : null),
+
+                work_date: safeStr(rawRow.date_local || rawRow.work_date || rawRow.date || rawRow.shift_date || null) || null,
+                alternative_email: (alt ? alt : null)
+              });
+            }
+
+            if (blockedEmail.length) {
+              const first = blockedEmail[0];
+              throw new Error(
+                `Email is blocked for at least one selected mismatch (timesheet not confirmed / email not permitted).\n\n` +
+                `First blocked key: ${first}\n\n` +
+                `Untick the email checkbox for blocked items, or confirm the timesheet first.`
+              );
+            }
+
+            if (missingAlt.length) {
+              throw new Error(
+                'Alternative Email is required for one or more selected emails (default recipient is unavailable).\n\n' +
+                'Please enter an Alternative Email for the selected mismatch group(s) before finalising.'
+              );
+            }
+
+            // Build invalidation_actions from canonical UI store (NOT DOM)
+            const invalidationActions = [];
+            const invMap = (ui.invalidationSelection instanceof Map) ? ui.invalidationSelection : new Map();
+
+            for (const [k, v] of invMap.entries()) {
+              if (v !== true) continue;
+              const s = String(k || '');
+              const i = s.indexOf('|');
+              if (i <= 0) continue;
+
+              const tsid = s.slice(0, i).trim();
+              const ckey = s.slice(i + 1).trim();
+              if (!tsid || !ckey) continue;
+
+              invalidationActions.push({
+                timesheet_id: tsid,
+                comparison_key: ckey,
+                invalidate: true
+              });
+            }
+
+            const ok = window.confirm('Are you sure you are ready to finalise validations?');
+            if (!ok) return;
+
+            const result = await applyHrRotaValidation(impId, emailActions, invalidationActions);
+
+            const apply = (result && typeof result.apply === 'object') ? result.apply : {};
+            const post = (result && typeof result.post_commit === 'object') ? result.post_commit : {};
+
+            const validationsUpserted = Number(apply.validations_upserted ?? 0) || 0;
+            const emailsQueued = Number(post.emails_queued ?? 0) || 0;
+            const emailFailuresCount = Array.isArray(post.email_failures) ? post.email_failures.length : 0;
+
+            alert(
+              `Applied daily validation.\n\n` +
+              `Validations upserted: ${validationsUpserted}\n` +
+              `Emails queued: ${emailsQueued}` +
+              (emailFailuresCount ? `\nEmail failures: ${emailFailuresCount}` : '')
+            );
+
+            await refreshDaily();
+            hydrateDefaultsFromPreview();
+          } catch (e) {
+            console.error('[HR_DAILY_WIRE] finalise failed', e);
+            const msg = e?.message || 'Finalise failed.';
+            if (window.__toast) window.__toast(msg); else alert(msg);
+          } finally {
+            const ui2 = ensureUi();
+            ui2._hrRotaDailyApplying = false;
+            window.__weeklyImportUi.HR_WEEKLY[impId] = ui2;
+          }
+
+          return;
+        }
+      }, true);
+    } catch (e) {
+      console.error('[HR_DAILY_WIRE] bind failed', e);
     }
   });
 }
@@ -50912,196 +51805,7 @@ async function uploadImportFileToR2(file) {
   return { fileKey, filename };
 }
 
-async function openHrRotaResolveGradeRoleModal(importId, rowIndex) {
-  const enc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
-        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-      }[c]));
 
-  if (!importId) {
-    alert('Missing importId.');
-    return;
-  }
-
-  const st = window.__importSummaryState && window.__importSummaryState['HR_ROTA_DAILY'];
-  const rows = st && Array.isArray(st.rows) ? st.rows : [];
-  const idx = Number(rowIndex);
-  const row = (Number.isFinite(idx) && idx >= 0 && idx < rows.length) ? rows[idx] : null;
-
-  if (!row) {
-    alert('Row not found for grade/role resolution.');
-    return;
-  }
-
-  const incomingGradeNorm = String(row.incoming_grade_norm || '').trim();
-  const gradeRaw = String(row.grade_raw || incomingGradeNorm || '').trim();
-  if (!incomingGradeNorm) {
-    alert('This row is missing incoming_grade_norm, so it cannot be resolved.');
-    return;
-  }
-
-  // Prefer candidate roles if preview supplies them. We do NOT fetch anything extra here.
-  const rawRoles =
-    Array.isArray(row.candidate_roles) ? row.candidate_roles :
-    Array.isArray(row.candidateRoles) ? row.candidateRoles :
-    Array.isArray(row.roles) ? row.roles :
-    null;
-
-  const roleOptions = Array.isArray(rawRoles)
-    ? rawRoles
-        .map((x) => {
-          if (x == null) return '';
-          if (typeof x === 'string') return x;
-          if (typeof x === 'object' && x && x.code) return x.code;
-          return '';
-        })
-        .map((s) => String(s || '').trim().toUpperCase())
-        .filter(Boolean)
-    : [];
-
-  const clientName = String(st?.client_name || st?.summary?.client_name || row.client_name || '').trim();
-  const clientId = String(st?.client_id || st?.summary?.client_id || row.client_id || '').trim();
-
-  if (typeof showModal !== 'function') {
-    alert('showModal is not available.');
-    return;
-  }
-
-  const ROLE_SELECT_ID = 'hrRotaGradeRoleSelect';
-  const ROLE_INPUT_ID  = 'hrRotaGradeRoleInput';
-  const BAND_INPUT_ID  = 'hrRotaGradeBandInput';
-
-  const optionsHtml = roleOptions.length
-    ? roleOptions.map((r) => `<option value="${enc(r)}">${enc(r)}</option>`).join('')
-    : '';
-
-  const renderBody = () => {
-    const roleControl = roleOptions.length
-      ? `
-        <select class="input" id="${ROLE_SELECT_ID}">
-          <option value="">-- choose role --</option>
-          ${optionsHtml}
-        </select>
-        <div class="hint mini" style="margin-top:6px;">
-          Role options are taken from candidate roles (when provided in preview).
-        </div>
-      `
-      : `
-        <input class="input" id="${ROLE_INPUT_ID}" placeholder="Role code (e.g. RMN)" />
-        <div class="hint mini" style="margin-top:6px;">
-          No candidate roles were provided in preview for this row, so enter the role code manually.
-        </div>
-      `;
-
-    return `
-      <div class="form" id="hrRotaGradeResolve">
-        <div class="card">
-          <div class="row">
-            <label>Context</label>
-            <div class="controls">
-              <div class="mini">
-                Client: <strong>${enc(clientName || clientId || '—')}</strong><br/>
-                Import ID: <span class="mono">${enc(importId)}</span><br/>
-                Row: <span class="mono">${enc(String(idx + 1))}</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="row">
-            <label>Incoming grade</label>
-            <div class="controls">
-              <div class="mini">
-                Raw: <span class="mono">${enc(gradeRaw || '—')}</span><br/>
-                Normalised key: <span class="mono">${enc(incomingGradeNorm)}</span>
-              </div>
-              <div class="hint mini" style="margin-top:6px;">
-                This mapping is saved as (client_id, incoming_grade_norm) so you won’t be asked again for this client+grade.
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px;">
-          <div class="row">
-            <label>Role</label>
-            <div class="controls">
-              ${roleControl}
-            </div>
-          </div>
-
-          <div class="row">
-            <label>Band</label>
-            <div class="controls">
-              <input class="input" id="${BAND_INPUT_ID}" placeholder="Optional (e.g. Band 5)" />
-              <div class="hint mini" style="margin-top:6px;">
-                Leave blank unless band is required for rate resolution.
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  };
-
-  const saveFn = async () => {
-    const roleCode = roleOptions.length
-      ? String(document.getElementById(ROLE_SELECT_ID)?.value || '').trim().toUpperCase()
-      : String(document.getElementById(ROLE_INPUT_ID)?.value || '').trim().toUpperCase();
-
-    const bandNorm = String(document.getElementById(BAND_INPUT_ID)?.value || '').trim();
-
-    if (!roleCode) {
-      alert('Role is required.');
-      return false;
-    }
-
-    const payload = {
-      grade_role_mappings: [{
-        incoming_grade_norm: incomingGradeNorm,
-        role_code: roleCode,
-        band_norm: bandNorm || null
-      }]
-    };
-
-    // Prefer the project helper if present, otherwise call the resolve endpoint directly.
-    if (typeof postHrRotaResolveMappings === 'function') {
-      await postHrRotaResolveMappings(importId, payload);
-    } else {
-      if (typeof authFetch !== 'function' || typeof API !== 'function') {
-        throw new Error('authFetch/API not available to persist grade mapping.');
-      }
-      const res = await authFetch(API(`/api/imports/hr-rota/${encodeURIComponent(importId)}/resolve-conflicts`), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const txt = await res.text().catch(() => '');
-      if (!res.ok) throw new Error(txt || `Resolve grade/role failed (${res.status})`);
-    }
-
-    if (typeof refreshHrRotaSummary === 'function') {
-      await refreshHrRotaSummary(importId);
-    }
-
-    return true;
-  };
-
-  showModal(
-    'Resolve grade to role (daily)',
-    [{ key: 'main', label: 'Resolve' }],
-    (k) => (k === 'main' ? renderBody() : ''),
-    saveFn,
-    false,
-    null,
-    {
-      kind: 'hr-rota-grade-resolve',
-      noParentGate: true,
-      showSave: true,
-      onDismiss: () => {}
-    }
-  );
-}
 
 
 async function apiQueueHrRotaTsoEmail(row) {
