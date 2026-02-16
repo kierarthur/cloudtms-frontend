@@ -62140,7 +62140,11 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
     };
 
-    const excelFracToHHMM = (v) => {
+    // ✅ Hardened:
+    // - For fraction-of-day values (0..2) => HH:MM
+    // - For Excel serial date-time values (allowSerial=true) => use fractional part for HH:MM
+    // - For "total" duration columns we keep allowSerial=false (preserve existing behaviour)
+    const excelFracToHHMM = (v, allowSerial) => {
       const n = toNum(v);
       if (n == null) {
         const s = String(v ?? '').trim();
@@ -62152,11 +62156,50 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         }
         return String(v ?? '');
       }
-      if (n < 0 || n > 2) return String(v ?? '');
-      const mins = Math.round(n * 1440);
-      const hh = Math.floor(mins / 60);
-      const mm = mins % 60;
-      return `${pad2(hh)}:${pad2(mm)}`;
+
+      if (n < 0) return String(v ?? '');
+
+      // Common case: pure fraction-of-day (supports durations up to 48h)
+      if (n <= 2) {
+        const mins = Math.round(n * 1440);
+        const hh = Math.floor(mins / 60);
+        const mm = mins % 60;
+        return `${pad2(hh)}:${pad2(mm)}`;
+      }
+
+      // Serial date-time: use fractional part as time-of-day (only for start/end/from/to-like columns)
+      if (allowSerial === true && n > 2 && n < 90000) {
+        const frac = n - Math.floor(n);
+        if (frac >= 0 && frac <= 1) {
+          const mins = Math.round(frac * 1440);
+          const hh = Math.floor(mins / 60);
+          const mm = mins % 60;
+          return `${pad2(hh)}:${pad2(mm)}`;
+        }
+      }
+
+      return String(v ?? '');
+    };
+
+    // ✅ Improved break handling:
+    // - If 0 < n < 1 => Excel day-fraction => minutes = n * 1440
+    // - Else assume minutes and round to int
+    // - If HH:MM(/:SS) string => convert to minutes
+    const fmtBreakMins = (v) => {
+      const n = toNum(v);
+      if (n == null) {
+        const s = String(v ?? '').trim();
+        if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(s)) {
+          const parts = s.split(':');
+          const hh = Number(parts[0]) || 0;
+          const mm = Number(parts[1]) || 0;
+          const mins = (hh * 60) + mm;
+          return String(Math.round(mins));
+        }
+        return String(v ?? '');
+      }
+      if (n > 0 && n < 1) return String(Math.round(n * 1440));
+      return String(Math.round(n));
     };
 
     const fmtInt = (v) => {
@@ -62193,15 +62236,42 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       return '';
     };
 
+    // ✅ UPDATED: richer kind detection to handle Weekly HR "From/To" and break columns.
+    // colKinds[i] = { kind: 'text'|'date'|'time'|'break'|'money', allowSerial: boolean }
     const colKinds = [];
     for (let i = 0; i < colCount; i++) {
       const hn = normH(labelAt(i));
       let kind = 'text';
-      if (hn.includes('date')) kind = 'date';
-      else if (hn === 'start' || hn === 'end' || hn === 'total') kind = 'time';
-      else if (hn.includes('break') && hn.includes('minute')) kind = 'break';
-      else if (hn === 'commission' || hn.includes('commission') || hn === 'total cost' || hn.includes('total cost')) kind = 'money';
-      colKinds.push(kind);
+      let allowSerial = false;
+
+      if (hn.includes('date')) {
+        kind = 'date';
+      } else {
+        const isExplicitTime =
+          hn === 'from' || hn === 'to' ||
+          hn === 'start' || hn === 'end' || hn === 'total' ||
+          hn === 'from time' || hn === 'to time' || hn === 'start time' || hn === 'end time' ||
+          hn.endsWith(' from') || hn.endsWith(' to') || hn.endsWith(' start') || hn.endsWith(' end') ||
+          hn.endsWith(' from time') || hn.endsWith(' to time') || hn.endsWith(' start time') || hn.endsWith(' end time');
+
+        if (isExplicitTime) {
+          kind = 'time';
+          // Preserve existing behaviour for "total" duration columns: no serial-date-time fractional extraction.
+          allowSerial = (hn !== 'total');
+        } else if (hn.includes('break')) {
+          // Any break column is treated as break duration, except explicit "break start/end" which are times.
+          if (hn.includes('start') || hn.includes('end')) {
+            kind = 'time';
+            allowSerial = true;
+          } else {
+            kind = 'break';
+          }
+        } else if (hn === 'commission' || hn.includes('commission') || hn === 'total cost' || hn.includes('total cost')) {
+          kind = 'money';
+        }
+      }
+
+      colKinds.push({ kind, allowSerial });
     }
 
     // Download key
@@ -62276,12 +62346,13 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
             const cells = [];
             for (let i = 0; i < colCount; i++) {
               const v0 = (i < raw.length) ? raw[i] : '';
-              const k = colKinds[i] || 'text';
+              const meta = colKinds[i] || { kind: 'text', allowSerial: false };
+              const k = meta.kind || 'text';
 
               let out = '';
               if (k === 'date') out = excelSerialToDmy(v0);
-              else if (k === 'time') out = excelFracToHHMM(v0);
-              else if (k === 'break') out = fmtInt(v0);
+              else if (k === 'time') out = excelFracToHHMM(v0, meta.allowSerial === true);
+              else if (k === 'break') out = fmtBreakMins(v0);
               else if (k === 'money') out = fmtMoney(v0);
               else out = String(v0 ?? '');
 
