@@ -62143,7 +62143,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
     // ✅ Hardened:
     // - For fraction-of-day values (0..2) => HH:MM
     // - For Excel serial date-time values (allowSerial=true) => use fractional part for HH:MM
-    // - For "total" duration columns we keep allowSerial=false (preserve existing behaviour)
+    // - For duration columns (total/hours) we keep allowSerial=false
     const excelFracToHHMM = (v, allowSerial) => {
       const n = toNum(v);
       if (n == null) {
@@ -62159,7 +62159,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
 
       if (n < 0) return String(v ?? '');
 
-      // Common case: pure fraction-of-day (supports durations up to 48h)
+      // fraction-of-day (supports durations up to 48h)
       if (n <= 2) {
         const mins = Math.round(n * 1440);
         const hh = Math.floor(mins / 60);
@@ -62167,7 +62167,7 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
         return `${pad2(hh)}:${pad2(mm)}`;
       }
 
-      // Serial date-time: use fractional part as time-of-day (only for start/end/from/to-like columns)
+      // Serial date-time: fractional part (clock time only)
       if (allowSerial === true && n > 2 && n < 90000) {
         const frac = n - Math.floor(n);
         if (frac >= 0 && frac <= 1) {
@@ -62202,12 +62202,6 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       return String(Math.round(n));
     };
 
-    const fmtInt = (v) => {
-      const n = toNum(v);
-      if (n == null) return String(v ?? '');
-      return String(Math.round(n));
-    };
-
     const fmtMoney = (v) => {
       if (typeof v === 'string') {
         const s = v.trim();
@@ -62236,7 +62230,10 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       return '';
     };
 
-    // ✅ UPDATED: richer kind detection to handle Weekly HR "From/To" and break columns.
+    // ✅ UPDATED: column kind detection
+    // - From/To/Start/End => time (clock time, allowSerial=true)
+    // - Total/Hours => time (duration, allowSerial=false) so Excel fractions show HH:MM
+    // - Any Break => break duration (except break start/end which are time)
     // colKinds[i] = { kind: 'text'|'date'|'time'|'break'|'money', allowSerial: boolean }
     const colKinds = [];
     for (let i = 0; i < colCount; i++) {
@@ -62247,19 +62244,30 @@ async function openTimesheetEvidenceViewerExisting(evidenceItem) {
       if (hn.includes('date')) {
         kind = 'date';
       } else {
-        const isExplicitTime =
+        const isClockTimeHeader =
           hn === 'from' || hn === 'to' ||
-          hn === 'start' || hn === 'end' || hn === 'total' ||
+          hn === 'start' || hn === 'end' ||
           hn === 'from time' || hn === 'to time' || hn === 'start time' || hn === 'end time' ||
           hn.endsWith(' from') || hn.endsWith(' to') || hn.endsWith(' start') || hn.endsWith(' end') ||
           hn.endsWith(' from time') || hn.endsWith(' to time') || hn.endsWith(' start time') || hn.endsWith(' end time');
 
-        if (isExplicitTime) {
+        const isDurationHeader =
+          hn === 'total' ||
+          hn === 'hours' ||
+          hn === 'hrs' ||
+          hn === 'hours worked' ||
+          hn === 'actual hours' ||
+          hn === 'total hours' ||
+          hn.startsWith('hours ') ||
+          hn.endsWith(' hours');
+
+        if (isClockTimeHeader) {
           kind = 'time';
-          // Preserve existing behaviour for "total" duration columns: no serial-date-time fractional extraction.
-          allowSerial = (hn !== 'total');
+          allowSerial = true;
+        } else if (isDurationHeader) {
+          kind = 'time';
+          allowSerial = false;
         } else if (hn.includes('break')) {
-          // Any break column is treated as break duration, except explicit "break start/end" which are times.
           if (hn.includes('start') || hn.includes('end')) {
             kind = 'time';
             allowSerial = true;
