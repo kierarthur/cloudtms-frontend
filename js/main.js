@@ -49692,7 +49692,6 @@ async function loadCandidateCalendar(holder, candidateId, opts) {
 // ──────────────────────────────────────────────────────────────────────────────
 // IDs-only selection helpers (single source of truth: Set of selected IDs)
 // ──────────────────────────────────────────────────────────────────────────────
-
 function openImportColumnAliasesModal(opts) {
   // ✅ FIX: ensure we have a local HTML-escape helper in this closure
   // (prevents "ReferenceError: enc is not defined")
@@ -49705,14 +49704,99 @@ function openImportColumnAliasesModal(opts) {
         .replaceAll('"','&quot;')
         .replaceAll("'",'&#39;');
 
+  // ─────────────────────────────────────────────────────────────
+  // Core identities (field_key) per system_type
+  //   - UI shows only the relevant field_key options for the selected system_type
+  //   - These keys MUST align with the DB CHECK constraint you expanded
+  // ─────────────────────────────────────────────────────────────
+  const FIELD_DEFS = {
+    NHSP: [
+      { key: 'ASSIGNMENT',   label: 'ASSIGNMENT (role / assignment)' },
+      { key: 'DATE',         label: 'DATE (work date)' },
+      { key: 'REF',          label: 'REF (reference / booking ref)' },
+      { key: 'STAFF',        label: 'STAFF (worker name)' },
+      { key: 'UNIQUE_ID',    label: 'UNIQUE_ID (staff/agency id)' },
+      { key: 'TRUST',        label: 'TRUST (client / hospital)' },
+      { key: 'WARD',         label: 'WARD (ward / unit / dept)' },
+      { key: 'START',        label: 'START (start time)' },
+      { key: 'END',          label: 'END (end time)' },
+      { key: 'BREAK',        label: 'BREAK (break minutes)' },
+      { key: 'HOURS',        label: 'HOURS (worked/paid hours)' }
+    ],
+    HR_DAILY: [
+      { key: 'REQUEST_ID',     label: 'REQUEST_ID (Request Id / reference)' },
+      { key: 'DATE',           label: 'DATE (work date)' },
+      { key: 'STAFF',          label: 'STAFF (worker name)' },
+      { key: 'UNIT',           label: 'UNIT (ward / unit / location)' },
+      { key: 'GRADE',          label: 'GRADE (Request Grade / band)' },
+      { key: 'START',          label: 'START (start time)' },
+      { key: 'END',            label: 'END (end time)' },
+      { key: 'BREAK',          label: 'BREAK (break minutes)' },
+      { key: 'ACTUAL_HOURS',   label: 'ACTUAL_HOURS (actual/worked hours)' },
+      { key: 'BOOKED_HOURS',   label: 'BOOKED_HOURS (booked/planned hours)' },
+      { key: 'RATE',           label: 'RATE (rate)' },
+      { key: 'TIMESHEET_REASON', label: 'TIMESHEET_REASON (reason)' },
+      { key: 'FINALISED_DATE', label: 'FINALISED_DATE (finalised date)' },
+      { key: 'SUBMITTED_DATE', label: 'SUBMITTED_DATE (submitted date)' },
+      { key: 'SKILL',          label: 'SKILL (skill)' },
+      { key: 'AGENCY',         label: 'AGENCY (agency)' }
+    ],
+    HR_WEEKLY: [
+      { key: 'REQUEST_ID',     label: 'REQUEST_ID (Request Id / reference)' },
+      { key: 'DATE',           label: 'DATE (work date)' },
+      { key: 'STAFF',          label: 'STAFF (worker name)' },
+      { key: 'UNIT',           label: 'UNIT (ward / unit / location)' },
+      { key: 'GRADE',          label: 'GRADE (Request Grade / band)' },
+      { key: 'START',          label: 'START (start time)' },
+      { key: 'END',            label: 'END (end time)' },
+      { key: 'BOOKED_BREAK',   label: 'BOOKED_BREAK (booked break mins)' },
+      { key: 'ACTUAL_BREAK',   label: 'ACTUAL_BREAK (actual break mins)' },
+      { key: 'ACTUAL_HOURS',   label: 'ACTUAL_HOURS (actual/worked hours)' },
+      { key: 'TIMESHEET_REASON', label: 'TIMESHEET_REASON (reason)' },
+      { key: 'FINALISED_DATE', label: 'FINALISED_DATE (finalised date)' },
+      { key: 'SUBMITTED_DATE', label: 'SUBMITTED_DATE (submitted date)' },
+      { key: 'SKILL',          label: 'SKILL (skill)' },
+      { key: 'AGENCY',         label: 'AGENCY (agency)' }
+    ]
+  };
+
+  const ALLOWED_SYSTEMS = ['NHSP','HR_WEEKLY','HR_DAILY'];
+
+  const getAllowedFieldKeys = (sys) => {
+    const s = String(sys || '').toUpperCase();
+    const defs = FIELD_DEFS[s];
+    return Array.isArray(defs) ? defs.map(x => String(x.key || '').toUpperCase()).filter(Boolean) : [];
+  };
+
+  const getDefaultFieldKey = (sys) => {
+    const s = String(sys || '').toUpperCase();
+    if (s === 'NHSP') return 'ASSIGNMENT';
+    // For HR_* default to REQUEST_ID (core identity)
+    if (s === 'HR_WEEKLY' || s === 'HR_DAILY') return 'REQUEST_ID';
+    return 'ASSIGNMENT';
+  };
+
+  const normaliseSystem = (sys) => {
+    const s = String(sys || '').toUpperCase();
+    return ALLOWED_SYSTEMS.includes(s) ? s : 'NHSP';
+  };
+
+  const normaliseFieldForSystem = (sys, fieldKey) => {
+    const s = normaliseSystem(sys);
+    const fk = String(fieldKey || '').toUpperCase();
+    const allowed = getAllowedFieldKeys(s);
+    if (allowed.includes(fk)) return fk;
+    return getDefaultFieldKey(s);
+  };
+
   const seed = (opts && typeof opts === 'object') ? opts : {};
-  const initSystem = String(seed.system_type || 'NHSP').toUpperCase();
-  const initField  = String(seed.field_key   || 'ASSIGNMENT').toUpperCase();
+  const initSystem = normaliseSystem(seed.system_type || 'NHSP');
+  const initField  = normaliseFieldForSystem(initSystem, seed.field_key || (initSystem === 'NHSP' ? 'ASSIGNMENT' : 'REQUEST_ID'));
 
   // Local modal state (kept in closure; no persistence needed)
   const state = {
-    system_type: (['NHSP','HR_WEEKLY','HR_DAILY'].includes(initSystem) ? initSystem : 'NHSP'),
-    field_key:   (['ASSIGNMENT','GRADE'].includes(initField) ? initField : 'ASSIGNMENT'),
+    system_type: initSystem,
+    field_key: initField,
     include_inactive: !!seed.include_inactive,
     rows: [],
     loading: false,
@@ -49729,6 +49813,19 @@ function openImportColumnAliasesModal(opts) {
   };
 
   const kind = 'import-summary-import-column-aliases';
+
+  const renderFieldOptionsHtml = (sys, selectedKey) => {
+    const s = normaliseSystem(sys);
+    const defs = Array.isArray(FIELD_DEFS[s]) ? FIELD_DEFS[s] : [];
+    const sel = String(selectedKey || '').toUpperCase();
+
+    return defs.map(d => {
+      const k = String(d.key || '').toUpperCase();
+      const label = String(d.label || k);
+      if (!k) return '';
+      return `<option value="${enc(k)}" ${sel === k ? 'selected' : ''}>${enc(label)}</option>`;
+    }).filter(Boolean).join('');
+  };
 
   const renderTab = () => {
     const sys = state.system_type;
@@ -49781,6 +49878,8 @@ function openImportColumnAliasesModal(opts) {
 
     const editOpen = !!state.editing;
 
+    const fieldOptionsHtml = renderFieldOptionsHtml(sys, fk);
+
     return `
       <div class="form" id="importColumnAliasesModal">
         <div class="card">
@@ -49793,9 +49892,8 @@ function openImportColumnAliasesModal(opts) {
                 <option value="HR_DAILY" ${sys==='HR_DAILY'?'selected':''}>HR daily</option>
               </select>
 
-              <select class="input" id="ica_field" style="max-width:220px;">
-                <option value="ASSIGNMENT" ${fk==='ASSIGNMENT'?'selected':''}>ASSIGNMENT (NHSP)</option>
-                <option value="GRADE" ${fk==='GRADE'?'selected':''}>GRADE (HR)</option>
+              <select class="input" id="ica_field" style="max-width:260px;">
+                ${fieldOptionsHtml}
               </select>
 
               <label class="mini" style="display:flex;gap:6px;align-items:center;">
@@ -49821,7 +49919,7 @@ function openImportColumnAliasesModal(opts) {
             <div class="controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
               <div style="min-width:260px;flex:1;">
                 <div class="mini" style="margin-bottom:4px;">Alias name</div>
-                <input class="input" id="ica_add_alias" type="text" placeholder="e.g. Assignment, Request Grade, Grade…" value="${enc(state.add_alias_name||'')}" />
+                <input class="input" id="ica_add_alias" type="text" placeholder="e.g. Request Id, Start, End…" value="${enc(state.add_alias_name||'')}" />
               </div>
 
               <div style="min-width:260px;flex:2;">
@@ -49983,7 +50081,12 @@ function openImportColumnAliasesModal(opts) {
     if (selSystem && !selSystem.__icaWired) {
       selSystem.__icaWired = true;
       selSystem.addEventListener('change', () => {
-        state.system_type = String(selSystem.value || 'NHSP').toUpperCase();
+        const nextSys = normaliseSystem(selSystem.value || 'NHSP');
+        state.system_type = nextSys;
+
+        // If existing field_key is not valid for new system, reset to default for that system.
+        state.field_key = normaliseFieldForSystem(nextSys, state.field_key);
+
         cancelEdit();
         loadList();
       });
@@ -49992,7 +50095,8 @@ function openImportColumnAliasesModal(opts) {
     if (selField && !selField.__icaWired) {
       selField.__icaWired = true;
       selField.addEventListener('change', () => {
-        state.field_key = String(selField.value || 'ASSIGNMENT').toUpperCase();
+        const nextFk = String(selField.value || '').toUpperCase();
+        state.field_key = normaliseFieldForSystem(state.system_type, nextFk);
         cancelEdit();
         loadList();
       });
