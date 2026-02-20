@@ -1602,7 +1602,6 @@ body{
     </div>
   </div>
 </div>
-
   <!-- ===== Auth overlays ===== -->
   <div class="auth-overlay" id="loginOverlay" aria-hidden="true">
     <div class="auth-card">
@@ -1649,6 +1648,38 @@ body{
     </div>
   </div>
 
+  <!-- ✅ NEW: 2FA overlay -->
+  <div class="auth-overlay" id="tfaOverlay" aria-hidden="true">
+    <div class="auth-card">
+      <div class="auth-h"><div class="ttl">Verification code</div></div>
+      <form class="auth-f" id="tfaForm">
+        <div id="tfaMsg" class="success" style="display:none"></div>
+        <div id="tfaError" class="error" style="display:none"></div>
+
+        <div class="row">
+          <label>Enter the 6-digit code we emailed you</label>
+          <input
+            id="tfaCode"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxlength="6"
+            required
+          />
+        </div>
+
+        <div class="actions">
+          <span class="link" id="linkTfaBackToLogin">Back to login</span>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <button type="button" id="btnTfaResend">Resend code</button>
+            <button type="submit" class="primary">Verify</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div class="auth-overlay" id="resetOverlay" aria-hidden="true">
     <div class="auth-card">
       <div class="auth-h"><div class="ttl">Set a new password</div></div>
@@ -1679,11 +1710,11 @@ body{
 
   <!-- 1) Define the global base URL early -->
   <script>
-    window.BROKER_BASE_URL = window.BROKER_BASE_URL || 'https://cloudtms.kier-88a.workers.dev';
+
+
   </script>
 
   <!-- 2) Load the application logic -->
   <script src="./js/main.js"></script>
 </body>
 </html>
-
