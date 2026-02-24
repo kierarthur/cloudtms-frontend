@@ -484,8 +484,16 @@ function getVisibleColumnsForSection(section, rows) {
     (typeof GRID_COLUMN_META_DEFAULTS === 'object' &&
      GRID_COLUMN_META_DEFAULTS[section]) || {};
 
-  // Build catalog of known columns: defaults + first row's keys
+  // ✅ Build catalog of known columns: defaults + grid prefs keys + meta keys + first row's keys
+  // This keeps the visible column set stable even when rows is empty.
   const known = new Set(defaults);
+
+  // Include any keys the user has ever saved prefs for (even if data is currently empty)
+  try { Object.keys(colPrefs || {}).forEach((k) => known.add(k)); } catch {}
+  try { Object.keys(userMeta || {}).forEach((k) => known.add(k)); } catch {}
+  try { Object.keys(globalMeta || {}).forEach((k) => known.add(k)); } catch {}
+
+  // Also include keys from current dataset (when present)
   if (Array.isArray(rows) && rows.length > 0 && rows[0] && typeof rows[0] === 'object') {
     Object.keys(rows[0]).forEach((k) => known.add(k));
   }
@@ -498,7 +506,15 @@ function getVisibleColumnsForSection(section, rows) {
     };
 
     const selectable = (meta.selectable !== false); // default true
-    const visible    = (p.visible !== false);       // default true
+
+    // ✅ FIX: Visibility must NOT default to true for non-default columns.
+    // - defaults are visible by default
+    // - if user explicitly set visible true/false, respect it
+    // - otherwise hide (prevents "hundreds of columns" explosion)
+    const hasExplicitVisible = Object.prototype.hasOwnProperty.call(p, 'visible');
+    const visible = hasExplicitVisible
+      ? (p.visible !== false)
+      : (defaults.indexOf(k) >= 0);
 
     const order = (typeof p.order === 'number')
       ? p.order
@@ -2893,33 +2909,89 @@ async function refreshOpenWeeklyImportSummariesAfterContractSave() {
   }
 }
 
-async function authFetch(input, init={}){
-  const APILOG = (typeof window !== 'undefined' && !!window.__LOG_API) || (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+async function authFetch(input, init = {}) {
+  const APILOG =
+    (typeof window !== 'undefined' && !!window.__LOG_API) ||
+    (typeof __LOG_API !== 'undefined' && !!__LOG_API);
+
   const headers = new Headers(init.headers || {});
   if (SESSION?.accessToken) headers.set('Authorization', `Bearer ${SESSION.accessToken}`);
+
+  const url = (typeof input === 'string') ? input : (input?.url || '');
+  const method = (init.method || 'GET');
+
   if (APILOG) {
     const safeHeaders = {};
-    headers.forEach((v,k)=>{ safeHeaders[k] = (k.toLowerCase()==='authorization') ? '***' : v; });
-    const bodyPreview = typeof init.body === 'string' ? (init.body.length > 500 ? init.body.slice(0,500)+'…' : init.body) : init.body;
-    console.log('[authFetch] →', { url: typeof input==='string'?input:input?.url, method: (init.method||'GET'), headers: safeHeaders, body: bodyPreview });
+    headers.forEach((v, k) => {
+      safeHeaders[k] = (k.toLowerCase() === 'authorization') ? '***' : v;
+    });
+    const bodyPreview =
+      (typeof init.body === 'string')
+        ? (init.body.length > 500 ? init.body.slice(0, 500) + '…' : init.body)
+        : init.body;
+    console.log('[authFetch] →', { url, method, headers: safeHeaders, body: bodyPreview });
   }
-  let res = await fetch(input, { ...init, headers, credentials: init.credentials || 'omit' });
+
+  const doReq = async (hdrs) => {
+    return await fetch(input, { ...init, headers: hdrs, credentials: init.credentials || 'omit' });
+  };
+
+  let res = await doReq(headers);
+
   if (APILOG) {
-    try { const txt = await res.clone().text(); console.log('[authFetch] ←', res.status, res.ok, txt.slice(0,500)); } catch {}
+    try {
+      const txt = await res.clone().text();
+      console.log('[authFetch] ←', res.status, res.ok, txt.slice(0, 500));
+    } catch {}
   }
+
   if (res.status === 401) {
+    // ✅ If we are logged out or logging in, do NOT attempt refresh (prevents stale pollers breaking login UX)
+    try {
+      const st = String((typeof window !== 'undefined' && window.__authState) ? window.__authState : '');
+      if (st === 'LOGGED_OUT' || st === 'LOGIN_IN_PROGRESS' || !SESSION?.accessToken) {
+        return res;
+      }
+    } catch {
+      if (!SESSION?.accessToken) return res;
+    }
+
     const ok = await refreshToken();
+
+    // ✅ If refresh failed, refreshToken() may have performed a hard local reset + login overlay (only when appropriate).
     if (!ok) throw new Error('Unauthorised');
-    headers.set('Authorization', `Bearer ${SESSION.accessToken}`);
+
+    // Retry once with new access token
+    if (SESSION?.accessToken) headers.set('Authorization', `Bearer ${SESSION.accessToken}`);
+
     if (APILOG) console.log('[authFetch] retrying after 401');
-    res = await fetch(input, { ...init, headers, credentials: init.credentials || 'omit' });
+
+    res = await doReq(headers);
+
     if (APILOG) {
-      try { const txt2 = await res.clone().text(); console.log('[authFetch] ← (retry)', res.status, res.ok, txt2.slice(0,500)); } catch {}
+      try {
+        const txt2 = await res.clone().text();
+        console.log('[authFetch] ← (retry)', res.status, res.ok, txt2.slice(0, 500));
+      } catch {}
+    }
+
+    // ✅ If we still get 401 after a successful refresh, treat as hard-auth-loss and force clean logout UI.
+    if (res.status === 401) {
+      try { clearSession(); } catch {}
+      try { if (typeof openLogin === 'function') openLogin('Your session has expired. Please sign in again.'); } catch {}
+      try {
+        const err = (typeof byId === 'function') ? byId('loginError') : null;
+        if (err) {
+          err.textContent = 'Your session has expired. Please sign in again.';
+          err.style.display = 'block';
+        }
+      } catch {}
+      throw new Error('Unauthorised');
     }
   }
+
   return res;
 }
-
 // ===== Auth API calls =====
 
 // single, de-duplicated definition
@@ -3400,28 +3472,51 @@ async function performLogout(reason){
   }
 }
 
-function initAuthUI(){
+function initAuthUI() {
   // Buttons and links
-  byId('btnLogout').onclick = ()=>{ performLogout('manual'); };
+  byId('btnLogout').onclick = () => { performLogout('manual'); };
 
-  toggleVis('loginPassword','toggleLoginPw');
-  toggleVis('resetPw1','toggleResetPw1'); toggleVis('resetPw2','toggleResetPw2');
+  toggleVis('loginPassword', 'toggleLoginPw');
+  toggleVis('resetPw1', 'toggleResetPw1'); toggleVis('resetPw2', 'toggleResetPw2');
 
   byId('linkForgot').onclick = openForgot;
   byId('linkBackToLogin').onclick = openLogin;
 
   // ✅ If user clicks “Back to login” from reset flow, strip reset token from URL first
   byId('linkResetToLogin').onclick = () => {
-    try{
+    try {
       const u = new URL(location.href);
       u.searchParams.delete('k');
       u.searchParams.delete('token');
       history.replaceState(null, '', u.toString());
-    }catch{}
+    } catch {}
     openLogin();
   };
 
+  // ✅ Local helper to hard-clear any pending 2FA attempt (single source of truth)
+  const clearTfaState = () => {
+    try { sessionStorage.removeItem('cloudtms.tfa'); } catch {}
+    try { window.__tfaState = null; } catch {}
+    try {
+      const tfa = byId('tfaOverlay');
+      if (tfa) tfa.style.display = 'none';
+    } catch {}
+  };
+
+  // ✅ On load, drop any stale/expired persisted 2FA attempt (prevents “old attempt id” poisoning a new login)
+  try {
+    const st0 = JSON.parse(sessionStorage.getItem('cloudtms.tfa') || 'null');
+    const started = Number(st0?.started_at_ms || 0);
+    const expSec = Number(st0?.expires_in || 0);
+    if (started && expSec && (started + expSec * 1000) < (Date.now() - 1000)) {
+      clearTfaState();
+    }
+  } catch {}
+
   const showTfaUi = (challengeId, expiresIn, policy) => {
+    // Always replace any previous attempt with the new one
+    clearTfaState();
+
     // Persist state (helps if the page reloads while waiting)
     const st = {
       challenge_id: String(challengeId || ''),
@@ -3432,6 +3527,8 @@ function initAuthUI(){
     try { sessionStorage.setItem('cloudtms.tfa', JSON.stringify(st)); } catch {}
     try { window.__tfaState = st; } catch {}
 
+    try { window.__authState = 'LOGIN_IN_PROGRESS'; } catch {}
+
     const tfaOverlay = byId('tfaOverlay');
     if (tfaOverlay) {
       // Hide others
@@ -3441,7 +3538,6 @@ function initAuthUI(){
 
       tfaOverlay.style.display = 'grid';
 
-      // Best-effort: show message/countdown if elements exist
       const msgEl = byId('tfaMsg');
       if (msgEl) {
         msgEl.textContent = 'We sent a verification code to your email. Enter it within 5 minutes.';
@@ -3460,7 +3556,8 @@ function initAuthUI(){
       const entered = String(window.prompt('Enter the 6-digit verification code we emailed you:') || '').trim();
       if (!entered) return;
       await apiVerify2fa(st.challenge_id, entered);
-      try { byId('loginOverlay').style.display='none'; } catch {}
+      try { window.__authState = 'AUTHENTICATED'; } catch {}
+      try { byId('loginOverlay').style.display = 'none'; } catch {}
       bootstrapApp();
     })().catch((e) => {
       const err = byId('loginError');
@@ -3468,6 +3565,7 @@ function initAuthUI(){
         err.textContent = e?.message || 'Verification failed';
         err.style.display = 'block';
       }
+      try { window.__authState = 'LOGGED_OUT'; } catch {}
       openLogin();
     });
   };
@@ -3478,28 +3576,64 @@ function initAuthUI(){
     if (tfaForm) {
       tfaForm.onsubmit = async (e) => {
         e.preventDefault();
+
+        const errEl = byId('tfaError');
+        if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
         const st = window.__tfaState || (() => {
           try { return JSON.parse(sessionStorage.getItem('cloudtms.tfa') || 'null'); } catch { return null; }
         })();
-
-        const errEl = byId('tfaError'); if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
 
         const codeEl = byId('tfaCode');
         const code = String(codeEl ? codeEl.value : '').trim();
 
         if (!st?.challenge_id) {
           if (errEl) { errEl.textContent = 'Challenge missing. Please sign in again.'; errEl.style.display = 'block'; }
+          clearTfaState();
+          try { window.__authState = 'LOGGED_OUT'; } catch {}
           openLogin();
           return;
         }
 
+        // ✅ Prevent parallel verifies
+        const submitBtn = tfaForm.querySelector ? tfaForm.querySelector('button[type="submit"]') : null;
+        try { if (submitBtn) submitBtn.disabled = true; } catch {}
+
         try {
           await apiVerify2fa(st.challenge_id, code);
+          try { window.__authState = 'AUTHENTICATED'; } catch {}
           try { byId('tfaOverlay').style.display = 'none'; } catch {}
           try { byId('loginOverlay').style.display = 'none'; } catch {}
           bootstrapApp();
         } catch (ex) {
-          if (errEl) { errEl.textContent = ex?.message || 'Invalid code'; errEl.style.display = 'block'; }
+          const msg = String(ex?.message || 'Invalid code');
+
+          // ✅ If backend indicates attempt mismatch/expiry, throw away attempt id and force a new login/code.
+          const looksLikeAttemptInvalid =
+            /expired/i.test(msg) ||
+            /mismatch/i.test(msg) ||
+            /invalid.*challenge/i.test(msg) ||
+            /challenge.*invalid/i.test(msg) ||
+            /challenge.*expired/i.test(msg) ||
+            /attempt/i.test(msg);
+
+          if (looksLikeAttemptInvalid) {
+            clearTfaState();
+            try { window.__authState = 'LOGGED_OUT'; } catch {}
+            openLogin();
+            try {
+              const loginErr = byId('loginError');
+              if (loginErr) {
+                loginErr.textContent = 'That verification code is no longer valid. Please sign in again to request a new code.';
+                loginErr.style.display = 'block';
+              }
+            } catch {}
+            return;
+          }
+
+          if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+        } finally {
+          try { if (submitBtn) submitBtn.disabled = false; } catch {}
         }
       };
     }
@@ -3507,28 +3641,44 @@ function initAuthUI(){
     const btnResend = byId('btnTfaResend');
     if (btnResend) {
       btnResend.onclick = async () => {
+        // ✅ Prevent parallel resends
+        try {
+          if (btnResend.dataset && btnResend.dataset.inflight === '1') return;
+          if (btnResend.dataset) btnResend.dataset.inflight = '1';
+        } catch {}
+
+        const errEl = byId('tfaError');
+        if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+        const msgEl = byId('tfaMsg');
+
         const st = window.__tfaState || (() => {
           try { return JSON.parse(sessionStorage.getItem('cloudtms.tfa') || 'null'); } catch { return null; }
         })();
 
-        const errEl = byId('tfaError'); if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-        const msgEl = byId('tfaMsg');
-
         if (!st?.challenge_id) {
           if (errEl) { errEl.textContent = 'Challenge missing. Please sign in again.'; errEl.style.display = 'block'; }
+          clearTfaState();
+          try { window.__authState = 'LOGGED_OUT'; } catch {}
           openLogin();
+          try { if (btnResend.dataset) btnResend.dataset.inflight = '0'; } catch {}
           return;
         }
 
         try {
           btnResend.disabled = true;
+
           const r = await apiResend2fa(st.challenge_id);
 
-          const expiresIn = Number(r.expires_in ?? r.ttl ?? 300) || 300;
-          const cooldown = Number(r.resend_cooldown_seconds ?? 30) || 30;
+          // ✅ If backend issues a NEW challenge id on resend, we must replace our stored attempt id.
+          const newChallengeId = String(r?.challenge_id || r?.challengeId || '').trim();
+          if (newChallengeId) st.challenge_id = newChallengeId;
+
+          const expiresIn = Number(r?.expires_in ?? r?.ttl ?? 300) || 300;
+          const cooldown = Number(r?.resend_cooldown_seconds ?? 30) || 30;
 
           st.expires_in = expiresIn;
           st.started_at_ms = Date.now();
+
           try { sessionStorage.setItem('cloudtms.tfa', JSON.stringify(st)); } catch {}
           try { window.__tfaState = st; } catch {}
 
@@ -3539,23 +3689,64 @@ function initAuthUI(){
 
           setTimeout(() => { try { btnResend.disabled = false; } catch {} }, Math.max(0, cooldown) * 1000);
         } catch (ex) {
-          if (errEl) { errEl.textContent = ex?.message || 'Could not resend code'; errEl.style.display = 'block'; }
-          try { btnResend.disabled = false; } catch {}
+          const msg = String(ex?.message || 'Could not resend code');
+
+          // If resend fails in a way that implies attempt is invalid, force re-login
+          const looksLikeAttemptInvalid =
+            /expired/i.test(msg) ||
+            /mismatch/i.test(msg) ||
+            /invalid.*challenge/i.test(msg) ||
+            /challenge.*invalid/i.test(msg) ||
+            /challenge.*expired/i.test(msg) ||
+            /attempt/i.test(msg);
+
+          if (looksLikeAttemptInvalid) {
+            clearTfaState();
+            try { window.__authState = 'LOGGED_OUT'; } catch {}
+            openLogin();
+            try {
+              const loginErr = byId('loginError');
+              if (loginErr) {
+                loginErr.textContent = 'Your verification session has expired. Please sign in again to request a new code.';
+                loginErr.style.display = 'block';
+              }
+            } catch {}
+          } else {
+            if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+            try { btnResend.disabled = false; } catch {}
+          }
+        } finally {
+          try { if (btnResend.dataset) btnResend.dataset.inflight = '0'; } catch {}
         }
       };
     }
 
     const linkBack = byId('linkTfaBackToLogin');
-    if (linkBack) linkBack.onclick = () => { try { byId('tfaOverlay').style.display='none'; } catch {} openLogin(); };
+    if (linkBack) linkBack.onclick = () => {
+      clearTfaState();
+      try { window.__authState = 'LOGGED_OUT'; } catch {}
+      openLogin();
+    };
   } catch {}
 
-  byId('loginForm').onsubmit = async (e)=>{
+  byId('loginForm').onsubmit = async (e) => {
     e.preventDefault();
+
+    // ✅ Any new login attempt must discard any previous pending challenge/attempt id.
+    clearTfaState();
+
+    try { window.__authState = 'LOGIN_IN_PROGRESS'; } catch {}
+
     const email = byId('loginEmail').value.trim();
     const pw = byId('loginPassword').value;
-    const err = byId('loginError'); err.style.display='none';
+    const err = byId('loginError'); err.style.display = 'none';
 
-    try{
+    // ✅ Prevent parallel login submits (double-challenge creation/races)
+    const form = byId('loginForm');
+    const submitBtn = form && form.querySelector ? form.querySelector('button[type="submit"]') : null;
+    try { if (submitBtn) submitBtn.disabled = true; } catch {}
+
+    try {
       const r = await apiLogin(email, pw);
 
       if (r && r.tfa_required === true) {
@@ -3563,8 +3754,10 @@ function initAuthUI(){
         return;
       }
 
+      try { window.__authState = 'AUTHENTICATED'; } catch {}
+
       if (typeof scheduleRefresh === 'function') scheduleRefresh();
-      byId('loginOverlay').style.display='none';
+      byId('loginOverlay').style.display = 'none';
 
       try {
         if (typeof IdleManager === 'object' && typeof IdleManager.startOrReset === 'function') {
@@ -3573,48 +3766,54 @@ function initAuthUI(){
       } catch {}
 
       bootstrapApp();
-    }catch(ex){
-      err.textContent = ex.message || 'Sign in failed'; err.style.display='block';
+    } catch (ex) {
+      try { window.__authState = 'LOGGED_OUT'; } catch {}
+      err.textContent = ex.message || 'Sign in failed';
+      err.style.display = 'block';
+    } finally {
+      try { if (submitBtn) submitBtn.disabled = false; } catch {}
     }
   };
 
-  byId('forgotForm').onsubmit = async (e)=>{
+  byId('forgotForm').onsubmit = async (e) => {
     e.preventDefault();
     const email = byId('forgotEmail').value.trim();
-    byId('forgotError').style.display='none';
-    byId('forgotMsg').style.display='none';
-    try{
+    byId('forgotError').style.display = 'none';
+    byId('forgotMsg').style.display = 'none';
+    try {
       await apiForgot(email);
-      byId('forgotMsg').textContent = 'If that email exists, a reset link has been sent.'; byId('forgotMsg').style.display='block';
-    }catch(ex){
-      byId('forgotError').textContent = ex.message || 'Could not send reset email'; byId('forgotError').style.display='block';
+      byId('forgotMsg').textContent = 'If that email exists, a reset link has been sent.';
+      byId('forgotMsg').style.display = 'block';
+    } catch (ex) {
+      byId('forgotError').textContent = ex.message || 'Could not send reset email';
+      byId('forgotError').style.display = 'block';
     }
   };
 
-  byId('resetForm').onsubmit = async (e)=>{
+  byId('resetForm').onsubmit = async (e) => {
     e.preventDefault();
     const p1 = byId('resetPw1').value, p2 = byId('resetPw2').value;
-    const err = byId('resetError'), ok = byId('resetMsg'); err.style.display='none'; ok.style.display='none';
-    if (p1.length < 8) { err.textContent='Use at least 8 characters'; err.style.display='block'; return; }
-    if (p1 !== p2) { err.textContent='Passwords do not match'; err.style.display='block'; return; }
+    const err = byId('resetError'), ok = byId('resetMsg'); err.style.display = 'none'; ok.style.display = 'none';
+    if (p1.length < 8) { err.textContent = 'Use at least 8 characters'; err.style.display = 'block'; return; }
+    if (p1 !== p2) { err.textContent = 'Passwords do not match'; err.style.display = 'block'; return; }
     const url = new URL(location.href); const token = url.searchParams.get('k') || url.searchParams.get('token');
-    if (!token){ err.textContent='Reset token missing. Use the email link again.'; err.style.display='block'; return; }
-    try{
+    if (!token) { err.textContent = 'Reset token missing. Use the email link again.'; err.style.display = 'block'; return; }
+    try {
       await apiReset(token, p1);
 
       // ✅ Strip reset token from URL so refresh does NOT reopen the reset overlay
-      try{
+      try {
         const u = new URL(location.href);
         u.searchParams.delete('k');
         u.searchParams.delete('token');
         history.replaceState(null, '', u.toString());
-      }catch{}
+      } catch {}
 
-      // ✅ Brief requirement: after reset, return to login so user signs in again
-      ok.textContent='Password updated. Please sign in.'; ok.style.display='block';
+      // ✅ After reset, return to login so user signs in again
+      ok.textContent = 'Password updated. Please sign in.'; ok.style.display = 'block';
       setTimeout(() => { try { openLogin(); } catch {} }, 250);
-    }catch(ex){
-      err.textContent = ex.message || 'Reset failed'; err.style.display='block';
+    } catch (ex) {
+      err.textContent = ex.message || 'Reset failed'; err.style.display = 'block';
     }
   };
 
@@ -3644,7 +3843,8 @@ function initAuthUI(){
   if (hasResetToken && !hasValidPersistedSession) openReset();
 }
 
-function clearSession(){
+
+function clearSession() {
   // stop refresh timers
   try { clearTimeout(refreshTimer); } catch {}
   refreshTimer = 0;
@@ -3652,78 +3852,174 @@ function clearSession(){
   // stop idle timers
   try { if (typeof IdleManager === 'object' && typeof IdleManager.stop === 'function') IdleManager.stop(); } catch {}
 
+  // ✅ stop background pollers that assume auth (changes heartbeat)
+  try {
+    const hb =
+      (typeof window !== 'undefined' && window.__changesHeartbeat && typeof window.__changesHeartbeat === 'object')
+        ? window.__changesHeartbeat
+        : (typeof window !== 'undefined' && window.__changeHeartbeat && typeof window.__changeHeartbeat === 'object')
+          ? window.__changeHeartbeat
+          : null;
+
+    if (hb) {
+      try { if (typeof hb.stop === 'function') hb.stop(); } catch {}
+      try { if (hb._timer) clearInterval(hb._timer); } catch {}
+      hb._timer = null;
+      hb._started = false;     // allow restart after re-login
+      hb._disabled = true;     // ✅ prevent focus/visibility wired pings from firing while logged out
+      hb._lastPingAtMs = 0;
+    }
+  } catch {}
+
   // clear any stored challenge state
   try { sessionStorage.removeItem('cloudtms.tfa'); } catch {}
-  try { if (window.__tfaState) window.__tfaState = null; } catch {}
+  try { if (typeof window !== 'undefined' && window.__tfaState) window.__tfaState = null; } catch {}
 
-  localStorage.removeItem('cloudtms.session');
-  sessionStorage.removeItem('cloudtms.session');
+  try { localStorage.removeItem('cloudtms.session'); } catch {}
+  try { sessionStorage.removeItem('cloudtms.session'); } catch {}
+
   SESSION = null;
-  renderUserChip();
+
+  // ✅ mirror globals so stale code can’t keep using an old window.SESSION/user
+  try {
+    if (typeof window !== 'undefined') {
+      window.SESSION = null;
+      window.__auth = window.__auth || {};
+      window.__auth.user = null;
+      window.__USER_ID = null;
+
+      // ✅ canonical auth state
+      window.__authState = 'LOGGED_OUT';
+    }
+  } catch {}
+
+  try { renderUserChip(); } catch {}
 }
 
-async function refreshToken(){
-  try{
-    const res = await fetch(API('/auth/refresh'), {
-      method:'POST',
-      credentials:'include',
-      headers:{'content-type':'application/json'},
-      body: JSON.stringify({})
-    });
-    if (!res.ok) { clearSession(); return false; }
 
-    const data  = await res.json().catch(() => ({}));
-    const token = data.access_token || data.token || data.accessToken;
-    const rawTtl = data.expires_in || data.token_ttl_sec || data.ttl || 3600;
-    const ttl   = Math.max(60, Number(rawTtl) || 3600);
-    const skew  = 30;
+async function refreshToken() {
+  // ✅ Single-flight refresh to prevent parallel refresh storms + races.
+  try {
+    if (refreshToken._inFlight) return await refreshToken._inFlight;
+  } catch {}
 
-    if (!token) { clearSession(); return false; }
-
-    // Preserve existing user; hydrate if missing id
-    let user = SESSION?.user || data.user || null;
-    if (!user || !user.id) {
+  refreshToken._inFlight = (async () => {
+    const forceLoggedOutUi = (msg) => {
+      // ✅ If we are already logged out, or a login is in progress, NEVER show "session expired" (prevents double-click login).
       try {
-        const meRes = await fetch(API('/api/me'), { headers: { 'Authorization': `Bearer ${token}` } });
-        if (meRes.ok) {
-          const meJson = await meRes.json().catch(()=> ({}));
-          user = (meJson && (meJson.user || meJson)) || user;
+        const st = String((typeof window !== 'undefined' && window.__authState) ? window.__authState : '');
+        if (st === 'LOGGED_OUT' || st === 'LOGIN_IN_PROGRESS') return;
+      } catch {}
+
+      // Ensure we do this once per “auth lost” episode (avoid UI thrash if many calls fail).
+      try {
+        const now = Date.now();
+        const last = Number(window.__authHardResetAtMs || 0);
+        if (now - last < 750) return;
+        window.__authHardResetAtMs = now;
+      } catch {}
+
+      try { clearSession(); } catch {}
+
+      try {
+        if (typeof openLogin === 'function') openLogin(msg || 'Your session has expired. Please sign in again.');
+      } catch {}
+
+      try {
+        const err = (typeof byId === 'function') ? byId('loginError') : null;
+        if (err) {
+          err.textContent = msg || 'Your session has expired. Please sign in again.';
+          err.style.display = 'block';
         }
       } catch {}
-      // Extra guard: fall back to persisted user if present
-      if (!user || !user.id) {
-        try {
-          const persisted = JSON.parse(localStorage.getItem('cloudtms.session')
-                           || sessionStorage.getItem('cloudtms.session') || 'null');
-          if (persisted?.user?.id) user = persisted.user;
-        } catch {}
-      }
-    }
-
-    // ✅ Persist returned policy and bump idle timers
-    const policy = (data && data.policy) || SESSION?.policy || null;
-
-    saveSession({
-      accessToken: token,
-      user,
-      policy,
-      exp: Math.floor(Date.now()/1000) + (ttl - skew)
-    });
+    };
 
     try {
-      if (typeof IdleManager === 'object' && typeof IdleManager.startOrReset === 'function') {
-        IdleManager.startOrReset(policy || null);
-      }
-    } catch {}
+      // ✅ Do not attempt refresh if we are not in an authenticated state.
+      try {
+        const st = String((typeof window !== 'undefined' && window.__authState) ? window.__authState : '');
+        if (st === 'LOGGED_OUT' || st === 'LOGIN_IN_PROGRESS') return false;
+      } catch {}
 
-    return true;
-  }catch{
-    clearSession();
-    return false;
+      const res = await fetch(API('/auth/refresh'), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({})
+      });
+
+      if (!res.ok) {
+        forceLoggedOutUi('Your session has expired. Please sign in again.');
+        return false;
+      }
+
+      const data = await res.json().catch(() => ({}));
+      const token = data.access_token || data.token || data.accessToken;
+      const rawTtl = data.expires_in || data.token_ttl_sec || data.ttl || 3600;
+      const ttl = Math.max(60, Number(rawTtl) || 3600);
+      const skew = 30;
+
+      if (!token) {
+        forceLoggedOutUi('Your session has expired. Please sign in again.');
+        return false;
+      }
+
+      // Preserve existing user; hydrate if missing id
+      let user = SESSION?.user || data.user || null;
+      if (!user || !user.id) {
+        try {
+          const meRes = await fetch(API('/api/me'), { headers: { 'Authorization': `Bearer ${token}` } });
+          if (meRes.ok) {
+            const meJson = await meRes.json().catch(() => ({}));
+            user = (meJson && (meJson.user || meJson)) || user;
+          }
+        } catch {}
+
+        // Extra guard: fall back to persisted user if present
+        if (!user || !user.id) {
+          try {
+            const persisted = JSON.parse(
+              localStorage.getItem('cloudtms.session') ||
+              sessionStorage.getItem('cloudtms.session') || 'null'
+            );
+            if (persisted?.user?.id) user = persisted.user;
+          } catch {}
+        }
+      }
+
+      // ✅ Persist returned policy and bump idle timers
+      const policy = (data && data.policy) || SESSION?.policy || null;
+
+      saveSession({
+        accessToken: token,
+        user,
+        policy,
+        exp: Math.floor(Date.now() / 1000) + (ttl - skew)
+      });
+
+      try {
+        if (typeof window !== 'undefined') window.__authState = 'AUTHENTICATED';
+      } catch {}
+
+      try {
+        if (typeof IdleManager === 'object' && typeof IdleManager.startOrReset === 'function') {
+          IdleManager.startOrReset(policy || null);
+        }
+      } catch {}
+
+      return true;
+    } catch {
+      forceLoggedOutUi('Your session has expired. Please sign in again.');
+      return false;
+    }
+  })();
+
+  try {
+    return await refreshToken._inFlight;
+  } finally {
+    try { refreshToken._inFlight = null; } catch {}
   }
 }
-
-
 
 async function apiForgot(email){
   const r = await fetch(API('/auth/forgot'), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ email })});
@@ -3737,7 +4033,60 @@ async function apiReset(token, newPassword){
 }
 
 // ===== Auth overlays wiring (login / forgot / reset) =====
-function openLogin(){ byId('loginOverlay').style.display='grid'; byId('forgotOverlay').style.display='none'; byId('resetOverlay').style.display='none'; }
+
+function openLogin(msg) {
+  // ✅ When showing login, ensure no stale 2FA attempt survives and no auth pollers keep running.
+  try { sessionStorage.removeItem('cloudtms.tfa'); } catch {}
+  try { if (typeof window !== 'undefined' && window.__tfaState) window.__tfaState = null; } catch {}
+
+  // ✅ Mark logged out state (suppresses "session expired" UI from stale background calls)
+  try { if (typeof window !== 'undefined') window.__authState = 'LOGGED_OUT'; } catch {}
+
+  try {
+    const hb =
+      (typeof window !== 'undefined' && window.__changesHeartbeat && typeof window.__changesHeartbeat === 'object')
+        ? window.__changesHeartbeat
+        : (typeof window !== 'undefined' && window.__changeHeartbeat && typeof window.__changeHeartbeat === 'object')
+          ? window.__changeHeartbeat
+          : null;
+
+    if (hb) {
+      try { if (typeof hb.stop === 'function') hb.stop(); } catch {}
+      try { if (hb._timer) clearInterval(hb._timer); } catch {}
+      hb._timer = null;
+      hb._started = false; // allow restart after successful login
+      hb._disabled = true; // ✅ prevent wired focus/visibility pings while on login
+      hb._lastPingAtMs = 0;
+    }
+  } catch {}
+
+  // Hide any 2FA overlay if present
+  try {
+    const tfa = byId('tfaOverlay');
+    if (tfa) tfa.style.display = 'none';
+  } catch {}
+
+  byId('loginOverlay').style.display = 'grid';
+  byId('forgotOverlay').style.display = 'none';
+  byId('resetOverlay').style.display = 'none';
+
+  // ✅ Only show a message if explicitly provided; otherwise clear any stale error.
+  try {
+    const err = byId('loginError');
+    if (err) {
+      const m = String(msg || '').trim();
+      if (m) {
+        err.textContent = m;
+        err.style.display = 'block';
+      } else {
+        err.textContent = '';
+        err.style.display = 'none';
+      }
+    }
+  } catch {}
+}
+
+
 function openForgot(){ byId('loginOverlay').style.display='none'; byId('forgotOverlay').style.display='grid'; byId('resetOverlay').style.display='none'; }
 function openReset(){ byId('loginOverlay').style.display='none'; byId('forgotOverlay').style.display='none'; byId('resetOverlay').style.display='grid'; }
 
@@ -3779,6 +4128,71 @@ let currentSelection = null;
 
 function renderTopNav(){
   const nav = byId('nav'); nav.innerHTML = '';
+
+  // ✅ NEW: hard safety reset for the global Delete button when NOT in a candidate/client VIEW modal.
+  // btnDelete is a global footer control that can otherwise retain stale label/onclick/title/class
+  // across section navigation, modal close, and after deletes.
+  try {
+    const btnDelGlobal = byId('btnDelete');
+
+    const hasModalStack = ((window.__modalStack?.length || 0) > 0);
+    const mcEnt = String((window.modalCtx && window.modalCtx.entity) ? window.modalCtx.entity : (typeof modalCtx !== 'undefined' && modalCtx?.entity ? modalCtx.entity : '') || '');
+    const inCandOrClientCtx = (mcEnt === 'candidates' || mcEnt === 'clients');
+
+    // If a modal stack exists, prefer the top frame identity for correctness.
+    const topFrame = hasModalStack ? window.__modalStack[window.__modalStack.length - 1] : null;
+    const topEnt   = String((topFrame && topFrame.entity) ? topFrame.entity : mcEnt || '');
+    const topMode  = String((topFrame && topFrame.mode) ? topFrame.mode : '').toLowerCase();
+
+    const inCandOrClientViewModal =
+      !!hasModalStack &&
+      (topEnt === 'candidates' || topEnt === 'clients') &&
+      (topMode === 'view');
+
+    if (btnDelGlobal) {
+      // If NOT in candidate/client view modal, fully reset/hide.
+      if (!inCandOrClientViewModal) {
+        btnDelGlobal.style.display = 'none';
+        btnDelGlobal.disabled = true;
+        btnDelGlobal.onclick = null;
+
+        // Reset label + styling to safe defaults
+        btnDelGlobal.textContent = 'Delete';
+        btnDelGlobal.className = 'btn btn-outline btn-sm';
+        btnDelGlobal.style.opacity = '';
+        btnDelGlobal.style.filter  = '';
+
+        // Clear tooltip + aria flags
+        btnDelGlobal.removeAttribute('title');
+        btnDelGlobal.removeAttribute('aria-disabled');
+        btnDelGlobal.removeAttribute('data-disabled');
+      }
+
+      // If we ARE in candidate/client view modal, do nothing here.
+      // The modal lifecycle (showModal/renderTop) owns enabling/tooltip/wiring based on eligibility.
+    }
+  } catch {}
+
+  // ✅ NEW: provide a canonical hook delete handlers can call (optional but safe)
+  // Ensures summary refresh after successful delete, and ensures global Delete button is reset.
+  try {
+    if (typeof window.__afterRecordDeleteCleanup !== 'function') {
+      window.__afterRecordDeleteCleanup = async function(entityKey, id) {
+        try {
+          // Close any open modals first (prevents stale modalCtx + prevents “ghost” footer buttons)
+          if ((window.__modalStack?.length || 0) > 0 || (window.modalCtx && window.modalCtx.entity)) {
+            try { discardAllModalsAndState(); } catch {}
+          }
+
+          // Always refresh the current summary view
+          try { await renderAll(); } catch {}
+
+          // Force a nav/header refresh so btnDelete is hidden/reset immediately
+          try { renderTopNav(); } catch {}
+        } catch {}
+      };
+    }
+  } catch {}
 
   // ensure per-section list + selection exist
   window.__listState = window.__listState || {};
@@ -4136,17 +4550,32 @@ function renderTopNav(){
         // Minimal quick-search filters by section
         let filters = null;
         if (currentSection === 'candidates') {
-          if (text.includes('@'))       filters = { email: text };
-          else if (text.replace(/\D/g,'').length >= 7) filters = { phone: text };
-          else if (text.includes(' ')) {
-            const [fn, ln] = text.split(' ').filter(Boolean);
-            filters = { first_name: fn || text, last_name: ln || '' };
-          } else filters = { first_name: text };
+          if (text.includes('@')) {
+            filters = { email: text };
+          } else if (text.replace(/\D/g,'').length >= 7) {
+            filters = { phone: text };
+          } else {
+            // ✅ FIX: single-token (and multi-token) candidate quick search must be free-text
+            // so searching "arthur" finds "Kier Arthur" (surname match).
+            filters = { q: text };
+          }
+
         } else if (currentSection === 'clients' || currentSection === 'umbrellas') {
-          filters = { name: text };
+          // ✅ FIX: use free-text q for consistent behaviour with backend quick-search
+          filters = { q: text };
+
         } else if (currentSection === 'contracts') {
           // free-text passthrough for contracts
           filters = { q: text };
+
+        } else if (currentSection === 'timesheets') {
+          // ✅ FIX: timesheets quick search must pass q into /api/timesheets/summary via listTimesheetsSummary
+          filters = { q: text };
+
+        } else if (currentSection === 'invoices') {
+          // ✅ Quick-search uses free-text q; backend expands via invoice_quicksearch_ids RPC
+          filters = { q: text };
+
         } else {
           const data = await loadSection();
           return renderSummary(data);
@@ -4156,6 +4585,11 @@ function renderTopNav(){
         sel.fingerprint = JSON.stringify({ section: currentSection, filters });
         sel.ids.clear();
 
+        if (currentSection === 'timesheets') {
+          const data = await loadSection();
+          return renderSummary(data);
+        }
+
         const rows = await search(currentSection, filters);
         renderSummary(rows);
       });
@@ -4163,7 +4597,6 @@ function renderTopNav(){
     }
   } catch {}
 }
-
 
 
 // NEW: advanced, section-aware search modal
@@ -6261,7 +6694,7 @@ async function search(section, filters = {}) {
     qs.set('order_dir', String(st.sort.dir || 'asc'));
   }
 
-  // ✅ NEW: include_count for correct paging when paging is active (pageSize != ALL)
+  // ✅ include_count for correct paging when paging is active (pageSize != ALL)
   // Applies to candidates, clients, umbrellas, contracts, invoices.
   if (pageSize !== 'ALL') {
     if (section === 'candidates' || section === 'clients' || section === 'umbrellas' || section === 'contracts' || section === 'invoices') {
@@ -6278,8 +6711,52 @@ async function search(section, filters = {}) {
 
   const safeJson = async (res) => { try { return await res.json(); } catch { return null; } };
 
+  const toast = (msg) => {
+    try {
+      if (typeof window.toast === 'function') return window.toast(msg);
+      if (typeof window.showToast === 'function') return window.showToast(msg);
+      if (typeof window.notify === 'function') return window.notify(msg);
+      if (typeof window.__toast === 'function') return window.__toast(msg);
+      console.log('[SEARCH][TOAST]', msg);
+    } catch {}
+  };
+
   const r = await authFetch(API(url));
   const j = await safeJson(r);
+
+  // ✅ Treat backend payload errors as failures (prevents silent empty-table + stuck sort)
+  // If candidates list breaks due to sort, auto-reset sort and retry once.
+  try {
+    const hasPayloadError = !!(j && typeof j === 'object' && !Array.isArray(j) && j.error);
+    const retryKey = sel.fingerprint;
+    const alreadyRetriedForThisFingerprint = (st && st.__searchRetryFingerprint === retryKey);
+
+    if (hasPayloadError) {
+      const errMsg = String(j.error || 'Search failed');
+      const sortKey = (st && st.sort && st.sort.key) ? String(st.sort.key) : '';
+
+      // Only auto-recover once per fingerprint, and only for candidates when a sort key is involved
+      if (section === 'candidates' && sortKey && !alreadyRetriedForThisFingerprint) {
+        st.__searchRetryFingerprint = retryKey;
+
+        // Reset sort to safe default (no order_by/order_dir sent → backend default order)
+        st.sort = { key: null, dir: 'asc' };
+
+        toast(`Sorting reset due to backend error: ${errMsg}`);
+
+        // Retry once with same filters (selection fingerprint will update inside the retry call)
+        return await search(section, filters);
+      }
+
+      // For all other cases, surface the error to the user and return empty rows.
+      toast(`Search failed: ${errMsg}`);
+    }
+
+    // Clear retry marker when response is clean (or array) so future requests can recover again
+    if (!hasPayloadError && st && st.__searchRetryFingerprint) {
+      st.__searchRetryFingerprint = null;
+    }
+  } catch {}
 
   // Normalize rows
   const rows =
@@ -6413,8 +6890,6 @@ async function getContract(contract_id) {
   return j || null;
 }
 
-
-
 async function upsertContract(payload, id /* optional */) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
   const patch = { ...payload };
@@ -6525,7 +7000,7 @@ async function upsertContract(payload, id /* optional */) {
     if (LOGC) console.warn('[CONTRACTS][UPSERT] logging/pre-seed failed', e);
   }
 
-   // ✅ CRITICAL: never send default_submission_mode unless overrideclientsettings is TRUE.
+  // ✅ CRITICAL: never send default_submission_mode unless overrideclientsettings is TRUE.
   // This prevents “Cannot change default_submission_mode after timesheets have been submitted”
   // when the user is only adding/removing weeks (calendar workflow) and the contract inherits client settings.
   try {
@@ -6546,17 +7021,76 @@ async function upsertContract(payload, id /* optional */) {
     if (LOGC) console.warn('[CONTRACTS][UPSERT] overrideclientsettings gate failed (non-fatal)', e);
   }
 
-  const res = await authFetch(API(url), {
-    method,
-    headers: { 'content-type': 'application/json' },
-    body: _json(patch)
-  });
+  const doReq = async (bodyObj) => {
+    const res = await authFetch(API(url), {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: _json(bodyObj)
+    });
+    return res;
+  };
 
+  const uiConfirm = async (title, message) => {
+    try {
+      if (typeof uiConfirmModal === 'function') {
+        return await uiConfirmModal(title, message, { kind: 'warn' });
+      }
+    } catch {}
+    return window.confirm(`${title}\n\n${message}`);
+  };
 
-  let data = null;
-  try { data = await res.json(); } catch (_) {}
+  const fmtClashes = (cl) => {
+    const arr = Array.isArray(cl) ? cl : [];
+    if (!arr.length) return '';
+    const lines = arr.slice(0, 12).map(x => {
+      const d = x?.date || x?.a_date || x?.b_date || '';
+      const a = `${x?.a_start || x?.proposed_start || ''}-${x?.a_end || x?.proposed_end || ''}`.replace(/^-|-$/g,'');
+      const b = `${x?.b_start || x?.existing_start || ''}-${x?.b_end || x?.existing_end || ''}`.replace(/^-|-$/g,'');
+      const cid = x?.b_contract_id || x?.existing_contract_id || x?.a_contract_id || '';
+      return `• ${d} ${a}${b ? ` overlaps ${b}` : ''}${cid ? ` (contract ${cid})` : ''}`;
+    });
+    return lines.join('\n') + (arr.length > 12 ? `\n…and ${arr.length - 12} more.` : '');
+  };
+
+  const tryParse = async (res) => {
+    let data = null;
+    let txt = '';
+    try { data = await res.json(); return { data, txt: '' }; } catch {}
+    try { txt = await res.text(); } catch {}
+    try { data = txt ? JSON.parse(txt) : null; } catch { data = null; }
+    return { data, txt };
+  };
+
+  let res = await doReq(patch);
+  let parsed = await tryParse(res);
+
+  // ✅ NEW: 409 SCHEDULE_CLASH handling (warn-only; user can continue)
+  if (res && res.status === 409) {
+    const err = parsed?.data?.error || parsed?.data?.code || null;
+    if (String(err || '').toUpperCase() === 'SCHEDULE_CLASH') {
+      const clashes = parsed?.data?.clashes || [];
+      const clashCount = Number(parsed?.data?.clash_count || clashes.length || 0);
+      const detail = fmtClashes(clashes);
+
+      const proceed = await uiConfirm(
+        'Schedule clash warning',
+        `Schedule clashes detected (${clashCount}).\n\n${detail}\n\nContinue anyway?`
+      );
+
+      if (!proceed) {
+        const msg = (parsed?.data && (parsed.data.error_message || parsed.data.message)) || 'Cancelled due to schedule clashes';
+        throw new Error(msg);
+      }
+
+      // Retry with force flag
+      const retryBody = { ...patch, force_schedule_clashes: true };
+      res = await doReq(retryBody);
+      parsed = await tryParse(res);
+    }
+  }
 
   if (!res || !res.ok) {
+    const data = parsed?.data || null;
     const msg =
       (data && (data.error || data.message || data.detail)) ||
       (res && res.statusText) ||
@@ -6564,6 +7098,8 @@ async function upsertContract(payload, id /* optional */) {
     if (LOGC) console.error('[CONTRACTS][UPSERT] error', { status: res?.status, msg, data });
     throw new Error(msg);
   }
+
+  const data = parsed?.data || null;
 
   if (LOGC) {
     console.log('[CONTRACTS][UPSERT] success', { method, id, status: res.status });
@@ -6625,7 +7161,65 @@ async function checkContractOverlap(payload /* {candidate_id,start_date,end_date
 }
 
 async function generateContractWeeks(contract_id) {
-  const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/generate-weeks`), { method: 'POST' });
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+
+  const uiConfirm = async (title, message) => {
+    try {
+      if (typeof uiConfirmModal === 'function') {
+        return await uiConfirmModal(title, message, { kind: 'warn' });
+      }
+    } catch {}
+    return window.confirm(`${title}\n\n${message}`);
+  };
+
+  const fmtClashes = (cl) => {
+    const arr = Array.isArray(cl) ? cl : [];
+    if (!arr.length) return '';
+    const lines = arr.slice(0, 12).map(x => {
+      const d = x?.date || x?.a_date || x?.b_date || '';
+      const a = `${x?.a_start || x?.proposed_start || ''}-${x?.a_end || x?.proposed_end || ''}`.replace(/^-|-$/g,'');
+      const b = `${x?.b_start || x?.existing_start || ''}-${x?.b_end || x?.existing_end || ''}`.replace(/^-|-$/g,'');
+      const cid = x?.b_contract_id || x?.existing_contract_id || x?.a_contract_id || '';
+      return `• ${d} ${a}${b ? ` overlaps ${b}` : ''}${cid ? ` (contract ${cid})` : ''}`;
+    });
+    return lines.join('\n') + (arr.length > 12 ? `\n…and ${arr.length - 12} more.` : '');
+  };
+
+  const doReq = async (payload) => {
+    return await authFetch(API(`/api/contracts/${_enc(contract_id)}/generate-weeks`), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    });
+  };
+
+  let r = await doReq({});
+
+  // ✅ 409 schedule clash handling (warn-only; retry with force)
+  if (r && r.status === 409) {
+    let txt = '';
+    let j = null;
+    try { txt = await r.text(); } catch {}
+    try { j = txt ? JSON.parse(txt) : null; } catch { j = null; }
+
+    const err = j?.error || j?.code || null;
+    if (String(err || '').toUpperCase() === 'SCHEDULE_CLASH') {
+      const clashes = j?.clashes || [];
+      const clashCount = Number(j?.clash_count || clashes.length || 0);
+      const detail = fmtClashes(clashes);
+
+      const proceed = await uiConfirm(
+        'Schedule clash warning',
+        `Schedule clashes detected (${clashCount}).\n\n${detail}\n\nContinue anyway?`
+      );
+
+      if (!proceed) throw new Error('Generate weeks cancelled due to schedule clashes.');
+      r = await doReq({ force_schedule_clashes: true });
+    } else {
+      if (LOGC) console.warn('[CONTRACTS][generate-weeks] 409 without SCHEDULE_CLASH', { txt, j });
+    }
+  }
+
   if (!r?.ok) throw new Error('Generate weeks failed');
   return r.json();
 }
@@ -8385,19 +8979,38 @@ function renderBucketLabelsEditor(ctx /* modalCtx */) {
     </div>`;
 }
 
-
 function _collectBucketLabelsFromForm(rootSel = '#contractForm') {
   const root = document.querySelector(rootSel);
   if (!root) return null;
-  const day   = root.querySelector('input[name="bucket_day"]')?.value?.trim();
-  const night = root.querySelector('input[name="bucket_night"]')?.value?.trim();
-  const sat   = root.querySelector('input[name="bucket_sat"]')?.value?.trim();
-  const sun   = root.querySelector('input[name="bucket_sun"]')?.value?.trim();
-  const bh    = root.querySelector('input[name="bucket_bh"]')?.value?.trim();
+
+  const dayEl   = root.querySelector('input[name="bucket_day"]');
+  const nightEl = root.querySelector('input[name="bucket_night"]');
+  const satEl   = root.querySelector('input[name="bucket_sat"]');
+  const sunEl   = root.querySelector('input[name="bucket_sun"]');
+  const bhEl    = root.querySelector('input[name="bucket_bh"]');
+
+  // ✅ Post-removal safety:
+  // If the bucket label inputs do not exist (UI removed), this must mean "no update" (NOT clear).
+  // Returning undefined ensures typical payload builders/JSON stringify omit the field.
+  const anyPresent = !!(dayEl || nightEl || satEl || sunEl || bhEl);
+  if (!anyPresent) return undefined;
+
+  // If UI exists but is incomplete, also treat as "no update" to avoid accidental clears.
+  const allPresent = !!(dayEl && nightEl && satEl && sunEl && bhEl);
+  if (!allPresent) return undefined;
+
+  const day   = dayEl.value?.trim();
+  const night = nightEl.value?.trim();
+  const sat   = satEl.value?.trim();
+  const sun   = sunEl.value?.trim();
+  const bh    = bhEl.value?.trim();
+
   const raw = { day, night, sat, sun, bh };
+
   // If all empty → treat as null; if partially filled → require full 5, else clear to null
   const filled = Object.values(raw).filter(Boolean).length;
   if (filled === 0) return null;
+
   const norm = normaliseBucketLabelsInput(raw);
   return norm || null;
 }
@@ -11557,25 +12170,43 @@ function pickersLocalFilterAndSort(entity, ids, query, sortKey, sortDir){
 // NEW: revalidateCandidateOnPick(id) / revalidateClientOnPick(id)
 // Fetches current detail and refreshes dataset cache before accept
 // ─────────────────────────────────────────────────────────────────────────────
-async function revalidateCandidateOnPick(id){
+async function revalidateCandidateOnPick(id) {
   const url  = API(`/api/candidates/${encodeURIComponent(id)}`);
   const resp = await authFetch(url);
   if (!resp || !resp.ok) throw new Error('Could not fetch candidate.');
-  const r = await resp.json();
-  window.__pickerData = window.__pickerData || { candidates:{ itemsById:{} } };
-  const ds = window.__pickerData.candidates ||= { itemsById:{} };
+
+  const raw = await resp.json();
+
+  // Support both shapes: { candidate:{...} } or flat row
+  const r = (raw && raw.candidate && typeof raw.candidate === 'object') ? raw.candidate : raw;
+
+  window.__pickerData = window.__pickerData || {};
+  const ds = (window.__pickerData.candidates && typeof window.__pickerData.candidates === 'object')
+    ? window.__pickerData.candidates
+    : (window.__pickerData.candidates = { since: null, itemsById: {} });
+
+  ds.itemsById = (ds.itemsById && typeof ds.itemsById === 'object') ? ds.itemsById : {};
+
   const proj = {
     id: r.id,
     display_name: r.display_name || `${r.first_name||''} ${r.last_name||''}`.trim(),
     first_name: r.first_name || '',
     last_name: r.last_name || '',
     email: r.email || '',
-    roles_display: Array.isArray(r.roles)? formatRolesSummary(r.roles) : (r.role||''),
+    roles_display: Array.isArray(r.roles) ? formatRolesSummary(r.roles) : (r.role || ''),
+
+    // ✅ 10.2 Include pay method fields in projection
+    pay_method: (r.pay_method != null ? String(r.pay_method) : null),
+    umbrella_id: (r.umbrella_id != null ? r.umbrella_id : null),
+
     active: r.active !== false
   };
-  ds.itemsById[String(r.id)] = proj;
-}
 
+  ds.itemsById[String(r.id)] = proj;
+
+  // ✅ 10.1 Return candidate details
+  return r;
+}
 async function revalidateClientOnPick(id){
   const url  = API(`/api/clients/${encodeURIComponent(id)}`);
   const resp = await authFetch(url);
@@ -11822,12 +12453,6 @@ function wirePickerLiveFilter(inputEl, tableEl) {
 function setContractFormValue(name, value) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
 
-  // Do not stage ward_hint at all (deprecated)
-  if (name === 'ward_hint') {
-    if (LOGC) console.log('[CONTRACTS] setContractFormValue ignored (ward_hint deprecated)');
-    return;
-  }
-
   let targetName = (name === 'default_pay_method_snapshot') ? 'pay_method_snapshot' : name;
 
   try {
@@ -11917,24 +12542,81 @@ function setContractFormValue(name, value) {
   window.modalCtx = window.modalCtx || {};
   const fs = (window.modalCtx.formState ||= {
     __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
-    main:{},
-    pay:{}
+    main: {},
+    pay: {}
   });
 
   const isRate = /^(paye_|umb_|charge_)/.test(targetName);
   const prev = isRate ? fs.pay[targetName] : fs.main[targetName];
 
+  const isAdHocField = (targetName === 'is_ad_hoc');
+
   let stored;
   if (el && el.type === 'checkbox') {
-    el.checked = !!value && value !== 'false' && value !== '0';
-    stored = el.checked ? 'on' : '';
+    if (isAdHocField) {
+      // ✅ Store a real boolean so explicit false survives stripEmpty() merges.
+      const v = (value === true) || (value === 1) ||
+        (String(value ?? '').trim().toLowerCase() === 'true') ||
+        (String(value ?? '').trim().toLowerCase() === 'on') ||
+        (String(value ?? '').trim().toLowerCase() === 'yes') ||
+        (String(value ?? '').trim() === '1');
+
+      el.checked = !!v;
+      stored = !!v;
+    } else {
+      el.checked = !!value && value !== 'false' && value !== '0';
+      stored = el.checked ? 'on' : '';
+    }
   } else if (el && el.type === 'radio') {
     stored = String(value ?? '');
     const group = form ? Array.from(form.querySelectorAll(`input[type="radio"][name="${CSS.escape(el.name)}"]`)) : [];
     for (const r of group) r.checked = (String(r.value) === stored);
   } else {
-    stored = (value == null ? '' : String(value));
+    if (isAdHocField) {
+      // ✅ Even if the checkbox element isn't found, keep boolean semantics for staging.
+      const v = (value === true) || (value === 1) ||
+        (String(value ?? '').trim().toLowerCase() === 'true') ||
+        (String(value ?? '').trim().toLowerCase() === 'on') ||
+        (String(value ?? '').trim().toLowerCase() === 'yes') ||
+        (String(value ?? '').trim() === '1');
+
+      stored = !!v;
+    } else {
+      stored = (value == null ? '' : String(value));
+    }
     if (el) el.value = stored;
+  }
+
+  // ✅ Mirror ad-hoc into modalCtx.data so render paths that read the row stay aligned immediately
+  if (isAdHocField) {
+    try {
+      window.modalCtx.data = window.modalCtx.data || {};
+      window.modalCtx.data.is_ad_hoc = stored;
+    } catch {}
+  }
+
+  // ✅ 6.2 Candidate clear defence (must run even if candidate_id already '' to prevent ghost display)
+  if (targetName === 'candidate_id' && String(stored || '').trim() === '') {
+    try {
+      fs.main = fs.main || {};
+      fs.main.candidate_display = '';
+    } catch {}
+    try {
+      window.modalCtx.data = window.modalCtx.data || {};
+      window.modalCtx.data.candidate_display = '';
+    } catch {}
+  }
+
+  // ✅ 6.1 Mirror rate fields into window.modalCtx.data.rates_json (even if unchanged)
+  if (isRate) {
+    try {
+      window.modalCtx.data = window.modalCtx.data || {};
+      const rz = window.modalCtx.data.rates_json;
+      if (!rz || typeof rz !== 'object' || Array.isArray(rz)) {
+        window.modalCtx.data.rates_json = {};
+      }
+      window.modalCtx.data.rates_json[targetName] = stored;
+    } catch {}
   }
 
   if (prev === stored) {
@@ -11973,8 +12655,6 @@ function setContractFormValue(name, value) {
 
   try { window.dispatchEvent(new CustomEvent('modal-dirty')); } catch {}
 }
-
-
 function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */) {
   if (!preset) return;
 
@@ -12245,9 +12925,29 @@ function applyRatePresetToContractForm(preset, payMethod /* 'PAYE'|'UMBRELLA' */
     });
   }
 }
-
 function mergeContractStateIntoRow(row, formState) {
   const base = { ...(row || {}) };
+
+  // ✅ Normalise std_schedule_json so renderers can safely index it (object, not string/null)
+  try {
+    const ss = base.std_schedule_json;
+    if (ss == null || ss === '') {
+      base.std_schedule_json = {};
+    } else if (typeof ss === 'string') {
+      const t = ss.trim();
+      if (!t) {
+        base.std_schedule_json = {};
+      } else {
+        const parsed = JSON.parse(t);
+        base.std_schedule_json =
+          (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+      }
+    } else if (typeof ss !== 'object' || Array.isArray(ss)) {
+      base.std_schedule_json = {};
+    }
+  } catch {
+    base.std_schedule_json = {};
+  }
 
   // Allow explicit formState injection (for testability), but keep backward compatibility.
   const fs =
@@ -13366,23 +14066,29 @@ function renderContractSettingsModal(ctx) {
   `;
 }
 
-
 function snapshotContractForm() {
-  const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
+  const fs = (window.modalCtx.formState ||= {
+    __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+    main: {},
+    pay: {}
+  });
 
   const form = document.querySelector('#contractForm');
-  const fromMain  = form ? Array.from(form.querySelectorAll('input, select, textarea')) : [];
+  const fromMain = form ? Array.from(form.querySelectorAll('input, select, textarea')) : [];
 
-  const ratesTab  = document.querySelector('#contractRatesTab');
+  const ratesTab = document.querySelector('#contractRatesTab');
   const fromRates = ratesTab ? Array.from(ratesTab.querySelectorAll('input, select, textarea')) : [];
 
-  const all = [...fromMain, ...fromRates];
+  // ✅ NEW: include Additional Rates tab inputs in snapshot
+  const extrasTab = document.querySelector('#contractAdditionalRatesTab');
+  const fromExtras = extrasTab ? Array.from(extrasTab.querySelectorAll('input, select, textarea')) : [];
+
+  const all = [...fromMain, ...fromRates, ...fromExtras];
 
   for (const el of all) {
     const name = el && el.name;
     if (!name) continue;
     if (el.disabled || el.readOnly || el.dataset.noCollect === 'true') continue;
-    if (name === 'ward_hint') continue; // do not stage ward_hint
 
     let v;
     if (el.type === 'checkbox') {
@@ -13405,9 +14111,76 @@ function snapshotContractForm() {
       fs.main[name] = v;
     }
   }
+
+  // ✅ NEW: build + stage authoritative additional_rates_json from DOM (if Extras tab exists)
+  if (extrasTab) {
+    try {
+      const normaliseFrequency = (raw) => {
+        if (!raw) return null;
+        const s = String(raw).trim().toUpperCase();
+        const ALLOWED = [
+          'ONE_PER_WEEK',
+          'ONE_PER_DAY',
+          'WEEKENDS_AND_BH_ONLY',
+          'WEEKDAYS_EXCL_BH_ONLY'
+        ];
+        return ALLOWED.includes(s) ? s : null;
+      };
+
+      const rows = [];
+
+      for (let i = 1; i <= 5; i++) {
+        const code = `EX${i}`;
+
+        const bnEl = extrasTab.querySelector(`input[name="extra_bucket_name_${i}"]`);
+        const unEl = extrasTab.querySelector(`input[name="extra_unit_name_${i}"]`);
+        const frEl = extrasTab.querySelector(`select[name="extra_frequency_${i}"]`);
+        const prEl = extrasTab.querySelector(`input[name="extra_pay_${i}"]`);
+        const crEl = extrasTab.querySelector(`input[name="extra_charge_${i}"]`);
+
+        const bucket_name = String(bnEl?.value || '').trim();
+        const unit_name_raw = String(unEl?.value || '').trim();
+        const freqRaw = String(frEl?.value || '').trim();
+        const payRaw = String(prEl?.value || '').trim();
+        const chargeRaw = String(crEl?.value || '').trim();
+
+        const hasAny = !!(bucket_name || unit_name_raw || freqRaw || payRaw || chargeRaw);
+        if (!hasAny) continue;
+
+        const payNum = payRaw === '' ? null : Number(payRaw);
+        const chargeNum = chargeRaw === '' ? null : Number(chargeRaw);
+        const frequency = normaliseFrequency(freqRaw) || 'ONE_PER_WEEK';
+
+        rows.push({
+          code,
+          bucket_name,
+          unit_name: unit_name_raw || null,
+          frequency,
+          pay_rate: Number.isFinite(payNum) ? payNum : null,
+          charge_rate: Number.isFinite(chargeNum) ? chargeNum : null
+        });
+      }
+
+      const finalArr = rows.length ? rows : null;
+
+      fs.main.additional_rates_json = finalArr;
+
+      // Mirror into modalCtx.data as safety net
+      try {
+        window.modalCtx.data = window.modalCtx.data || {};
+        window.modalCtx.data.additional_rates_json = (typeof structuredClone === 'function')
+          ? structuredClone(finalArr)
+          : (finalArr ? JSON.parse(JSON.stringify(finalArr)) : null);
+      } catch {
+        // If cloning fails, still at least set a direct reference
+        try {
+          window.modalCtx.data = window.modalCtx.data || {};
+          window.modalCtx.data.additional_rates_json = finalArr;
+        } catch {}
+      }
+    } catch {}
+  }
 }
-
-
 // Optional helper: align pay_method_snapshot to candidate; return hint if mismatch
 function prefillPayMethodFromCandidate(candidate) {
   if (!candidate) return '';
@@ -13449,7 +14222,6 @@ function renderContractMainTab(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
 
   const d = mergeContractStateIntoRow(ctx?.data || {});
-  const labelsBlock = renderBucketLabelsEditor({ data: d });
 
   const candVal   = d.candidate_id || '';
   const clientVal = d.client_id || '';
@@ -13510,11 +14282,28 @@ function renderContractMainTab(ctx) {
   const startUk = (d.start_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.start_date)) ? d.start_date : toUk(d.start_date);
   const endUk   = (d.end_date && /^\d{2}\/\d{2}\/\d{4}$/.test(d.end_date)) ? d.end_date : toUk(d.end_date);
 
-  const SS = d.std_schedule_json || {};
+  // Ensure std_schedule_json is usable as an object (defensive: sometimes arrives as JSON string)
+  let SS = d.std_schedule_json || {};
+  try {
+    if (typeof SS === 'string') {
+      const parsed = JSON.parse(SS);
+      SS = (parsed && typeof parsed === 'object') ? parsed : {};
+    }
+  } catch {
+    SS = {};
+  }
 
   const pick = (day, part) => {
-    const staged = d[`${day}_${part}`];
-    if (staged !== undefined && staged !== null && String(staged).trim() !== '') return String(staged).trim();
+    const key = `${day}_${part}`;
+
+    // ✅ IMPORTANT: if the staged field exists (even if blank), it must win (preserves clears)
+    if (Object.prototype.hasOwnProperty.call(d || {}, key)) {
+      const staged = d[key];
+      if (staged === null || staged === undefined) return '';
+      return String(staged).trim();
+    }
+
+    // fallback to template schedule
     if (part === 'break') {
       const v = SS?.[day]?.break_minutes;
       return (v === 0 || v) ? String(v) : '';
@@ -13629,9 +14418,34 @@ function renderContractMainTab(ctx) {
   const weVal = Number(d.week_ending_weekday_snapshot ?? 0);
   const weLabel = weekNames[isNaN(weVal) ? 0 : weVal];
 
+  // ✅ Ad hoc state must follow staged formState first, and accept 'on' / booleans consistently
+  const adHocRaw = triVal('is_ad_hoc');
+  const isAdHocChecked =
+    (adHocRaw === true) ||
+    (adHocRaw === 1) ||
+    (String(adHocRaw ?? '').trim().toLowerCase() === 'true') ||
+    (String(adHocRaw ?? '').trim() === '1') ||
+    (String(adHocRaw ?? '').trim().toLowerCase() === 'on') ||
+    (String(adHocRaw ?? '').trim().toLowerCase() === 'yes');
+
+  const adHocHint =
+    'Tick this box if shifts are ad hoc. This is important because schedules are not prepopulated into the workers timesheet in the app if this is ticked, because hours/days are not fixed';
+
   const schedGrid = `
-    <div class="row"><label class="section">Proposed schedule (Mon–Sun)</label></div>
-    <div class="sched-grid" style="min-width:0;flex:1">
+    <div class="row" style="grid-column:1 / -1"><label class="section">Proposed schedule (Mon–Sun)</label></div>
+    ${
+      isAdHocChecked
+        ? `<div class="row" style="grid-column:1 / -1;margin-top:2px">
+             <label></label>
+             <div class="controls">
+               <div class="mini" style="opacity:.85">
+                 <strong>Ad hoc is enabled:</strong> this schedule is kept for reference, but it will not be prepopulated into the worker app timesheet.
+               </div>
+             </div>
+           </div>`
+        : ``
+    }
+    <div class="sched-grid" style="grid-column:1 / -1;min-width:0">
       ${DAYS.map(([k,l]) => dayRow(k,l)).join('')}
     </div>
   `;
@@ -13761,7 +14575,17 @@ function renderContractMainTab(ctx) {
       </div>
 
       <div class="grid-2">
-        <div class="row"><label>Start date</label><div class="controls"><input class="input" name="start_date" value="${startUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
+        <div class="row"><label>Start date</label><div class="controls">
+          <input class="input" name="start_date" value="${startUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} />
+          <div style="display:flex;align-items:center;gap:18px;margin-top:8px">
+            <span title="${escapeHtml(adHocHint)}" style="cursor:help">Ad hoc shifts</span>
+            <input type="checkbox" name="is_ad_hoc" ${isAdHocChecked ? 'checked' : ''}
+              onchange="try{ if(typeof setContractFormValue==='function') setContractFormValue('is_ad_hoc', this.checked); }catch(e){}" />
+          </div>
+          <div class="mini" title="${escapeHtml(adHocHint)}" style="cursor:help;margin-top:4px">
+            ${adHocHint}
+          </div>
+        </div></div>
         <div class="row"><label>End date</label><div class="controls"><input class="input" name="end_date" value="${endUk}" placeholder="DD/MM/YYYY" required ${overlapChangeAttr} /></div></div>
       </div>
 
@@ -13790,13 +14614,8 @@ function renderContractMainTab(ctx) {
       </div>
 
       ${schedGrid}
-
-      ${labelsBlock}
     </form>`;
 }
-
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // UPDATED: renderContractRatesTab (adds logging only)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14253,234 +15072,561 @@ function openContractCloneAndExtend(contract_id) {
   const oldEnd   = iso(old?.end_date);
 
   // Defaults for the wizard
-  const defaultStart = (() => { const d=new Date((oldEnd||toYmd(new Date()))+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return toYmd(d); })();
-  const defaultEnd   = (() => { const d=new Date(defaultStart+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+84); return toYmd(d); })();
-  const defaultEndOld= (() => { const d=new Date(defaultStart+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1); return toYmd(d); })();
+  const defaultStartIso = (() => { const d=new Date((oldEnd||toYmd(new Date()))+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return toYmd(d); })();
+  const defaultEndIso   = (() => { const d=new Date(defaultStartIso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+84); return toYmd(d); })();
+  const defaultEndOldIso= (() => { const d=new Date(defaultStartIso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1); return toYmd(d); })();
 
-  const content = `
-    <div class="tabc" id="cloneExtendForm">
-      <div class="row"><label>New start</label>
-        <div class="controls"><input class="input" type="text" name="new_start_date" placeholder="DD/MM/YYYY" value="${formatIsoToUk(defaultStart)}" /></div>
-      </div>
-      <div class="row"><label>New end</label>
-        <div class="controls"><input class="input" type="text" name="new_end_date" placeholder="DD/MM/YYYY" value="${formatIsoToUk(defaultEnd)}" /></div>
-      </div>
+  // ✅ Persisted modal state (survives child picker modals because renderTab uses this)
+  const state = {
+    new_start_date_iso: defaultStartIso,
+    new_end_date_iso: defaultEndIso,
+    end_existing_on_iso: defaultEndOldIso,
 
-      <div class="row" style="margin-top:6px">
-        <label style="display:flex;align-items:center;gap:6px">
-          <input type="checkbox" name="end_existing_checked" checked />
-          End existing contract on
-        </label>
-        <div class="controls" style="margin-top:6px">
-          <input class="input" type="text" name="end_existing_on" placeholder="DD/MM/YYYY" value="${formatIsoToUk(defaultEndOld)}" />
-          <div class="mini" style="margin-top:4px">Default is New start − 1 day. Untick to keep the existing contract running.</div>
+    assign_existing_candidate: true,
+    leave_unassigned: false,
+
+    new_candidate_id: '',
+    candidate_label: '<Same as existing>'
+  };
+
+  const escHtml = (s) => String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+  const escAttr = (s) => escHtml(s).replace(/`/g, '&#96;');
+
+  const renderContent = () => {
+    const candControlsDisplay = state.assign_existing_candidate ? 'none' : 'flex';
+    const assignChecked = state.assign_existing_candidate ? 'checked' : '';
+    const unassignedChecked = (!state.assign_existing_candidate && state.leave_unassigned) ? 'checked' : '';
+    const label = state.candidate_label || (state.assign_existing_candidate ? '<Same as existing>' : (state.leave_unassigned ? '<Unassigned>' : '<Pick candidate or leave unassigned>'));
+
+    return `
+      <div class="tabc" id="cloneExtendForm">
+        <div class="row"><label>New start</label>
+          <div class="controls"><input class="input" type="text" name="new_start_date" placeholder="DD/MM/YYYY" value="${escAttr(formatIsoToUk(state.new_start_date_iso))}" /></div>
+        </div>
+        <div class="row"><label>New end</label>
+          <div class="controls"><input class="input" type="text" name="new_end_date" placeholder="DD/MM/YYYY" value="${escAttr(formatIsoToUk(state.new_end_date_iso))}" /></div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <label style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" name="assign_existing_candidate" ${assignChecked} />
+            Assign existing candidate
+          </label>
+          <div class="controls" style="margin-top:6px">
+            <div id="__ceCandidateControls" style="display:${candControlsDisplay};gap:8px;align-items:center;flex-wrap:wrap">
+              <button type="button" id="__cePickCandidate" class="btn">Choose replacement candidate…</button>
+              <label style="display:flex;align-items:center;gap:6px">
+                <input type="checkbox" id="__ceLeaveUnassigned" ${unassignedChecked} />
+                Leave unassigned
+              </label>
+              <div class="mini" style="margin-top:4px;flex-basis:100%">
+                If unassigned, the new contract will have no candidate.
+              </div>
+            </div>
+
+            <input type="hidden" name="new_candidate_id" value="${escAttr(state.new_candidate_id || '')}" />
+            <div class="mini" style="margin-top:6px">
+              <strong>Selected:</strong> <span id="__ceCandidateLabel">${escHtml(label)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <label>End existing on</label>
+          <div class="controls">
+            <input class="input" type="text" name="end_existing_on" placeholder="DD/MM/YYYY" value="${escAttr(formatIsoToUk(state.end_existing_on_iso))}" />
+            <div class="mini" style="margin-top:4px">Must be on or before New start − 1 day.</div>
+          </div>
+        </div>
+
+        <div class="mini" style="margin-top:10px">
+          This will create the successor contract via the backend Clone & Extend endpoint, then open it in the normal Contract modal.
         </div>
       </div>
+    `;
+  };
 
-      <div class="mini" style="margin-top:10px">
-        After this, the successor opens in the normal contract modal (Create mode). You can edit Main / Rates / Calendar before saving.
-      </div>
-    </div>
-  `;
+  const uiConfirm = async (title, message, opts = {}) => {
+    try {
+      if (typeof uiConfirmModal === 'function') {
+        return await uiConfirmModal(title, message, opts);
+      }
+    } catch {}
+    return window.confirm(`${title}\n\n${message}`);
+  };
+
+  const openWorkerNotePromptModalLocal = async ({ defaultText }) => {
+    const initial = String(defaultText || '').trim();
+    const res = window.prompt('Worker note (required):', initial || '');
+    if (res == null) return null;
+    const note = String(res || '').trim();
+    if (!note) {
+      alert('Worker note is required to split a week.');
+      return null;
+    }
+    return note;
+  };
+
+  const fmtClashes = (cl) => {
+    const arr = Array.isArray(cl) ? cl : [];
+    if (!arr.length) return '';
+    const lines = arr.slice(0, 12).map(x => {
+      const d = x?.date || x?.a_date || x?.b_date || '';
+      const a = `${x?.a_start || x?.proposed_start || ''}-${x?.a_end || x?.proposed_end || ''}`.replace(/^-|-$/g,'');
+      const b = `${x?.b_start || x?.existing_start || ''}-${x?.b_end || x?.existing_end || ''}`.replace(/^-|-$/g,'');
+      const cid = x?.b_contract_id || x?.existing_contract_id || x?.a_contract_id || '';
+      return `• ${d} ${a}${b ? ` overlaps ${b}` : ''}${cid ? ` (contract ${cid})` : ''}`;
+    });
+    return lines.join('\n') + (arr.length > 12 ? `\n…and ${arr.length - 12} more.` : '');
+  };
+
+  const tryParseJson = async (res) => {
+    const text = await res.text().catch(() => '');
+    let j = null;
+    try { j = text ? JSON.parse(text) : null; } catch { j = null; }
+    return { text, json: j };
+  };
+
+  const getErrCode = (json, text, fallback) => {
+    const c = (json && (json.error || json.code)) ? String(json.error || json.code) : null;
+    if (c) return c;
+    const t = String(text || '').toUpperCase();
+    if (t.includes('SCHEDULE_CLASH')) return 'SCHEDULE_CLASH';
+    if (t.includes('ALREADY_SPLIT_WEEK')) return 'ALREADY_SPLIT_WEEK';
+    if (t.includes('SPLIT_WEEK_CONFIRM_REQUIRED')) return 'SPLIT_WEEK_CONFIRM_REQUIRED';
+    if (t.includes('SUBMITTED_BEYOND_CLOSE')) return 'SUBMITTED_BEYOND_CLOSE';
+    if (t.includes('BOUNDARY_WEEK_TIMESHEET_ALREADY_SUBMITTED')) return 'BOUNDARY_WEEK_TIMESHEET_ALREADY_SUBMITTED';
+    if (t.includes('ENDING_WEEK_SUBMITTED_CANNOT_TRUNCATE')) return 'ENDING_WEEK_SUBMITTED_CANNOT_TRUNCATE';
+    return fallback || null;
+  };
+
+  const prettyFailureMessage = (r) => {
+    const j = r?.json || {};
+    const code = String(r?.errCode || '').trim();
+
+    if (code === 'SUBMITTED_BEYOND_CLOSE') {
+      const we = j?.end_week_ending_date || j?.week_ending_date || '';
+      return `Cannot end/close the existing contract on that date because there are submitted timesheets after the requested end week${we ? ` (week ending ${we})` : ''}.`;
+    }
+    if (code === 'ENDING_WEEK_SUBMITTED_CANNOT_TRUNCATE') {
+      const closeTo = j?.close_to || j?.end_existing_on || '';
+      const we = j?.week_ending_date || j?.end_week_ending_date || '';
+      return `Cannot end the contract on ${closeTo || 'that date'} because the week${we ? ` ending ${we}` : ''} is already submitted.`;
+    }
+    if (code === 'BOUNDARY_WEEK_TIMESHEET_ALREADY_SUBMITTED') {
+      const we = j?.boundary_week_end || j?.week_end || j?.week_ending_date || '';
+      return `Cannot split this week because a timesheet has already been submitted for the boundary week${we ? ` (week ending ${we})` : ''}.`;
+    }
+    if (code === 'CONTRACT_NOT_FOUND') return 'Contract not found.';
+    if (code === 'INVALID_INPUT') {
+      const msg = j?.message ? String(j.message) : '';
+      return msg || 'Some of the dates/options are invalid. Please check and try again.';
+    }
+
+    const msg = (j && (j.message || j.error_message || j.detail)) ? String(j.message || j.error_message || j.detail) : '';
+    if (msg) return msg;
+
+    const txt = String(r?.text || '').trim();
+    if (txt && txt[0] !== '{' && txt[0] !== '[') return txt;
+
+    return 'Clone & Extend failed. Please check your inputs and try again.';
+  };
+
+  const wire = () => {
+    const root = document.getElementById('cloneExtendForm');
+    if (!root) return;
+    if (root.__ceWired) return;
+    root.__ceWired = true;
+
+    const startEl = root.querySelector('input[name="new_start_date"]');
+    const endEl   = root.querySelector('input[name="new_end_date"]');
+    const endOld  = root.querySelector('input[name="end_existing_on"]');
+
+    const chkAssign = root.querySelector('input[name="assign_existing_candidate"]');
+    const candControls = root.querySelector('#__ceCandidateControls');
+    const btnPick = root.querySelector('#__cePickCandidate');
+    const chkUnassigned = root.querySelector('#__ceLeaveUnassigned');
+    const hidCandId = root.querySelector('input[name="new_candidate_id"]');
+    const labelEl = root.querySelector('#__ceCandidateLabel');
+
+    // Guard: if DOM is missing, do nothing
+    if (!startEl || !endEl || !endOld || !chkAssign || !hidCandId || !labelEl) return;
+
+    try { attachUkDatePicker(startEl, { minDate: formatIsoToUk(oldStart) }); } catch {}
+    try { attachUkDatePicker(endEl,   { minDate: startEl.value, maxDate: null }); } catch {}
+    try { attachUkDatePicker(endOld,  { minDate: formatIsoToUk(oldStart), maxDate: startEl.value }); } catch {}
+
+    const isoMinusOne = (isoStr) => {
+      try {
+        const d = new Date(isoStr + 'T00:00:00Z');
+        d.setUTCDate(d.getUTCDate() - 1);
+        return toYmd(d);
+      } catch { return null; }
+    };
+
+    const syncDatesFromInputs = () => {
+      const sIso = parseUkDateToIso(startEl.value || '') || state.new_start_date_iso;
+      const eIso = parseUkDateToIso(endEl.value || '')   || state.new_end_date_iso;
+      const oIso = parseUkDateToIso(endOld.value || '')  || state.end_existing_on_iso;
+
+      state.new_start_date_iso = sIso;
+      state.new_end_date_iso = eIso;
+      state.end_existing_on_iso = oIso;
+    };
+
+    const clampEndOldToStartMinusOne = () => {
+      syncDatesFromInputs();
+
+      const startIso = state.new_start_date_iso || defaultStartIso;
+      const maxOldEndIso = isoMinusOne(startIso) || defaultEndOldIso;
+      const maxOldEndUk  = formatIsoToUk(maxOldEndIso);
+
+      endOld._maxIso = maxOldEndIso;
+      try { if (typeof endOld.__ukdpRepaint === 'function') endOld.__ukdpRepaint(); } catch {}
+
+      const eIso = parseUkDateToIso(endOld.value || '') || '';
+      if (!eIso || eIso > maxOldEndIso) {
+        endOld.value = maxOldEndUk;
+        state.end_existing_on_iso = maxOldEndIso;
+      }
+
+      if (LOGM) console.log('[CLONE] clampEndOldToStartMinusOne', { startIso, maxOldEndIso, endOldUk: endOld.value });
+    };
+
+    const updateCandidateUi = () => {
+      const assign = !!chkAssign.checked;
+      state.assign_existing_candidate = assign;
+
+      if (candControls) candControls.style.display = assign ? 'none' : 'flex';
+
+      if (assign) {
+        state.leave_unassigned = false;
+        state.new_candidate_id = '';
+        state.candidate_label = '<Same as existing>';
+
+        if (labelEl) labelEl.textContent = '<Same as existing>';
+        if (hidCandId) hidCandId.value = '';
+        if (chkUnassigned) chkUnassigned.checked = false;
+        if (btnPick) btnPick.disabled = false;
+        return;
+      }
+
+      const unassigned = !!(chkUnassigned && chkUnassigned.checked);
+      state.leave_unassigned = unassigned;
+
+      if (unassigned) {
+        state.new_candidate_id = '';
+        state.candidate_label = '<Unassigned>';
+
+        if (labelEl) labelEl.textContent = '<Unassigned>';
+        if (hidCandId) hidCandId.value = '';
+        if (btnPick) btnPick.disabled = true;
+        return;
+      }
+
+      if (btnPick) btnPick.disabled = false;
+
+      const id = String(hidCandId.value || '').trim() || String(state.new_candidate_id || '').trim();
+      if (id) {
+        state.new_candidate_id = id;
+        if (!state.candidate_label || state.candidate_label === '<Same as existing>' || state.candidate_label === '<Unassigned>' || state.candidate_label === '<Pick candidate or leave unassigned>') {
+          state.candidate_label = id;
+        }
+        if (labelEl) labelEl.textContent = state.candidate_label || id;
+      } else {
+        state.candidate_label = '<Pick candidate or leave unassigned>';
+        if (labelEl) labelEl.textContent = '<Pick candidate or leave unassigned>';
+      }
+    };
+
+    const pickCandidate = async () => {
+      // ✅ Correct integration: openCandidatePicker(onPick, options)
+      try {
+        if (typeof openCandidatePicker === 'function') {
+          await openCandidatePicker(async (picked) => {
+            const id = String(picked?.id || picked?.candidate?.id || '').trim();
+            const cand = picked?.candidate || null;
+
+            const label =
+              String(picked?.label || '').trim() ||
+              String(cand?.display_name || '').trim() ||
+              String(cand?.name || '').trim() ||
+              id;
+
+            if (!id) return;
+
+            // Persist selection into state (so it survives parent re-render)
+            state.assign_existing_candidate = false;
+            state.leave_unassigned = false;
+            state.new_candidate_id = id;
+            state.candidate_label = label || id;
+          }, { title: 'Select replacement candidate' });
+
+          return;
+        }
+      } catch (e) {
+        if (LOGM) console.warn('[CLONE] openCandidatePicker failed; falling back to prompt', e);
+      }
+
+      // Fallback prompt
+      const id = window.prompt('Enter replacement candidate id (or cancel):', '');
+      if (id == null) return;
+      const v = String(id || '').trim();
+      if (!v) return;
+
+      state.assign_existing_candidate = false;
+      state.leave_unassigned = false;
+      state.new_candidate_id = v;
+      state.candidate_label = v;
+    };
+
+    const onStartChange = () => {
+      // Sync start into state first
+      const sIso = parseUkDateToIso(startEl.value || '') || state.new_start_date_iso || defaultStartIso;
+      state.new_start_date_iso = sIso;
+
+      clampEndOldToStartMinusOne();
+
+      // Keep end date picker min synced
+      try { if (typeof endEl.setMinDate === 'function') endEl.setMinDate(startEl.value); } catch {}
+
+      if (LOGM) console.log('[CLONE] onStartChange', { newStartUk: startEl.value, endOldUk: endOld.value });
+    };
+
+    const onEndChange = () => {
+      const eIso = parseUkDateToIso(endEl.value || '') || state.new_end_date_iso || defaultEndIso;
+      state.new_end_date_iso = eIso;
+    };
+
+    const onEndOldChange = () => {
+      const oIso = parseUkDateToIso(endOld.value || '') || state.end_existing_on_iso || defaultEndOldIso;
+      state.end_existing_on_iso = oIso;
+    };
+
+    startEl.addEventListener('change', onStartChange, true);
+    startEl.addEventListener('blur',   onStartChange, true);
+
+    endEl.addEventListener('change', onEndChange, true);
+    endEl.addEventListener('blur',   onEndChange, true);
+
+    endOld.addEventListener('change', onEndOldChange, true);
+    endOld.addEventListener('blur',   onEndOldChange, true);
+
+    chkAssign.addEventListener('change', updateCandidateUi, true);
+    if (chkUnassigned) chkUnassigned.addEventListener('change', updateCandidateUi, true);
+    if (btnPick) btnPick.addEventListener('click', (e) => { e.preventDefault(); pickCandidate(); }, true);
+
+    clampEndOldToStartMinusOne();
+    updateCandidateUi();
+  };
 
   showModal(
     'Clone & Extend',
     [{ key:'c', title:'Successor window' }],
-    () => content,
+    () => renderContent(),
     async () => {
-      const LOGM = !!window.__LOG_MODAL;
       const root = document.getElementById('cloneExtendForm') || document;
 
       const newStartUk  = root.querySelector('input[name="new_start_date"]')?.value?.trim() || '';
       const newEndUk    = root.querySelector('input[name="new_end_date"]')?.value?.trim()   || '';
-      const endChk      = !!root.querySelector('input[name="end_existing_checked"]')?.checked;
       const endOldUk    = root.querySelector('input[name="end_existing_on"]')?.value?.trim() || '';
+
+      const assignExisting = !!root.querySelector('input[name="assign_existing_candidate"]')?.checked;
+      const leaveUnassigned = !!root.querySelector('#__ceLeaveUnassigned')?.checked;
+      const newCandidateId = (root.querySelector('input[name="new_candidate_id"]')?.value || '').trim() || null;
 
       const new_start_date = parseUkDateToIso(newStartUk);
       const new_end_date   = parseUkDateToIso(newEndUk);
-      const end_existing_on= endChk ? parseUkDateToIso(endOldUk) : null;
+      const end_existing_on= parseUkDateToIso(endOldUk);
 
-      if (!new_start_date || !new_end_date) { alert('Enter both new start and new end.'); return false; }
+      // Persist into state (so failed attempts keep what the user typed)
+      if (new_start_date) state.new_start_date_iso = new_start_date;
+      if (new_end_date)   state.new_end_date_iso = new_end_date;
+      if (end_existing_on) state.end_existing_on_iso = end_existing_on;
+
+      state.assign_existing_candidate = !!assignExisting;
+      state.leave_unassigned = !!leaveUnassigned;
+      state.new_candidate_id = (!assignExisting && !leaveUnassigned) ? (newCandidateId || '') : '';
+
+      if (!new_start_date || !new_end_date) { alert('Please enter both a New start date and a New end date.'); return false; }
       if (new_start_date > new_end_date)   { alert('New end must be on or after new start.'); return false; }
 
+      // End existing is hard-on; enforce <= new_start_date - 1
+      if (!end_existing_on) { alert('Please pick a valid end date for the existing contract.'); return false; }
       try {
-        const oldStartIso = (window.modalCtx?.data?.start_date) || '';
-        if (endChk) {
-          if (!end_existing_on) { alert('Pick a valid end date for the existing contract.'); return false; }
-          if (oldStartIso && end_existing_on < oldStartIso) { alert('Existing contract cannot end before its original start.'); return false; }
-          if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
-        }
-      } catch {}
-
-      // === NEW: pre-truncate the existing contract (blocking) BEFORE opening successor ===
-      let effectiveOldEnd = end_existing_on;
-      if (endChk) {
-        const oldId = String(window.modalCtx?.data?.id || '');
-        if (!oldId) { alert('Source contract id missing.'); return false; }
-
-        try {
-          console.groupCollapsed('[CLONE][pre-trim gate]');
-          const url  = API(`/api/contracts/${encodeURIComponent(oldId)}/truncate-tail`);
-          const init = {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ id: oldId, desired_end: end_existing_on })
-          };
-          console.log('request', { url, init, new_start_date, new_end_date });
-          try { window.__LOG_API = true; } catch {}
-
-          const res = await (typeof authFetch === 'function' ? authFetch(url, init) : fetch(url, init));
-          let obj = null;
-          try { obj = await res.clone().json(); } catch { obj = null; }
-
-          const okField =
-            (typeof obj?.ok === 'boolean' ? obj.ok :
-             typeof obj?.success === 'boolean' ? obj.success :
-             (typeof res?.ok === 'boolean' ? res.ok : undefined));
-
-          const clamped  = !!obj?.clamped;
-          const safe_end = obj?.safe_end || null;
-          const status   = (typeof res?.status === 'number') ? res.status : (typeof obj?.status === 'number' ? obj.status : undefined);
-
-          console.log('response', { status, ok: !!okField, clamped, safe_end, obj });
-
-          if (!okField) {
-            alert((obj && (obj.message || obj.error)) || res.statusText || 'Failed to end the existing contract.');
-            console.groupEnd?.();
-            return false;
-          }
-
-          if (clamped && typeof showTailClampWarning === 'function') {
-            try { showTailClampWarning(safe_end, end_existing_on); } catch {}
-          }
-
-          effectiveOldEnd = safe_end || end_existing_on;
-
-          if (effectiveOldEnd >= new_start_date) {
-            alert(`Existing contract now ends on ${effectiveOldEnd}, which overlaps the new start (${new_start_date}). Adjust dates and try again.`);
-            console.groupEnd?.();
-            return false;
-          }
-
-          if (typeof refreshOldContractAfterTruncate === 'function') {
-            try { await refreshOldContractAfterTruncate(oldId); } catch (e) { if (LOGM) console.warn('[CLONE] refresh after truncate failed', e); }
-          }
-          console.groupEnd?.();
-        } catch (e) {
-          console.warn('[CLONE][pre-trim gate] exception', e);
-          alert(`Could not end the existing contract: ${e?.message || e}`);
+        const d = new Date(new_start_date + 'T00:00:00Z');
+        d.setUTCDate(d.getUTCDate() - 1);
+        const maxOldEndIso = toYmd(d);
+        if (end_existing_on > maxOldEndIso) {
+          alert('End existing on must be on or before New start − 1 day.');
           return false;
         }
+      } catch {
+        alert('Invalid dates.');
+        return false;
       }
 
-      // Build staged successor row from current contract (no staging of end_existing intent anymore)
-      const old = window.modalCtx?.data || {};
-      const newToken = `contract:new:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      const stagedRow = {
-        id: null,
-        candidate_id: old.candidate_id || '',
-        client_id:    old.client_id    || '',
-        role:         old.role         || '',
-        band:         (old.band ?? null),
-        display_site: old.display_site || '',
-        start_date:   new_start_date,
-        end_date:     new_end_date,
-        pay_method_snapshot: old.pay_method_snapshot || 'PAYE',
-        default_submission_mode: old.default_submission_mode || 'ELECTRONIC',
-        week_ending_weekday_snapshot: Number(old.week_ending_weekday_snapshot ?? 0),
-        std_schedule_json: old.std_schedule_json || null,
-        std_hours_json:    old.std_hours_json    || null,
-        bucket_labels_json: old.bucket_labels_json || null,
-        rates_json: (old.rates_json && typeof old.rates_json === 'object') ? old.rates_json : {}
+      // Mirror backend constraint: existing cannot end before its original start
+      try {
+        const oldStartIso = (window.modalCtx?.data?.start_date) || '';
+        if (oldStartIso && end_existing_on < oldStartIso) { alert('Existing contract cannot end before its original start.'); return false; }
+        if (end_existing_on >= new_start_date) { alert('Existing contract end must be before the new start.'); return false; }
+      } catch {}
+
+      const sourceId =
+        String(contract_id || '') ||
+        String(window.modalCtx?.data?.id || '');
+
+      if (!sourceId) { alert('Source contract id missing.'); return false; }
+
+      const basePayload = {
+        new_start_date,
+        new_end_date,
+        end_existing_on,
+        assign_existing_candidate: !!assignExisting,
+        new_candidate_id: (!assignExisting && !leaveUnassigned) ? newCandidateId : null
       };
 
-      // Open successor ONLY AFTER the pre-trim has finished successfully — as a ROOT modal
-      try {
-        if (LOGM) console.log('[CLONE] will open staged successor in Create mode (root, deferred)', { token: newToken, stagedRow, effectiveOldEnd });
-        window.__preOpenToken = newToken;
-        setTimeout(() => {
-          try {
-            // Tear down entire stack so successor opens as root (no parent to resurface)
-            try { discardAllModalsAndState(); } catch {}
-            openContract(stagedRow);
-            // After the modal builds its own formState, force-align __forId with our token
-            setTimeout(() => {
-              try {
-                if (window.modalCtx) {
-                  window.modalCtx.openToken = newToken;
-                  const fs2 = (window.modalCtx.formState ||= { __forId: newToken, main:{}, pay:{} });
-                  fs2.__forId = newToken;
-                  if (LOGM) console.log('[CLONE] bound token to create modal', { openToken: window.modalCtx.openToken, forId: fs2.__forId });
-                }
-              } catch (e) { console.warn('[CLONE] bind token failed', e); }
-            }, 0);
-          } catch (e) {
-            console.error('[CLONE] openContract failed', e);
-            try { renderAll(); } catch {}
-          }
-        }, 0);
-      } catch (e) {
-        console.error('[CLONE] schedule open failed', e);
+      const attempt = async (extra = {}) => {
+        const url = API(`/api/contracts/${encodeURIComponent(sourceId)}/clone-and-extend`);
+        const payload = { ...basePayload, ...extra };
+
+        const init = {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload)
+        };
+
+        if (LOGM) console.log('[CLONE] clone-and-extend →', { url, payload });
+
+        const res = await (typeof authFetch === 'function' ? authFetch(url, init) : fetch(url, init));
+        const { text, json } = await tryParseJson(res);
+
+        if (res.ok) return { ok: true, json, text, res };
+
+        const status = res.status;
+        const errCode = getErrCode(json, text, null);
+        const msg = (json && (json.message || json.error_message || json.detail))
+          ? String(json.message || json.error_message || json.detail)
+          : '';
+
+        return { ok: false, status, json, text, errCode, msg, res };
+      };
+
+      // Retry loop
+      let r = await attempt({});
+
+      // 1) Schedule clash confirm -> retry with force_schedule_clashes:true
+      if (!r.ok && (r.status === 409 || r.status === 400) && r.errCode === 'SCHEDULE_CLASH') {
+        const clashes =
+          (Array.isArray(r.json?.clashes) ? r.json.clashes : null) ||
+          (Array.isArray(r.json?.schedule_clashes?.clashes) ? r.json.schedule_clashes.clashes : null) ||
+          (Array.isArray(r.json?.warnings?.schedule_clashes?.clashes) ? r.json.warnings.schedule_clashes.clashes : null) ||
+          (Array.isArray(r.json?.data?.clashes) ? r.json.data.clashes : null) ||
+          [];
+
+        const clashCount =
+          Number(r.json?.clash_count ?? r.json?.schedule_clashes?.clash_count ?? r.json?.warnings?.schedule_clashes?.clash_count ?? clashes.length ?? 0) || 0;
+
+        const detail = fmtClashes(clashes);
+
+        const proceed = await uiConfirm(
+          'Schedule clash warning',
+          `Schedule clashes detected (${clashCount}).\n\n${detail}\n\nDo you want to continue anyway?`,
+          { kind: 'warn' }
+        );
+        if (!proceed) return false;
+        r = await attempt({ force_schedule_clashes: true });
       }
+
+      // 2) Already-split warning -> retry with force_already_split_week:true
+      if (!r.ok && (r.status === 409 || r.status === 400) && r.errCode === 'ALREADY_SPLIT_WEEK') {
+        const proceed = await uiConfirm(
+          'Split-week warning',
+          'This week appears to already be split for this candidate/client. Continuing may result in multiple weekly timesheets for the same week.\n\nDo you want to continue anyway?',
+          { kind: 'warn' }
+        );
+        if (!proceed) return false;
+        r = await attempt({ force_already_split_week: true });
+      }
+
+      // 3) Split-week confirm required -> show confirm + worker note prompt -> retry
+      if (!r.ok && (r.status === 409 || r.status === 400) && r.errCode === 'SPLIT_WEEK_CONFIRM_REQUIRED') {
+        const confirmText =
+          'This will force a split-week: the candidate will need to submit TWO timesheets for the same week because you are ending one contract and starting another mid-week.\n\nIf there is no rate change, cancel and set the new contract start to the beginning of the week instead.\n\nDo you want to continue?';
+
+        const proceed = await uiConfirm('Split week confirmation', confirmText, { kind: 'warn' });
+        if (!proceed) return false;
+
+        const suggested =
+          (r.json && (r.json.suggested_worker_note || r.json.data?.suggested_worker_note)) ||
+          'Contract rates have changed this week and therefore you need to submit two timesheets. One timesheet for work completed for <first part> and another timesheet for <second part>.';
+
+        const note = await openWorkerNotePromptModalLocal({ defaultText: suggested });
+        if (!note) return false;
+
+        r = await attempt({ confirmed_split_week: true, split_worker_note: note });
+      }
+
+      if (!r.ok) {
+        alert(prettyFailureMessage(r));
+        return false;
+      }
+
+      const json = r.json || null;
+      const successor = json?.successor || null;
+      const successorId = successor?.id ? String(successor.id) : null;
+
+      if (!successorId) {
+        alert('Clone & Extend succeeded but no successor id was returned.');
+        return false;
+      }
+
+      // If backend closed the old contract, refresh list (best-effort)
+      try { await renderAll?.(); } catch {}
+
+      // Open successor as a ROOT modal
+      setTimeout(async () => {
+        try {
+          try { discardAllModalsAndState(); } catch {}
+
+          // Prefer fetching the full wrapper/row before opening (openContract expects a real row)
+          let fresh = null;
+          try {
+            if (typeof getContract === 'function') fresh = await getContract(successorId);
+          } catch (e) {
+            if (LOGM) console.warn('[CLONE] getContract failed, will open minimal successor row', e);
+            fresh = null;
+          }
+
+          openContract(fresh || successor || { id: successorId });
+        } catch (e) {
+          console.error('[CLONE] failed to open successor contract', e);
+          try { renderAll?.(); } catch {}
+        }
+      }, 0);
 
       return true;
     },
     false,
     () => {
+      try { wire(); } catch {}
       try { window.dispatchEvent(new Event('contracts-main-rendered')); } catch {}
     },
     { kind:'contract-clone-extend', forceEdit:true, noParentGate:true }
   );
 
-  // Wire pickers & auto-sync after mount
+  // Initial wiring (and ensures wiring after first render)
   setTimeout(() => {
-    const root = document.getElementById('cloneExtendForm');
-    if (!root) return;
-
-    const startEl = root.querySelector('input[name="new_start_date"]');
-    const endEl   = root.querySelector('input[name="new_end_date"]');
-    const endChk  = root.querySelector('input[name="end_existing_checked"]');
-    const endOld  = root.querySelector('input[name="end_existing_on"]');
-
-    attachUkDatePicker(startEl, { minDate: formatIsoToUk(oldStart) });
-    attachUkDatePicker(endEl,   { minDate: startEl.value, maxDate: null });
-    attachUkDatePicker(endOld,  { minDate: formatIsoToUk(oldStart), maxDate: startEl.value });
-
-    const isoMinusOne = (isoStr) => { try { const d=new Date(isoStr+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1); return toYmd(d); } catch { return null; } };
-
-    const onStartChange = () => {
-      const startIso = parseUkDateToIso(startEl.value || '') || defaultStart;
-      const maxOldEndIso = isoMinusOne(startIso);
-      const maxOldEndUk  = formatIsoToUk(maxOldEndIso);
-      if (typeof endOld.setMinDate === 'function') endOld.setMinDate(formatIsoToUk(oldStart));
-      endOld._maxIso = maxOldEndIso;
-      if (typeof endOld.__ukdpRepaint === 'function') endOld.__ukdpRepaint();
-      if (endChk.checked) endOld.value = maxOldEndUk;
-      if (LOGM) console.log('[CLONE] onStartChange', { startIso, endOldUk: endOld.value, maxOldEndIso });
-    };
-
-    const onChkToggle = () => {
-      const checked = !!endChk.checked;
-      endOld.disabled = !checked;
-      if (checked) {
-        const sIso = parseUkDateToIso(startEl.value || '') || oldEnd;
-        const maxIso = isoMinusOne(sIso);
-        const maxUk  = formatIsoToUk(maxIso);
-        const eIso   = parseUkDateToIso(endOld.value || '') || '';
-        if (!eIso || eIso >= sIso || eIso < oldStart) endOld.value = maxUk;
-      }
-      if (LOGM) console.log('[CLONE] onChkToggle', { checked, endOldUk: endOld.value });
-    };
-
-    startEl.addEventListener('change', onStartChange, true);
-    startEl.addEventListener('blur',   onStartChange, true);
-    endChk.addEventListener('change',  onChkToggle,   true);
-
-    onChkToggle();
-    onStartChange();
+    try { wire(); } catch {}
   }, 0);
 }
-
 async function openUiConfirmModal(opts = {}) {
   const enc = (typeof escapeHtml === 'function')
     ? escapeHtml
@@ -16630,12 +17776,18 @@ function renderTools(){
     const curStatus = String(filters.work_status || 'ALL').trim().toUpperCase();
     const statusSafe = ['ALL','CURRENT','RECENT','NOT'].includes(curStatus) ? curStatus : 'ALL';
 
-    const curMonthsRaw = Number(filters.recent_months);
-    const curMonths = (Number.isFinite(curMonthsRaw) && curMonthsRaw > 0) ? Math.floor(curMonthsRaw) : 1;
-    const presetMonths = (curMonths === 1 || curMonths === 3 || curMonths === 12) ? curMonths : null;
-    const recentPreset = (filters.recent_preset && typeof filters.recent_preset === 'string')
-      ? String(filters.recent_preset).toUpperCase()
-      : (presetMonths ? String(presetMonths) : 'CUSTOM');
+    const allowedRecentPresets = new Set(['1','3','6','9','12','24','ALL']);
+    const rawRecentMonths = filters.recent_months;
+
+    // Normalise to one of: '1','3','6','9','12','24','ALL'
+    const recentPreset = (() => {
+      if (rawRecentMonths == null || rawRecentMonths === '') return '6'; // default when RECENT
+      const s = String(rawRecentMonths).trim().toUpperCase();
+      if (s === 'ALL') return 'ALL';
+      const n = Math.floor(Number(s));
+      if (Number.isFinite(n) && allowedRecentPresets.has(String(n))) return String(n);
+      return '6';
+    })();
 
     const box = document.createElement('div');
     box.style.cssText = 'margin-top:10px;padding:8px;border:1px solid var(--line);border-radius:6px;background:#0b152a;';
@@ -16657,21 +17809,6 @@ function renderTools(){
       return row;
     };
 
-    const statusSel = document.createElement('select');
-    statusSel.classList.add('dark-control');
-    [
-      ['ALL','All'],
-      ['CURRENT','Currently Working'],
-      ['RECENT','Recently Working'],
-      ['NOT','Not Working']
-    ].forEach(([v, label]) => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = label;
-      if (statusSafe === v) o.selected = true;
-      statusSel.appendChild(o);
-    });
-
     const applyCandidateFilters = async (next) => {
       const cur = { ...(window.__listState['candidates'].filters || {}) };
       Object.entries(next || {}).forEach(([k, v]) => {
@@ -16685,6 +17822,58 @@ function renderTools(){
       renderSummary(data);
     };
 
+    // Working status selector
+    const statusSel = document.createElement('select');
+    statusSel.classList.add('dark-control');
+    [
+      ['ALL','All'],
+      ['CURRENT','Currently working'],
+      ['RECENT','Previously worked'],
+      ['NOT','Not working']
+    ].forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      if (statusSafe === v) o.selected = true;
+      statusSel.appendChild(o);
+    });
+
+    // Previously worked submenu (only visible when RECENT)
+    const recentWrap = document.createElement('div');
+    recentWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;';
+
+    const recentLab = document.createElement('span');
+    recentLab.className = 'mini';
+    recentLab.textContent = 'Period:';
+
+    const recentSel = document.createElement('select');
+    recentSel.classList.add('dark-control');
+
+    // Exactly: 1,3,6,9,12,24,ALL
+    const recentOpts = [
+      ['1',  'Past 1 month'],
+      ['3',  'Past 3 months'],
+      ['6',  'Past 6 months'],
+      ['9',  'Past 9 months'],
+      ['12', 'Past 1 year'],
+      ['24', 'Past 2 years'],
+      ['ALL','All (since start)']
+    ];
+    recentOpts.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      recentSel.appendChild(o);
+    });
+
+    // Ensure UI reflects current / default selection
+    recentSel.value = allowedRecentPresets.has(recentPreset) ? recentPreset : '6';
+
+    const refreshRecentVisibility = () => {
+      recentWrap.style.display = (String(statusSel.value || '').toUpperCase() === 'RECENT') ? 'flex' : 'none';
+    };
+    refreshRecentVisibility();
+
     statusSel.addEventListener('change', async () => {
       const v = String(statusSel.value || 'ALL').toUpperCase();
 
@@ -16692,109 +17881,44 @@ function renderTools(){
       const patch = { work_status: v };
 
       if (v !== 'RECENT') {
-        // Remove RECENT-specific keys when not in RECENT mode
+        // Hide + clear RECENT-specific keys when not in RECENT mode
         patch.recent_months = null;
         patch.recent_preset = null;
-      } else {
-        // Default months when entering RECENT
-        const m = (Number.isFinite(curMonthsRaw) && curMonthsRaw > 0) ? Math.floor(curMonthsRaw) : 1;
-        patch.recent_months = m || 1;
-        patch.recent_preset = (m === 1 || m === 3 || m === 12) ? String(m) : 'CUSTOM';
+
+        // UI: hide + reset selection to default (won’t matter while hidden)
+        recentSel.value = '6';
+        refreshRecentVisibility();
+        return await applyCandidateFilters(patch);
       }
 
+      // Entering RECENT: default to 6 months immediately
+      patch.recent_months = '6';
+      patch.recent_preset = '6';
+      recentSel.value = '6';
+      refreshRecentVisibility();
       await applyCandidateFilters(patch);
     });
 
+    recentSel.addEventListener('change', async () => {
+      const v = String(recentSel.value || '6').toUpperCase();
+      if (!allowedRecentPresets.has(v)) return;
+
+      // Only apply if still in RECENT mode
+      const ws = String(statusSel.value || '').toUpperCase();
+      if (ws !== 'RECENT') return;
+
+      await applyCandidateFilters({
+        work_status: 'RECENT',
+        recent_months: (v === 'ALL') ? 'ALL' : String(v),
+        recent_preset: String(v)
+      });
+    });
+
+    recentWrap.appendChild(recentLab);
+    recentWrap.appendChild(recentSel);
+
     box.appendChild(mkRow('Working:', statusSel));
-
-    // RECENT period radios + custom months
-    if (statusSafe === 'RECENT') {
-      const wrap = document.createElement('div');
-      wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:8px;';
-
-      const mkRadio = (value, label) => {
-        const lab = document.createElement('label');
-        lab.className = 'mini';
-        lab.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;';
-        const r = document.createElement('input');
-        r.type = 'radio';
-        r.name = '__cand_recent_period__';
-        r.value = value;
-        r.checked = (recentPreset === value);
-        lab.appendChild(r);
-        lab.appendChild(document.createTextNode(label));
-        return { lab, r };
-      };
-
-      const r1  = mkRadio('1',      'Past month');
-      const r3  = mkRadio('3',      'Past three months');
-      const r12 = mkRadio('12',     'Past year');
-      const rc  = mkRadio('CUSTOM', 'Custom');
-
-      const customRow = document.createElement('div');
-      customRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-left:20px;';
-      const customLabel = document.createElement('span');
-      customLabel.className = 'mini';
-      customLabel.textContent = 'Months:';
-      const customInp = document.createElement('input');
-      customInp.type = 'number';
-      customInp.min = '1';
-      customInp.step = '1';
-      customInp.classList.add('dark-control');
-      customInp.style.width = '90px';
-      customInp.value = String(presetMonths ? presetMonths : curMonths);
-      customRow.appendChild(customLabel);
-      customRow.appendChild(customInp);
-
-      const refreshRecentUi = () => {
-        const isCustom = !!rc.r.checked;
-        customRow.style.display = isCustom ? 'flex' : 'none';
-      };
-      refreshRecentUi();
-
-      const setMonths = async (months, presetKey) => {
-        const m = Math.max(1, Math.floor(Number(months) || 1));
-        await applyCandidateFilters({
-          work_status: 'RECENT',
-          recent_months: m,
-          recent_preset: presetKey
-        });
-      };
-
-      const onRadioChange = async () => {
-        refreshRecentUi();
-
-        if (r1.r.checked)  return setMonths(1,  '1');
-        if (r3.r.checked)  return setMonths(3,  '3');
-        if (r12.r.checked) return setMonths(12, '12');
-        if (rc.r.checked) {
-          const m = Math.max(1, Math.floor(Number(customInp.value) || 1));
-          return setMonths(m, 'CUSTOM');
-        }
-      };
-
-      [r1.r, r3.r, r12.r, rc.r].forEach(r => {
-        r.addEventListener('change', async () => { await onRadioChange(); });
-      });
-
-      customInp.addEventListener('keydown', async (e) => {
-        if (e.key !== 'Enter') return;
-        if (!rc.r.checked) rc.r.checked = true;
-        await onRadioChange();
-      });
-      customInp.addEventListener('blur', async () => {
-        if (!rc.r.checked) return;
-        await onRadioChange();
-      });
-
-      wrap.appendChild(r1.lab);
-      wrap.appendChild(r3.lab);
-      wrap.appendChild(r12.lab);
-      wrap.appendChild(rc.lab);
-      wrap.appendChild(customRow);
-
-      box.appendChild(wrap);
-    }
+    box.appendChild(recentWrap);
 
     el.appendChild(box);
   }
@@ -16962,6 +18086,9 @@ async function showAllRecords(section = currentSection){
   // Reload full list for the section and render
   const rows = await loadSection();
   renderSummary(rows);
+
+  // ✅ Ensure toolbar filter UI reflects cleared filters (dropdowns reset to "All")
+  try { renderTools(); } catch {}
 }
 // Optional alias if other code calls clearFilters()
 function clearFilters(section = currentSection){
@@ -19013,8 +20140,44 @@ function renderCandidateTab(key, row = {}) {
     const optWa = !!row.opt_in_whatsapp;
     const optAll = optEmail && optSms && optWa;
 
+    const displayNameRaw = (row && typeof row.display_name !== 'undefined') ? row.display_name : '';
+    const displayNameStr = String(displayNameRaw == null ? '' : displayNameRaw);
+    const displayNameIsBlank = (displayNameStr.trim() === '');
+
+    const displayNameRow = displayNameIsBlank
+      ? `
+        <div class="row">
+          <label>Display name</label>
+          <div class="controls">
+            <input
+              class="input"
+              name="display_name"
+              value=""
+              disabled
+              readonly
+              style="opacity:.65"
+            />
+            <div class="hint">
+              Display name will be generated automatically when you save this candidate.
+            </div>
+          </div>
+        </div>
+      `
+      : `
+        <div class="row">
+          <label>Display name</label>
+          <div class="controls">
+            <input
+              class="input"
+              name="display_name"
+              value="${enc(displayNameStr)}"
+            />
+          </div>
+        </div>
+      `;
+
     return html(`
-      <div class="form" id="tab-main">
+      <div class="form" id="tab-main" autocomplete="off">
         ${select('title','Title', row.title || '', ['', 'Mr', 'Mrs', 'Miss', 'Ms', 'Dr', 'Prof'])}
 
         ${input('first_name','First name', row.first_name)}
@@ -19112,7 +20275,7 @@ function renderCandidateTab(key, row = {}) {
                  style="opacity:.7" />
         </div>
 
-        ${input('display_name','Display name', row.display_name)}
+        ${displayNameRow}
 
         <!-- New: NI / DOB / Gender -->
         ${input('ni_number','National Insurance Number', row.ni_number)}
@@ -19159,13 +20322,13 @@ function renderCandidateTab(key, row = {}) {
              style="${row.prof_reg_type ? '' : 'display:none'}">
           <label data-field="prof_reg_label">
             ${row.prof_reg_type
-              ? escapeHtml(`${row.prof_reg_type} Number`)
+              ? enc(String(row.prof_reg_type) + ' Number')
               : 'Registration Number'}
           </label>
           <div class="controls">
             <input class="input"
                    name="prof_reg_number"
-                   value="${escapeHtml(row.prof_reg_number || '')}">
+                   value="${enc(row.prof_reg_number || '')}">
           </div>
         </div>
 
@@ -19176,29 +20339,35 @@ function renderCandidateTab(key, row = {}) {
             <div class="grid-2">
               <input class="input"
                      name="address_line1"
+                     autocomplete="off"
                      placeholder="Address line 1"
-                     value="${escapeHtml(row.address_line1 || '')}">
+                     value="${enc(row.address_line1 || '')}">
               <input class="input"
                      name="address_line2"
+                     autocomplete="off"
                      placeholder="Address line 2"
-                     value="${escapeHtml(row.address_line2 || '')}">
+                     value="${enc(row.address_line2 || '')}">
               <input class="input"
                      name="address_line3"
+                     autocomplete="off"
                      placeholder="Address line 3"
-                     value="${escapeHtml(row.address_line3 || '')}">
+                     value="${enc(row.address_line3 || '')}">
               <input class="input"
                      name="town_city"
+                     autocomplete="off"
                      placeholder="City / Town"
-                     value="${escapeHtml(row.town_city || '')}">
+                     value="${enc(row.town_city || '')}">
               <input class="input"
                      name="county"
+                     autocomplete="off"
                      placeholder="County"
-                     value="${escapeHtml(row.county || '')}">
+                     value="${enc(row.county || '')}">
               <div class="split">
                 <input class="input"
                        name="postcode"
+                       autocomplete="off"
                        placeholder="Postcode"
-                       value="${escapeHtml(row.postcode || '')}">
+                       value="${enc(row.postcode || '')}">
                 <button type="button"
                         class="btn mini"
                         data-act="postcode-lookup"
@@ -19334,8 +20503,6 @@ function renderCandidateTab(key, row = {}) {
     </div>
   `);
 }
-
-
 
 async function fetchCandidateAdvances(candidateId) {
   if (!candidateId) return;
@@ -20326,7 +21493,7 @@ async function openCandidate(row) {
   const selectedAliasId = hrAliasesExisting.length
     ? (hrAliasesExisting[0].id ?? null)
     : null;
-  window.modalCtx = {
+ window.modalCtx = {
     entity: 'candidates',
     data:   deep(full),
     formState: { __forId: full?.id || null, main: {}, pay: {} },
@@ -20361,6 +21528,79 @@ async function openCandidate(row) {
     }
   };
 
+  // ✅ NEW: Delete eligibility (VIEW-mode only)
+  // - set an immediate placeholder so the Delete button is visibly disabled with a tooltip
+  // - fetch real eligibility in the background
+  // - when it returns, store on modalCtx and trigger a footer repaint via frame._updateButtons()
+  try {
+    const candId = window.modalCtx?.data?.id || null;
+    if (candId) {
+      window.modalCtx.deleteEligibility = {
+        can_delete: false,
+        reason: 'Checking delete eligibility…'
+      };
+
+      const tok = window.modalCtx.openToken;
+      const candIdStr = String(candId);
+
+      (async () => {
+        try {
+          const url = API(`/api/candidates/${encodeURIComponent(candIdStr)}/delete-eligibility`);
+          L('[HTTP] GET delete-eligibility', url);
+
+          const res = await authFetch(url);
+          let elig = null;
+
+          if (res && res.ok) {
+            elig = await res.json().catch(() => null);
+          } else {
+            const msg = await res.text().catch(() => '');
+            elig = {
+              can_delete: false,
+              reason: (msg && String(msg).trim()) ? String(msg).trim() : 'Delete eligibility check failed.'
+            };
+          }
+
+          // Only apply if this modal is still the same candidate (token + id guard)
+          if (
+            window.modalCtx &&
+            window.modalCtx.entity === 'candidates' &&
+            window.modalCtx.openToken === tok &&
+            String(window.modalCtx.data?.id || '') === candIdStr
+          ) {
+            window.modalCtx.deleteEligibility = (elig && typeof elig === 'object') ? elig : null;
+
+            // Trigger immediate footer repaint so btnDelete updates (enabled/disabled + tooltip)
+            const fr = window.__getModalFrame?.();
+            if (fr && fr.entity === 'candidates' && typeof fr._updateButtons === 'function') {
+              fr._updateButtons();
+            }
+          }
+        } catch (e) {
+          W('delete-eligibility fetch failed (non-fatal)', e);
+
+          // If still the same modal, set a safe blocked eligibility with a useful tooltip
+          try {
+            if (
+              window.modalCtx &&
+              window.modalCtx.entity === 'candidates' &&
+              window.modalCtx.openToken === tok &&
+              String(window.modalCtx.data?.id || '') === candIdStr
+            ) {
+              window.modalCtx.deleteEligibility = {
+                can_delete: false,
+                reason: 'Unable to check delete eligibility (network error).'
+              };
+              const fr = window.__getModalFrame?.();
+              if (fr && fr.entity === 'candidates' && typeof fr._updateButtons === 'function') {
+                fr._updateButtons();
+              }
+            }
+          } catch {}
+        }
+      })();
+    }
+  } catch {}
 
   L('window.modalCtx seeded', {
     entity: window.modalCtx.entity,
@@ -20371,6 +21611,7 @@ async function openCandidate(row) {
     dbPayMethod: window.modalCtx.dbPayMethod,
     candidateMainModelKeys: Object.keys(window.modalCtx.candidateMainModel || {})
   });
+
   // 3) Render modal
   L('calling showModal with hasId=', !!full?.id, 'rawHasIdArg=', full?.id);
 
@@ -20409,6 +21650,7 @@ async function openCandidate(row) {
       L('[renderCandidateTab] tab=', k, 'rowKeys=', Object.keys(r||{}), 'sample=', { first: r?.first_name, last: r?.last_name, id: r?.id });
 
       const html = renderCandidateTab(k, r);
+
       // ✅ E-History: always (re)mount on History tab render.
       // showModal.setTab() recreates #modalBody each time; mountCandidateHistoryTab is now idempotent and
       // will repaint from cache without refetch when already loaded.
@@ -21345,29 +22587,29 @@ for (const k of Object.keys(payload)) {
       return { ok: true, saved: window.modalCtx.data };
 
     },
-     full?.id,
-   () => {
-  const fr = window.__getModalFrame?.();
-  const isBookings = fr && fr.entity === 'candidates' && fr.currentTabKey === 'bookings';
-  const candId = window.modalCtx?.data?.id;
+  full?.id,
+    () => {
+      const fr = window.__getModalFrame?.();
+      const isBookings = fr && fr.entity === 'candidates' && fr.currentTabKey === 'bookings';
+      const candId = window.modalCtx?.data?.id;
 
-  if (isBookings && candId) {
-    try {
-      const holder = document.getElementById('candidateCalendarHolder');
-      if (holder && typeof loadCandidateCalendar === 'function') {
-        // Repaint using cached data if available (keeps filter state stable)
-        loadCandidateCalendar(holder, candId, { _reuseLast: true }).catch(e => {
-          W('loadCandidateCalendar(onReturn) failed', e);
-        });
-      } else {
-        // Fallback
-        renderCandidateCalendarTab(candId);
+      if (isBookings && candId) {
+        try {
+          const holder = document.getElementById('candidateCalendarHolder');
+          if (holder && typeof loadCandidateCalendar === 'function') {
+            // Repaint using cached data if available (keeps filter state stable)
+            loadCandidateCalendar(holder, candId, { _reuseLast: true }).catch(e => {
+              W('loadCandidateCalendar(onReturn) failed', e);
+            });
+          } else {
+            // Fallback
+            renderCandidateCalendarTab(candId);
+          }
+        } catch (e) {
+          W('calendar onReturn refresh failed', e);
+        }
       }
-    } catch (e) {
-      W('calendar onReturn refresh failed', e);
-    }
-  }
-},
+    },
     // ✅ NEW: title badges are rendered by showModal/renderTop
     { titleBadges }
   );
@@ -21851,6 +23093,7 @@ function confirmDiscardChangesIfDirty(){
   return true;
 }
 
+
 async function commitContractCalendarStageIfPending(contractId) {
   const LOG_CAL = (typeof window.__LOG_CAL === 'boolean') ? window.__LOG_CAL : true;
   const L = (...a)=> { if (LOG_CAL) console.log('[CAL][commitIfPending]', ...a); };
@@ -22094,8 +23337,6 @@ async function commitContractCalendarStageIfPending(contractId) {
     return { ok: false, message: e?.message || 'Calendar commit failed', removedAll: false };
   }
 }
-
-
 
 // Stage a full-window delete of all TS-free weeks (committed on Save).
 
@@ -23656,8 +24897,7 @@ async function openClient(row) {
   // 2) Seed modal context
   const fullKeys = Object.keys(full || {});
   L('seeding window.modalCtx', { entity: 'clients', fullId: full?.id, fullKeys });
-
-  window.modalCtx = {
+window.modalCtx = {
     entity: 'clients',
     data: deep(full),
     formState: { __forId: full?.id || null, main: {} },
@@ -23686,6 +24926,80 @@ async function openClient(row) {
       ? window.modalCtx.ratesStagedDeletes
       : new Set()
   };
+
+  // ✅ NEW: Delete eligibility (VIEW-mode only)
+  // - seed an immediate placeholder so Delete is visibly disabled with a tooltip
+  // - fetch real eligibility in the background
+  // - store on modalCtx and trigger a footer repaint so btnDelete updates immediately
+  try {
+    const clientId0 = window.modalCtx?.data?.id || null;
+    if (clientId0) {
+      window.modalCtx.deleteEligibility = {
+        can_delete: false,
+        reason: 'Checking delete eligibility…'
+      };
+
+      const tok = window.modalCtx.openToken;
+      const clientIdStr = String(clientId0);
+
+      (async () => {
+        try {
+          const url = API(`/api/clients/${encodeURIComponent(clientIdStr)}/delete-eligibility`);
+          L('[HTTP] GET delete-eligibility', url);
+
+          const res = await authFetch(url);
+          let elig = null;
+
+          if (res && res.ok) {
+            elig = await res.json().catch(() => null);
+          } else {
+            const msg = await res.text().catch(() => '');
+            elig = {
+              can_delete: false,
+              reason: (msg && String(msg).trim()) ? String(msg).trim() : 'Delete eligibility check failed.'
+            };
+          }
+
+          // Only apply if this modal is still the same client (token + id guard)
+          if (
+            window.modalCtx &&
+            window.modalCtx.entity === 'clients' &&
+            window.modalCtx.openToken === tok &&
+            String(window.modalCtx.data?.id || '') === clientIdStr
+          ) {
+            window.modalCtx.deleteEligibility = (elig && typeof elig === 'object') ? elig : null;
+
+            // Trigger immediate footer repaint so btnDelete updates (enabled/disabled + tooltip)
+            const fr = window.__getModalFrame?.();
+            if (fr && fr.entity === 'clients' && typeof fr._updateButtons === 'function') {
+              fr._updateButtons();
+            }
+          }
+        } catch (e) {
+          W('delete-eligibility fetch failed (non-fatal)', e);
+
+          // If still the same modal, set a safe blocked eligibility with a useful tooltip
+          try {
+            if (
+              window.modalCtx &&
+              window.modalCtx.entity === 'clients' &&
+              window.modalCtx.openToken === tok &&
+              String(window.modalCtx.data?.id || '') === clientIdStr
+            ) {
+              window.modalCtx.deleteEligibility = {
+                can_delete: false,
+                reason: 'Unable to check delete eligibility (network error).'
+              };
+              const fr = window.__getModalFrame?.();
+              if (fr && fr.entity === 'clients' && typeof fr._updateButtons === 'function') {
+                fr._updateButtons();
+              }
+            }
+          } catch {}
+        }
+      })();
+    }
+  } catch {}
 
   // Canonicalise immediately so UI always starts in a consistent state
   // ✅ Preserve manual-invoice routing + auto-invoice + new invoicing/ref-to-issue fields
@@ -24018,6 +25332,7 @@ async function openClient(row) {
 
       const savedClient = clientResp && typeof clientResp === 'object' ? clientResp : { id: clientId, ...payload };
       window.modalCtx.data = { ...(window.modalCtx.data || {}), ...savedClient, id: clientId };
+
 
       // 4) Save Client settings (after client exists)
       try {
@@ -26025,119 +27340,6 @@ async function discardContractCalendarStage(contractId) {
 
 
 
-
-
-
-async function fetchContractChangeRatesPreview(contract_id, cutoff_we) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
-
-  if (!contract_id) {
-    throw new Error('fetchContractChangeRatesPreview: contract_id is required');
-  }
-
-  const qs = new URLSearchParams();
-  if (cutoff_we) {
-    qs.set('cutoff_week_ending_date', String(cutoff_we));
-  }
-
-  const path = `/api/contracts/${_enc(contract_id)}/change-rates-outstanding${qs.toString() ? `?${qs.toString()}` : ''}`;
-  const url  = API(path);
-
-  if (LOGC) {
-    console.log('[CONTRACTS] fetchContractChangeRatesPreview →', { contract_id, cutoff_we, url });
-  }
-
-  let res;
-  try {
-    res = await authFetch(url);
-  } catch (err) {
-    if (LOGC) console.error('[CONTRACTS] change-rates-outstanding preview network error', { url, err });
-    throw err;
-  }
-
-  const text = await res.text().catch(() => '');
-  if (!res.ok) {
-    if (LOGC) {
-      console.error('[CONTRACTS] change-rates-outstanding preview failed', {
-        status: res.status,
-        url,
-        body: text
-      });
-    }
-    throw new Error(text || 'Failed to load outstanding weeks for this contract');
-  }
-
-  let json;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch (e) {
-    if (LOGC) console.warn('[CONTRACTS] change-rates-outstanding preview: non-JSON body', { text });
-    json = null;
-  }
-
-  if (LOGC) {
-    console.log('[CONTRACTS] fetchContractChangeRatesPreview ←', json);
-  }
-
-  // Backend returns { contract_id, weeks:[...], ... }; normalise to object
-  return json || { contract_id, weeks: [] };
-}
-
-async function applyChangeContractRates(contract_id, payload) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
-
-  if (!contract_id) {
-    throw new Error('applyChangeContractRates: contract_id is required');
-  }
-
-  const path = `/api/contracts/${_enc(contract_id)}/change-rates-outstanding`;
-  const url  = API(path);
-
-  const body = payload || {};
-  if (LOGC) {
-    console.log('[CONTRACTS] applyChangeContractRates →', { contract_id, url, body });
-  }
-
-  let res;
-  try {
-    res = await authFetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: _json(body)
-    });
-  } catch (err) {
-    if (LOGC) console.error('[CONTRACTS] applyChangeContractRates network error', { url, err });
-    throw err;
-  }
-
-  const text = await res.text().catch(() => '');
-  if (!res.ok) {
-    if (LOGC) {
-      console.error('[CONTRACTS] applyChangeContractRates failed', {
-        status: res.status,
-        url,
-        body: text
-      });
-    }
-    throw new Error(text || 'Failed to change contract rates for outstanding weeks');
-  }
-
-  let json;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch (e) {
-    if (LOGC) console.warn('[CONTRACTS] applyChangeContractRates: non-JSON body', { text });
-    json = null;
-  }
-
-  if (LOGC) {
-    console.log('[CONTRACTS] applyChangeContractRates ←', json);
-  }
-
-  // Backend returns { old_contract_id, new_contract_id, weeks_migrated, timesheets_migrated, ... }
-  return json || {};
-}
-
 async function fetchCandidatePayMethodChangePreview(candidate_id, newMethod) {
   const LOG = (typeof window.__LOG_CAND === 'boolean')
     ? window.__LOG_CAND
@@ -26270,502 +27472,6 @@ async function applyCandidatePayMethodChange(candidate_id, body) {
   };
 }
 
-async function openChangeContractRatesModal(contractId) {
-  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-  const L    = (...a)=> { if (LOGC) console.log('[CONTRACTS][CHANGE-RATES]', ...a); };
-  const W    = (...a)=> { if (LOGC) console.warn('[CONTRACTS][CHANGE-RATES]', ...a); };
-  const E    = (...a)=> { if (LOGC) console.error('[CONTRACTS][CHANGE-RATES]', ...a); };
-
-  if (!contractId) {
-    alert('No contract selected.');
-    return;
-  }
-
-  let preview;
-  try {
-    preview = await fetchContractChangeRatesPreview(contractId, null);
-  } catch (err) {
-    E('preview failed', err);
-    alert(err?.message || 'Could not load outstanding weeks for this contract.');
-    return;
-  }
-
-  const weeks = Array.isArray(preview?.weeks) ? preview.weeks.slice() : [];
-  if (!weeks.length) {
-    alert('There are no outstanding weeks on this contract. Nothing to change.');
-    return;
-  }
-
-  weeks.sort((a, b) => String(a.week_ending_date).localeCompare(String(b.week_ending_date)));
-
-  const defaultCutoff = preview.cutoff_week_ending_date || weeks[0].week_ending_date;
-
-  // Seed rates + schedule from current contract modalCtx if available
-  const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
-  const baseContract =
-    (window.modalCtx &&
-     window.modalCtx.entity === 'contracts' &&
-     window.modalCtx.data &&
-     String(window.modalCtx.data.id || '') === String(contractId))
-      ? deep(window.modalCtx.data)
-      : deep(preview || {});
-
-  const R = baseContract.rates_json || {};
-  const payMethod = String(baseContract.pay_method_snapshot || 'PAYE').toUpperCase();
-  const showPAYE = (payMethod === 'PAYE');
-  const LBL = baseContract.bucket_labels_json || {};
-  const labelOf = (k) => {
-    if (k==='day') return (LBL.day||'Day');
-    if (k==='night') return (LBL.night||'Night');
-    if (k==='sat') return (LBL.sat||'Sat');
-    if (k==='sun') return (LBL.sun||'Sun');
-    if (k==='bh') return (LBL.bh||'BH');
-    return k;
-  };
-  const numStr = (v) => (v == null ? '' : String(v));
-
-  const sched = (() => {
-    const src = baseContract.std_schedule_json || {};
-    const out = {};
-    ['mon','tue','wed','thu','fri','sat','sun'].forEach(d => {
-      const day = src[d] || {};
-      out[d] = {
-        start: day.start || '',
-        end:   day.end   || '',
-        break_minutes: (day.break_minutes != null ? String(day.break_minutes) : '')
-      };
-    });
-    return out;
-  })();
-
-  const weeksTableHtml = `
-    <div class="group">
-      <div class="row">
-        <label>Outstanding weeks</label>
-        <div class="controls">
-          <div class="hint">Only weeks that are not invoiced and not paid will be moved onto the new contract.</div>
-          <div style="max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:6px">
-            <table class="grid compact">
-              <thead>
-                <tr>
-                  <th>Week ending</th>
-                  <th>Status</th>
-                  <th>Timesheet</th>
-                  <th>Invoiced?</th>
-                  <th>Paid?</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${weeks.map(w => `
-                  <tr>
-                    <td>${w.week_ending_date || ''}</td>
-                    <td>${w.status || ''}</td>
-                    <td>${w.timesheet_id ? 'Yes' : 'No'}</td>
-                    <td>${w.is_invoiced ? 'Yes' : 'No'}</td>
-                    <td>${w.is_paid ? 'Yes' : 'No'}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      <div class="row">
-        <label>Apply new rates from</label>
-        <div class="controls">
-          <select class="input" name="cutoff_we">
-            ${weeks.map(w => `
-              <option value="${w.week_ending_date}" ${w.week_ending_date === defaultCutoff ? 'selected' : ''}>
-                ${w.week_ending_date}
-              </option>
-            `).join('')}
-          </select>
-          <span class="mini">Weeks on or after this week-ending date will be moved to a new contract with the updated rates and schedule.</span>
-          <div class="mini" id="cutoffSummary" style="margin-top:4px;"></div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const ratesHtml = `
-    <div class="group">
-      <div class="row">
-        <label>Rates</label>
-        <div class="controls small">
-          <div class="grid-5" style="margin-bottom:4px">
-            <div></div>
-            <div class="mini">PAYE</div>
-            <div class="mini">Umbrella</div>
-            <div class="mini">Charge</div>
-            <div class="mini">Margin (info only)</div>
-          </div>
-
-          ${['day','night','sat','sun','bh'].map(b => `
-            <div class="grid-5" data-bucket="${b}" style="margin-bottom:4px">
-              <div class="split"><span class="mini">${labelOf(b)}</span></div>
-              <div><input class="input" name="paye_${b}"   placeholder="PAYE"     value="${numStr(R[`paye_${b}`])}" ${showPAYE ? '' : 'disabled'} /></div>
-              <div><input class="input" name="umb_${b}"    placeholder="Umbrella" value="${numStr(R[`umb_${b}`])}"  ${showPAYE ? 'disabled' : ''} /></div>
-              <div><input class="input" name="charge_${b}" placeholder="Charge"   value="${numStr(R[`charge_${b}`])}" /></div>
-              <div class="mini" data-role="margin-note"></div>
-            </div>
-          `).join('')}
-          <div class="mini">You can change any pay/charge buckets here. Margins will be checked before applying, and recomputed automatically in TSFIN after the change.</div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const scheduleHtml = `
-    <div class="group">
-      <div class="row"><label>Default weekly schedule (Mon–Sun)</label>
-        <div class="controls small">
-          <div class="grid-3">
-            ${['mon','tue','wed','thu','fri','sat','sun'].map(d => {
-              const lab = d.charAt(0).toUpperCase() + d.slice(1);
-              const day = sched[d] || {};
-              return `
-                <div class="rp-day" data-day="${d}" style="margin-bottom:6px">
-                  <div class="split">
-                    <span class="mini">${lab} start</span>
-                    <input class="input" name="${d}_start" value="${day.start || ''}" placeholder="HH:MM" />
-                  </div>
-                  <div class="split">
-                    <span class="mini">${lab} end</span>
-                    <input class="input" name="${d}_end" value="${day.end || ''}" placeholder="HH:MM" />
-                  </div>
-                  <div class="split">
-                    <span class="mini">Break (min)</span>
-                    <input class="input" type="number" min="0" step="1" name="${d}_break" value="${day.break_minutes || ''}" placeholder="0" />
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          </div>
-          <div class="mini" style="margin-top:4px">Leave a day blank to clear it from the schedule on the new contract.</div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const modalHtml = html(`
-    <div class="tabc" id="changeContractRatesForm">
-      <div class="hint" style="margin-bottom:8px">
-        This will create a <strong>new successor contract</strong> with the updated rates and schedule.
-        All outstanding weeks from the chosen cut-off week onward will be moved to the new contract.
-        Historic (paid/invoiced) weeks stay on the original contract.
-      </div>
-      ${weeksTableHtml}
-      ${ratesHtml}
-      ${scheduleHtml}
-    </div>
-  `);
-
-  const timeNorm = (raw) => {
-    const t = String(raw || '').trim();
-    if (!t) return '';
-    const m = t.match(/^(\d{1,2})(?::?(\d{2}))$/);
-    if (!m) return '';
-    const h = +m[1], mi = +m[2];
-    if (!Number.isFinite(h) || !Number.isFinite(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) return '';
-    return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
-  };
-
-  const buildPayloadFromDom = () => {
-    const root = document.getElementById('changeContractRatesForm');
-    if (!root) return null;
-
-    const cutoffSel = root.querySelector('select[name="cutoff_we"]');
-    const cutoff_we = cutoffSel ? (cutoffSel.value || '').trim() : '';
-    if (!cutoff_we) {
-      if (typeof showModalHint === 'function') showModalHint('Choose a cut-off week ending date.', 'warn');
-      else alert('Choose a cut-off week ending date.');
-      return null;
-    }
-
-    // Collect rates
-    const BUCKETS = ['day','night','sat','sun','bh'];
-    const rateInputs = {};
-    BUCKETS.forEach(b => {
-      rateInputs[`paye_${b}`]   = root.querySelector(`input[name="paye_${b}"]`);
-      rateInputs[`umb_${b}`]    = root.querySelector(`input[name="umb_${b}"]`);
-      rateInputs[`charge_${b}`] = root.querySelector(`input[name="charge_${b}"]`);
-    });
-
-    const parseRate = (name) => {
-      const el = rateInputs[name];
-      if (!el) return null;
-      const raw = (el.value || '').trim();
-      if (!raw) return null;
-      const n = Number(raw);
-      return Number.isFinite(n) ? n : null;
-    };
-
-    const rates_json = {};
-    BUCKETS.forEach(b => {
-      const pd = parseRate(`paye_${b}`);
-      const ud = parseRate(`umb_${b}`);
-      const cd = parseRate(`charge_${b}`);
-      if (pd != null) rates_json[`paye_${b}`] = pd;
-      if (ud != null) rates_json[`umb_${b}`] = ud;
-      if (cd != null) rates_json[`charge_${b}`] = cd;
-    });
-
-    // Schedule
-    const days = ['mon','tue','wed','thu','fri','sat','sun'];
-    const schedOut = {};
-    let hasAny = false;
-
-    days.forEach(d => {
-      const sEl = root.querySelector(`input[name="${d}_start"]`);
-      const eEl = root.querySelector(`input[name="${d}_end"]`);
-      const bEl = root.querySelector(`input[name="${d}_break"]`);
-
-      const sNorm = timeNorm(sEl ? sEl.value : '');
-      const eNorm = timeNorm(eEl ? eEl.value : '');
-      const brRaw = bEl ? (bEl.value || '').trim() : '';
-
-      if (sNorm && eNorm) {
-        const brNum = Math.max(0, Number(brRaw || 0) || 0);
-        schedOut[d] = { start: sNorm, end: eNorm, break_minutes: brNum };
-        hasAny = true;
-      }
-    });
-
-    const std_schedule_json = hasAny ? schedOut : null;
-
-    return {
-      cutoff_week_ending_date: cutoff_we,
-      rates_json,
-      std_schedule_json
-    };
-  };
-
-    // Helper to ensure we have ERNI multiplier from settings (used for margin check)
-  // UPDATED:
-  // - getSettingsCached() returns { settings, finance_windows }
-  // - ERNI comes from finance_windows window in-scope for an anchor date
-  // - Anchor date rule:
-  //    - if contract ongoing -> today (Europe/London)
-  //    - if contract finished (end_date < today) -> contract start_date
-  const ensureErniMult = async () => {
-    // Today (Europe/London)
-    const todayIso = (() => {
-      try {
-        const s = new Intl.DateTimeFormat('en-GB', {
-          timeZone: 'Europe/London',
-          year:'numeric', month:'2-digit', day:'2-digit'
-        }).format(new Date());
-        const [dd, mm, yyyy] = s.split('/');
-        return `${yyyy}-${mm}-${dd}`;
-      } catch {
-        const d = new Date();
-        const y = d.getFullYear();
-        const m = String(d.getMonth()+1).padStart(2,'0');
-        const day = String(d.getDate()).padStart(2,'0');
-        return `${y}-${m}-${day}`;
-      }
-    })();
-
-    const asYmd = (v) => {
-      if (!v) return null;
-      const ss = String(v).slice(0, 10);
-      return /^\d{4}-\d{2}-\d{2}$/.test(ss) ? ss : null;
-    };
-
-    // Determine anchor date from baseContract start/end
-    const startIso = asYmd(baseContract?.start_date) || null;
-    const endIso   = asYmd(baseContract?.end_date)   || null;
-    const isFinished = !!(endIso && endIso < todayIso);
-    const anchorIso = (isFinished && startIso) ? startIso : todayIso;
-
-    // Cache ERNI_MULT per anchor date (so we don't recompute repeatedly)
-    window.__ERNI_MULT_BY_DATE__ = window.__ERNI_MULT_BY_DATE__ || Object.create(null);
-    if (typeof window.__ERNI_MULT_BY_DATE__[anchorIso] === 'number' && window.__ERNI_MULT_BY_DATE__[anchorIso] > 0) {
-      window.__ERNI_MULT__ = window.__ERNI_MULT_BY_DATE__[anchorIso]; // keep legacy cache aligned
-      return window.__ERNI_MULT_BY_DATE__[anchorIso];
-    }
-
-    try {
-      if (typeof getSettingsCached === 'function') {
-        const s = await getSettingsCached();
-
-        // New shape: { settings: {...}, finance_windows: [...] }
-        const fws = Array.isArray(s?.finance_windows) ? s.finance_windows : [];
-
-        // Pick finance window in-scope for anchorIso (prefer latest date_from)
-        let chosen = null;
-        for (const w of fws) {
-          const df = asYmd(w?.date_from);
-          const dt = asYmd(w?.date_to);
-          if (!df) continue;
-          if (df > anchorIso) continue;
-          if (dt && dt < anchorIso) continue;
-
-          if (!chosen) {
-            chosen = w;
-          } else {
-            const cdf = asYmd(chosen?.date_from);
-            if (cdf && df > cdf) chosen = w;
-          }
-        }
-
-        // ERNI pct from finance window; fallback to legacy fields if needed
-        let p = chosen?.erni_pct ?? null;
-        if (p == null) p = s?.settings?.erni_pct ?? null;
-        if (p == null) p = s?.erni_pct ?? null;
-        if (p == null) p = s?.employers_ni_percent ?? null;
-        if (p == null) p = 0;
-
-        p = Number(p) || 0;
-        if (p > 1) p = p / 100;
-
-        let mult = 1 + p;
-        if (!Number.isFinite(mult) || mult <= 0) mult = 1;
-
-        window.__ERNI_MULT_BY_DATE__[anchorIso] = mult;
-        window.__ERNI_MULT__ = mult;
-
-        return mult;
-      }
-    } catch (e) {
-      W('ensureErniMult failed, defaulting to 1', e);
-    }
-
-    window.__ERNI_MULT_BY_DATE__[anchorIso] = 1;
-    window.__ERNI_MULT__ = 1;
-    return 1;
-  };
-
-
-  // Margin validation before submit (per bucket)
-  const validateMargins = async (ratesOverride) => {
-    const BUCKETS = ['day','night','sat','sun','bh'];
-    const erniMult = await ensureErniMult();
-    const bad = [];
-
-    for (const b of BUCKETS) {
-      const chargeKey  = `charge_${b}`;
-      const payPayeKey = `paye_${b}`;
-      const payUmbKey  = `umb_${b}`;
-
-      const rawCharge =
-        (ratesOverride && ratesOverride.hasOwnProperty(chargeKey))
-          ? ratesOverride[chargeKey]
-          : R[chargeKey];
-
-      const rawPay =
-        payMethod === 'PAYE'
-          ? ((ratesOverride && ratesOverride.hasOwnProperty(payPayeKey)) ? ratesOverride[payPayeKey] : R[payPayeKey])
-          : ((ratesOverride && ratesOverride.hasOwnProperty(payUmbKey))  ? ratesOverride[payUmbKey]  : R[payUmbKey]);
-
-      const ch = Number(rawCharge);
-      const pa = Number(rawPay);
-
-      if (!Number.isFinite(ch) || !Number.isFinite(pa)) continue;
-
-      let margin;
-      if (payMethod === 'PAYE') {
-        margin = ch - pa * erniMult;
-      } else {
-        margin = ch - pa;
-      }
-
-      // Allow tiny floating point wiggle; treat anything < -0.001 as negative
-      if (margin < -0.001) {
-        bad.push(labelOf(b));
-      }
-    }
-
-    return bad;
-  };
-
-  showModal(
-    'Change Contract Rates',
-    [{ key:'main', label:'Change' }],
-    () => modalHtml,
-    async () => {
-      const payload = buildPayloadFromDom();
-      if (!payload) return false;
-
-      // 🔹 Validate margins before applying
-      try {
-        const badBuckets = await validateMargins(payload.rates_json || {});
-        if (badBuckets.length) {
-          const msg =
-            'One or more buckets would have a negative margin with the new rates:\n\n' +
-            badBuckets.map(b => `• ${b}`).join('\n') +
-            '\n\nPlease adjust pay and/or charge so that margins remain non-negative.';
-          alert(msg);
-          return false;
-        }
-      } catch (err) {
-        W('margin validation failed (non-fatal, but blocking apply)', err);
-        alert('Could not validate margins. Please try again or adjust rates.');
-        return false;
-      }
-
-      try {
-        const resp = await applyChangeContractRates(contractId, payload);
-        L('applyChangeContractRates success', resp);
-
-        // Seed pending focus so when user closes out, Contracts summary highlights old/new contracts
-        try {
-          const oldId = resp?.old_contract_id;
-          const newId = resp?.new_contract_id;
-          const ids = [];
-          if (newId) ids.push(newId);
-          if (oldId && oldId !== newId) ids.push(oldId);
-
-          if (ids.length) {
-            window.__pendingFocus = {
-              section: 'contracts',
-              ids: ids,
-              primaryIds: newId ? [newId] : []
-            };
-          }
-        } catch (e) {
-          W('failed to set pending focus (non-fatal)', e);
-        }
-
-        try { window.__toast && window.__toast('New contract created; outstanding weeks moved.'); } catch {}
-
-        return true; // close child modal
-      } catch (err) {
-        E('applyChangeContractRates failed', err);
-        alert(err?.message || 'Failed to change contract rates.');
-        return false;
-      }
-    },
-    false,
-    null,
-    { kind:'contract-change-rates', noParentGate:true, forceEdit:true }
-  );
-
-  // 🔹 After the modal is mounted, wire up the cut-off summary text
-  setTimeout(() => {
-    try {
-      const root = document.getElementById('changeContractRatesForm');
-      if (!root) return;
-      const sel = root.querySelector('select[name="cutoff_we"]');
-      const summary = root.querySelector('#cutoffSummary');
-      if (!sel || !summary) return;
-
-      const updateSummary = () => {
-        const v = sel.value || '';
-        if (!v) {
-          summary.textContent = 'Choose a week ending date for the new contract to start applying.';
-        } else {
-          summary.textContent = `New rates and schedule will apply to weeks on or after week ending ${v}.`;
-        }
-      };
-
-      sel.addEventListener('change', updateSummary);
-      updateSummary();
-    } catch (e) {
-      W('failed to wire cutoffSummary (non-fatal)', e);
-    }
-  }, 0);
-}
 
 async function openCandidatePicker(onPick, options) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
@@ -26886,9 +27592,14 @@ async function openCandidatePicker(onPick, options) {
   const renderRows = (rows) => rows.map(r => {
     const first = r.first_name || '';
     const last  = r.last_name || '';
-    const label = (r.display_name || `${first} ${last}`).trim() || (r.tms_ref || r.id || '');
+
+    // ✅ 9.1 Canonical label
+    const cLabel = (typeof formatCandidateLabel === 'function')
+      ? formatCandidateLabel(r)
+      : ((r.display_name || `${first} ${last}`).trim() || (r.tms_ref || r.id || ''));
+
     return `
-      <tr data-id="${r.id||''}" data-label="${(label||'').replace(/"/g,'&quot;')}" class="pick-row">
+      <tr data-id="${r.id||''}" data-label="${(cLabel||'').replace(/"/g,'&quot;')}" class="pick-row">
         <td data-k="last_name">${(last)}</td>
         <td data-k="first_name">${(first)}</td>
         <td data-k="roles_display" class="mini">${(r.roles_display||'')}</td>
@@ -27002,7 +27713,11 @@ async function openCandidatePicker(onPick, options) {
         }
         if (LOGC) console.log('[PICKER][candidates] render()', {
           count: rows.length,
-          sample: rows.slice(0, 6).map(r => r.display_name || `${r.first_name} ${r.last_name}`)
+          sample: rows.slice(0, 6).map(r =>
+            (typeof formatCandidateLabel === 'function')
+              ? formatCandidateLabel(r)
+              : (r.display_name || `${r.first_name} ${r.last_name}`)
+          )
         });
       };
 
@@ -27040,9 +27755,10 @@ async function openCandidatePicker(onPick, options) {
         }
         if (LOGC) console.log('[PICKER][candidates] applySelection()', { selectedId, selectedLabel });
         try {
-          await revalidateCandidateOnPick(selectedId);
+          // ✅ 9.2 Return candidate details and pass back to caller
+          const candFull = await revalidateCandidateOnPick(selectedId);
           if (typeof onPick === 'function') {
-            await onPick({ id: selectedId, label: selectedLabel });
+            await onPick({ id: selectedId, label: selectedLabel, candidate: candFull || null });
           }
         } catch (err) {
           console.warn('[PICKER][candidates] selection validation failed', err);
@@ -27191,7 +27907,8 @@ async function openCandidatePicker(onPick, options) {
     }
   }, 0);
 }
- 
+
+
 async function openClientPicker(onPick, opts) {
   const LOGC       = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true; // default ON
   const nhspOnly   = !!(opts && opts.nhspOnly);
@@ -27545,9 +28262,6 @@ async function openClientPicker(onPick, opts) {
   }, 0);
 }
 
-
-
-
 async function openCandidatePayMethodChangeModal(candidate, context = {}) {
   const LOG = (typeof window.__LOG_CAND === 'boolean')
     ? window.__LOG_CAND
@@ -27640,6 +28354,10 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
         summary: resp?.summary || null
       });
       focusContractsAfterBulkChange(resp);
+
+      // Ensure UI refresh so candidate pay_method + any related panels are consistent
+      try { await renderAll(); } catch {}
+
       try { window.__toast && window.__toast('Pay method changed.'); } catch {}
       // Flip confirmed
       return true;
@@ -27767,6 +28485,77 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
           // Prepare Contracts section to focus the before/after contracts
           focusContractsAfterBulkChange(resp);
 
+          // ✅ NEW: if old contracts now have zero timesheets, prompt to delete them
+          try {
+            let migrations = resp?.migrations;
+            if (typeof migrations === 'string') {
+              try { migrations = JSON.parse(migrations); } catch { migrations = null; }
+            }
+            migrations = Array.isArray(migrations) ? migrations : [];
+
+            const deletableOldIds = Array.from(new Set(
+              migrations
+                .map(m => {
+                  const oldId = String(m?.old_contract_id || '').trim();
+                  const rem = (m && (m.old_contract_timesheets_remaining != null)) ? Number(m.old_contract_timesheets_remaining) : null;
+                  const can = (m && (m.old_contract_can_delete === true || String(m.old_contract_can_delete).toLowerCase() === 'true'));
+                  if (!oldId) return null;
+                  if (can) return oldId;
+                  if (rem != null && Number.isFinite(rem) && rem === 0) return oldId;
+                  return null;
+                })
+                .filter(Boolean)
+            ));
+
+            if (deletableOldIds.length > 0) {
+              const msg = [
+                `Old contract(s) now have zero timesheets after the ${origMethod} → ${newMethod} change.`,
+                '',
+                `Delete old contract(s)?`,
+                deletableOldIds.map(x => `• ${x}`).join('\n'),
+                '',
+                'If you choose "No", the old contracts will remain (with updated dates).'
+              ].join('\n');
+
+              let okDel = false;
+              if (typeof window.uiConfirmModal === 'function') {
+                okDel = await window.uiConfirmModal({
+                  title: 'Delete old contract(s)?',
+                  message: msg,
+                  yesText: 'Yes, delete',
+                  noText: 'No, keep'
+                });
+              } else {
+                okDel = window.confirm(msg);
+              }
+
+              if (okDel) {
+                for (const oldId of deletableOldIds) {
+                  try {
+                    if (typeof deleteContract === 'function') {
+                      await deleteContract(oldId);
+                    } else {
+                      const rr = await authFetch(API(`/api/contracts/${encodeURIComponent(oldId)}`), { method: 'DELETE' });
+                      if (!rr.ok) {
+                        const t = await rr.text().catch(() => '');
+                        throw new Error(t || `Delete failed (${rr.status})`);
+                      }
+                    }
+                  } catch (de) {
+                    console.error('[CAND][PAY-METHOD] delete old contract failed', oldId, de);
+                    alert(de?.message || `Failed to delete old contract ${oldId}`);
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[CAND][PAY-METHOD] delete-old prompt failed (non-fatal)', e);
+          }
+
+          // ✅ NEW: force a refresh so newly hydrated schedules (planned_schedule_json) show immediately
+          try { await renderAll(); } catch {}
+
           try { window.__toast && window.__toast('Pay method changed and contracts updated.'); } catch {}
 
           done(true);   // flip confirmed
@@ -27789,6 +28578,10 @@ async function openCandidatePayMethodChangeModal(candidate, context = {}) {
     );
   });
 }
+
+
+
+
 function focusContractsAfterBulkChange(info) {
   if (!info || typeof info !== 'object') info = {};
   const newIds = Array.isArray(info.new_contract_ids) ? info.new_contract_ids.map(String) : [];
@@ -28338,8 +29131,65 @@ async function getCandidateCalendar(candidate_id, from, to) {
   return r.json();
 }
 async function contractsPlanRanges(contract_id, payload) {
-  const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/plan-ranges`), { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
-  if (!r?.ok) throw new Error(await r.text()); return r.json();
+  const uiConfirm = async (title, message) => {
+    try {
+      if (typeof uiConfirmModal === 'function') {
+        return await uiConfirmModal(title, message, { kind: 'warn' });
+      }
+    } catch {}
+    return window.confirm(`${title}\n\n${message}`);
+  };
+
+  const fmtClashes = (cl) => {
+    const arr = Array.isArray(cl) ? cl : [];
+    if (!arr.length) return '';
+    const lines = arr.slice(0, 12).map(x => {
+      const d = x?.date || x?.a_date || x?.b_date || '';
+      const a = `${x?.a_start || x?.proposed_start || ''}-${x?.a_end || x?.proposed_end || ''}`.replace(/^-|-$/g,'');
+      const b = `${x?.b_start || x?.existing_start || ''}-${x?.b_end || x?.existing_end || ''}`.replace(/^-|-$/g,'');
+      const cid = x?.b_contract_id || x?.existing_contract_id || x?.a_contract_id || '';
+      return `• ${d} ${a}${b ? ` overlaps ${b}` : ''}${cid ? ` (contract ${cid})` : ''}`;
+    });
+    return lines.join('\n') + (arr.length > 12 ? `\n…and ${arr.length - 12} more.` : '');
+  };
+
+  const doReq = async (pl) => {
+    return await authFetch(API(`/api/contracts/${_enc(contract_id)}/plan-ranges`), {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify(pl || {})
+    });
+  };
+
+  let r = await doReq(payload);
+
+  // ✅ 409 schedule clash handling (warn-only; retry with force)
+  if (r && r.status === 409) {
+    let txt = '';
+    let j = null;
+    try { txt = await r.text(); } catch {}
+    try { j = txt ? JSON.parse(txt) : null; } catch { j = null; }
+
+    const err = j?.error || j?.code || null;
+    if (String(err || '').toUpperCase() === 'SCHEDULE_CLASH') {
+      const clashes = j?.clashes || [];
+      const clashCount = Number(j?.clash_count || clashes.length || 0);
+      const detail = fmtClashes(clashes);
+
+      const proceed = await uiConfirm(
+        'Schedule clash warning',
+        `Schedule clashes detected (${clashCount}).\n\n${detail}\n\nContinue anyway?`
+      );
+
+      if (!proceed) throw new Error('Calendar apply cancelled due to schedule clashes.');
+
+      const retryPayload = { ...(payload || {}), force_schedule_clashes: true };
+      r = await doReq(retryPayload);
+    }
+  }
+
+  if (!r?.ok) throw new Error(await r.text());
+  return r.json();
 }
 async function contractsUnplanRanges(contract_id, payload) {
   const r = await authFetch(API(`/api/contracts/${_enc(contract_id)}/plan-ranges`), { method:'DELETE', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
@@ -28705,7 +29555,6 @@ function wireContractCalendarSaveControls(contractId, holder, weekIndex) {
 // ============================================================================
 // CONTRACTS – TAB RENDERER
 // ============================================================================
-
 function renderContractCalendarTab(ctx) {
   const LOGM = !!window.__LOG_MODAL;
   const c = ctx?.data || {};
@@ -28721,14 +29570,16 @@ function renderContractCalendarTab(ctx) {
   const fr = (typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null;
   const inViewMode = !!(fr && fr.mode === 'view');
 
-  // --- actions (includes Duplicate + Change Rates)
+  const cloneExtendHint =
+    'Use this to copy an identical contract, apply the same candidate to the contract from specified dates, allowing you to change rates and rules from that date';
+
+  // --- actions (includes Duplicate)
   const actionsHtml = (c.id
     ? `<div class="actions" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
          ${inViewMode ? `` : `<button id="btnAddMissing">Add missing weeks</button>
          <button id="btnRemoveAll">Remove all weeks</button>`}
-         ${inViewMode ? `<button id="btnCloneExtend">Clone & Extend…</button>
-         <button id="btnDuplicateContract">Duplicate Contract…</button>
-         <button id="btnChangeRatesOutstanding">Change Contract Rates…</button>` : ``}
+         ${inViewMode ? `<button id="btnCloneExtend" title="${escapeHtml(cloneExtendHint)}">Clone & Extend…</button>
+         <button id="btnDuplicateContract">Duplicate Contract…</button>` : ``}
        </div>`
     : ``);
 
@@ -28928,20 +29779,6 @@ function renderContractCalendarTab(ctx) {
           });
         }
 
-        // NEW: Change Contract Rates (outstanding weeks)
-        const btnCR = el.querySelector('#btnChangeRatesOutstanding');
-        if (btnCR && !btnCR.__wired) {
-          btnCR.__wired = true;
-          btnCR.addEventListener('click', () => {
-            if (typeof openChangeContractRatesModal === 'function') {
-              if (LOGM) console.log('[CAL][contract] open change contract rates', { id: c.id });
-              openChangeContractRatesModal(c.id);
-            } else {
-              alert('Change Contract Rates is not available in this build.');
-            }
-          });
-        }
-
         // Duplicate Contract…
         const btnDup = el.querySelector('#btnDuplicateContract');
         if (btnDup && !btnDup.__wired) {
@@ -29081,6 +29918,8 @@ function computeContractSaveEligibility() {
     const data = (window.modalCtx && window.modalCtx.data) || {};
     const form = document.querySelector('#contractForm');
 
+    const isCreate = !data || !data.id;
+
     const val = (name) => {
       const staged = fs.main && fs.main[name];
       if (staged !== undefined && staged !== null && String(staged).trim() !== '') return String(staged).trim();
@@ -29091,9 +29930,13 @@ function computeContractSaveEligibility() {
     const hasText = (s) => !!(s && String(s).trim().length);
 
     // -------- Required entities with fallback to saved data
-    const candidateOk = hasText(val('candidate_id')) || !!data.candidate_id;
+    const candidateIdVal = val('candidate_id') || (data.candidate_id ? String(data.candidate_id) : '');
+    const candidateOk = hasText(candidateIdVal) || !!data.candidate_id;
     const clientOk    = hasText(val('client_id'))    || !!data.client_id;
     const roleOk      = hasText(val('role'))         || !!data.role;
+
+    // ✅ 7) Gate: candidate pay method unknown (create mode)
+    const payMethodUnknown = !!(isCreate && fs && fs.main && fs.main.__candidate_pay_method_unknown === true && candidateOk);
 
     // -------- Dates (with fallback to saved row, and awareness of pending auto-expand)
     const toIso = (uk) => {
@@ -29183,6 +30026,10 @@ function computeContractSaveEligibility() {
         const saved = (window.modalCtx && window.modalCtx.data && window.modalCtx.data.rates_json) || {};
         const v = saved[n];
         if (v === 0 || (typeof v === 'number' && Number.isFinite(v))) return Number(v);
+        if (typeof v === 'string' && String(v).trim() !== '') {
+          const ns = Number(v);
+          if (Number.isFinite(ns)) return ns;
+        }
       } catch {}
       return null;
     };
@@ -29258,8 +30105,17 @@ function computeContractSaveEligibility() {
       reasons.push({ code:'TS_BOUNDARY_VIOLATION', message: tsBoundaryMsg || 'Dates exclude existing timesheets.' });
     }
 
+    // ✅ NEW: candidate pay method unknown reason + hard gate (create mode)
+    if (payMethodUnknown) {
+      reasons.push({
+        code: 'CANDIDATE_PAY_METHOD_UNKNOWN',
+        message: 'Candidate payment method is not yet set. Please amend the candidate payment method in the candidate record to PAYE or Umbrella first.'
+      });
+    }
+
     // ✅ FINAL ELIGIBILITY:
     //   • Candidate is NO LONGER a hard requirement here (still warned via reasons).
+    //   • Candidate pay method unknown IS a hard gate for create mode.
     const ok =
       /* candidateOk && */            // <-- removed from hard gate
       clientOk &&
@@ -29273,7 +30129,8 @@ function computeContractSaveEligibility() {
       anyPay &&
       anyCharge &&
       !hasNegativeMargins &&
-      !tsBoundaryViolation;
+      !tsBoundaryViolation &&
+      !payMethodUnknown;
 
     const detail = {
       ok,
@@ -29287,17 +30144,19 @@ function computeContractSaveEligibility() {
         candidateOk, clientOk, roleOk,
         dates: { bothDatesProvided, dateOrderOk, hasStagedCalendar: hasStaged, tsBoundaryOk: !tsBoundaryViolation, willAutoExpand: !!hasWindowExpand },
         schedule: { hasValidPair, hasPendingPair, hasStagedCalendar: hasStaged, hasTemplate },
-        finance: { anyPay, anyCharge, hasNegativeMargins, payMethod }
+        finance: { anyPay, anyCharge, hasNegativeMargins, payMethod },
+        candidatePayMethodUnknown: payMethodUnknown
       },
       reasons,
       tip: pendingTimeFormat ? 'We’ll format times like 0900 → 09:00 when you tab out or save.' : null
     };
 
     window.__contractEligibility = detail;
-    return ok;
+    return detail;
   } catch (e) {
-    window.__contractEligibility = { ok:false, reasons:[{ code:'INTERNAL_ERROR', message:String(e && e.message || e || 'unknown error') }] };
-    return false;
+    const detail = { ok:false, reasons:[{ code:'INTERNAL_ERROR', message:String((e && e.message) || e || 'unknown error') }] };
+    window.__contractEligibility = detail;
+    return detail;
   }
 }
 
@@ -29573,11 +30432,14 @@ if (m.__seeded !== true) {
   if (base.auto_invoice != null)                 m.auto_invoice = base.auto_invoice;
   if (base.require_reference_to_pay != null)     m.require_reference_to_pay = base.require_reference_to_pay;
   if (base.require_reference_to_invoice != null) m.require_reference_to_invoice = base.require_reference_to_invoice;
-
-  if (base.week_ending_weekday_snapshot != null) m.week_ending_weekday_snapshot = String(base.week_ending_weekday_snapshot);
+ if (base.week_ending_weekday_snapshot != null) m.week_ending_weekday_snapshot = String(base.week_ending_weekday_snapshot);
   if (base.bucket_labels_json)   m.__bucket_labels = base.bucket_labels_json;
   if (base.std_schedule_json)    m.__template      = base.std_schedule_json;
   if (base.std_hours_json)       m.__hours         = base.std_hours_json;
+
+  // ✅ NEW: seed contract.is_ad_hoc so checkbox reflects persisted state
+  if (base.is_ad_hoc != null)    m.is_ad_hoc       = base.is_ad_hoc;
+
   // Seed mileage if present on row
   if (base.mileage_charge_rate != null) m.mileage_charge_rate = base.mileage_charge_rate;
   if (base.mileage_pay_rate != null)    m.mileage_pay_rate    = base.mileage_pay_rate;
@@ -29923,8 +30785,18 @@ try {
         const week_ending_weekday_snapshot = String(
           choose('week_ending_weekday_snapshot', (base.week_ending_weekday_snapshot ?? '0'))
         );
+     const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
 
-    const candidate_id = choose('candidate_id', base.candidate_id ?? null) || null;
+// ✅ NEW: hard block — candidate selected but pay method unknown (must fix candidate record first)
+try {
+  const isUnknown = !!(fs && fs.main && fs.main.__candidate_pay_method_unknown === true);
+  if (isCreate && candidate_id && isUnknown) {
+    alert('Candidate payment method is not yet set. Please amend the candidate payment method in the candidate record to PAYE or Umbrella first.');
+    window.modalCtx._saveInFlight = false;
+    if (LOGC) console.groupEnd?.();
+    return { ok: false };
+  }
+} catch {}
 
 // NEW: polite confirmation when saving with no candidate
 if (!candidate_id) {
@@ -29941,7 +30813,6 @@ const role         = choose('role', base.role ?? null);
 const band         = choose('band', base.band ?? null);
 const display_site = choose('display_site', base.display_site ?? '');
 
-
          const boolFromFS = (name, baseVal=false) => {
           if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, name)) {
             const v = fs.main[name];
@@ -29949,6 +30820,9 @@ const display_site = choose('display_site', base.display_site ?? '');
           }
           return !!base[name];
         };
+
+        // ✅ NEW: contract-level ad hoc flag (boolean)
+        const is_ad_hoc = boolFromFS('is_ad_hoc', !!base.is_ad_hoc);
 
         // NEW: tri-state boolean (preserve NULL contract overrides unless explicitly set)
            const boolTriFromFS = (name) => {
@@ -30104,12 +30978,10 @@ const mcrDom = document.querySelector('#contractRatesTab input[name="mileage_cha
 const mprDom = document.querySelector('#contractRatesTab input[name="mileage_pay_rate"]');
 const mileage_charge_rate = (mcrDom && mcrDom.value !== '') ? (Number(mcrDom.value) || null) : numOrNull('mileage_charge_rate');
 const mileage_pay_rate    = (mprDom && mprDom.value !== '') ? (Number(mprDom.value) || null) : numOrNull('mileage_pay_rate');
-
-// NEW: collect Additional Rates (up to 5 slots) from "Additional Rates" tab
+// NEW: collect Additional Rates (up to 5 slots) from "Additional Rates" tab OR staged state
 let additional_rates_json = null;
 try {
   const existing = Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null;
-  const rows = [];
 
   const normaliseFrequency = (raw) => {
     if (!raw) return null;
@@ -30124,7 +30996,10 @@ try {
   };
 
   const tab = document.getElementById('contractAdditionalRatesTab');
+
+  // 1) If Extras DOM exists → build from DOM and stage into fs.main.additional_rates_json (single source)
   if (tab) {
+    const rows = [];
     for (let i = 1; i <= 5; i++) {
       const code = `EX${i}`;
       const bnEl = tab.querySelector(`input[name="extra_bucket_name_${i}"]`);
@@ -30133,41 +31008,66 @@ try {
       const prEl = tab.querySelector(`input[name="extra_pay_${i}"]`);
       const crEl = tab.querySelector(`input[name="extra_charge_${i}"]`);
 
-      const bucket_name = (bnEl?.value || '').trim();
-      const unit_name   = (unEl?.value || '').trim();
-      const freqRaw     = (frEl?.value || '').trim();
-      const payRaw      = (prEl?.value || '').trim();
-      const chargeRaw   = (crEl?.value || '').trim();
+      const bucket_name = String(bnEl?.value || '').trim();
+      const unit_name_raw = String(unEl?.value || '').trim();
+      const freqRaw = String(frEl?.value || '').trim();
+      const payRaw = String(prEl?.value || '').trim();
+      const chargeRaw = String(crEl?.value || '').trim();
 
-      const hasAny = !!(bucket_name || unit_name || freqRaw || payRaw || chargeRaw);
+      const hasAny = !!(bucket_name || unit_name_raw || freqRaw || payRaw || chargeRaw);
       if (!hasAny) continue;
 
-      const payNum    = payRaw === '' ? null : Number(payRaw);
+      const payNum = payRaw === '' ? null : Number(payRaw);
       const chargeNum = chargeRaw === '' ? null : Number(chargeRaw);
       const frequency = normaliseFrequency(freqRaw) || 'ONE_PER_WEEK';
 
       rows.push({
         code,
         bucket_name,
-        unit_name: unit_name || null,
+        unit_name: unit_name_raw || null,
         frequency,
         pay_rate: Number.isFinite(payNum) ? payNum : null,
         charge_rate: Number.isFinite(chargeNum) ? chargeNum : null
       });
     }
+
+    additional_rates_json = rows.length ? rows : null;
+
+    // Stage into formState (authoritative)
+    try {
+      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+      fsm.additional_rates_json = additional_rates_json;
+    } catch {}
+
+    // Mirror into modalCtx.data (safety net)
+    try {
+      window.modalCtx.data = window.modalCtx.data || {};
+      window.modalCtx.data.additional_rates_json = (typeof structuredClone === 'function')
+        ? structuredClone(additional_rates_json)
+        : (additional_rates_json ? JSON.parse(JSON.stringify(additional_rates_json)) : null);
+    } catch {
+      try {
+        window.modalCtx.data = window.modalCtx.data || {};
+        window.modalCtx.data.additional_rates_json = additional_rates_json;
+      } catch {}
+    }
+
+  // 2) Else if staged exists → use staged
+  } else if (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, 'additional_rates_json')) {
+    const staged = fs.main.additional_rates_json;
+    additional_rates_json = Array.isArray(staged) ? staged : null;
+
+  // 3) Else fallback to existing backend value
+  } else {
+    additional_rates_json = existing || null;
   }
 
-  if (rows.length) {
-    additional_rates_json = rows;
-  } else if (existing) {
-    // If the tab was never touched this session, keep what backend sent
-    additional_rates_json = existing;
-  } else {
-    additional_rates_json = null;
-  }
 } catch (e) {
   if (LOGC) console.warn('[CONTRACTS] additional_rates_json build failed', e);
-  const fallback = Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null;
+  const fallback =
+    (fs && fs.main && Object.prototype.hasOwnProperty.call(fs.main, 'additional_rates_json') && Array.isArray(fs.main.additional_rates_json))
+      ? fs.main.additional_rates_json
+      : (Array.isArray(base.additional_rates_json) ? base.additional_rates_json : null);
   additional_rates_json = fallback || null;
 }
 const data = {
@@ -30181,6 +31081,9 @@ const data = {
   end_date:     endIso,
   pay_method_snapshot: payMethodSnap,
 
+  // ✅ NEW: contract-level ad hoc flag
+  is_ad_hoc,
+
   // ✅ UPDATED: nullable (inherit) supported
   default_submission_mode,
 
@@ -30188,7 +31091,6 @@ const data = {
 
   // ✅ NEW: overrideclientsettings gate
   overrideclientsettings,
-
   // contract route/settings overrides (nullable)
   is_nhsp,
   autoprocess_hr,
@@ -30806,7 +31708,6 @@ const stage = (e) => {
                 }
               } catch (e) { if (LOGC) console.warn('[CONTRACTS] typeahead priming failed', entity, e); }
             };
-
             const buildItemLabel = (entity, r) => {
               if (entity === 'candidates') {
                 const first = (r.first_name||'').trim();
@@ -30817,6 +31718,143 @@ const stage = (e) => {
                 const name  = (r.name||'').trim();
                 return name;
               }
+            };
+
+            // ✅ NEW: canonical candidate label builder (ensures picker + typeahead converge)
+            const _formatCandidateLabel = (cand) => {
+              try {
+                const c = (cand && typeof cand === 'object') ? cand : {};
+                const first = String(c.first_name || c.first || '').trim();
+                const last  = String(c.last_name  || c.last  || '').trim();
+                const role  = String((c.roles_display || '').split(/[•;,]/)[0] || '').trim();
+                return `${last}${last?', ':''}${first}${role?` ${role}`:''}`.trim();
+              } catch { return ''; }
+            };
+
+            // ✅ NEW: derive PAYE/UMBRELLA/UNKNOWN (unknown = must fix candidate record)
+            const _derivePayMethodFromCandidate = (cand) => {
+              const pmRaw = cand && cand.pay_method ? String(cand.pay_method).trim().toUpperCase() : '';
+              if (pmRaw === 'PAYE') return { derived: 'PAYE', locked: true, unknown: false };
+              if (pmRaw === 'UMBRELLA' && cand && cand.umbrella_id) return { derived: 'UMBRELLA', locked: true, unknown: false };
+              return { derived: '', locked: false, unknown: true };
+            };
+
+            // ✅ NEW: single canonical candidate selection handler (typeahead + picker)
+            const applyContractCandidateSelection = ({ id, label, candidate } = {}) => {
+              const cid = String(id || '').trim();
+              if (!cid) return;
+
+              const initialLabel = String(label || '').trim();
+
+              // Immediate stage: id + (temporary) label so UI updates instantly
+              setContractFormValue('candidate_id', cid);
+
+              try {
+                const fs0 = (window.modalCtx.formState ||= {
+                  __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
+                  main:{},
+                  pay:{}
+                });
+                fs0.main ||= {};
+                fs0.main.candidate_id = cid;
+                fs0.main.candidate_display = initialLabel;
+              } catch {}
+
+              try {
+                window.modalCtx.data = window.modalCtx.data || {};
+                window.modalCtx.data.candidate_id = cid;
+                window.modalCtx.data.candidate_display = initialLabel;
+              } catch {}
+
+              // Update visible UI immediately
+              try {
+                const labEl = document.getElementById('candidatePickLabel');
+                if (labEl) labEl.textContent = initialLabel ? `Chosen: ${initialLabel}` : '';
+
+                const inp = document.getElementById('candidate_name_display');
+                if (inp) inp.value = initialLabel || '';
+              } catch {}
+
+              // Mark non-calendar dirty (programmatic selection)
+              try {
+                window.modalCtx = window.modalCtx || {};
+                window.modalCtx.__nonCalendarDirty = true;
+                window.modalCtx.__calendarOnly = false;
+              } catch {}
+
+              // Async: fetch full candidate if not provided, then:
+              // - canonicalise label (fixes picker vs typeahead mismatch)
+              // - set pay_method_snapshot deterministically
+              (async () => {
+                try {
+                  let cand = (candidate && typeof candidate === 'object') ? candidate : null;
+
+                  if (!cand) {
+                    const candRaw = await getCandidate(cid);
+                    cand = (candRaw && candRaw.candidate) ? candRaw.candidate : candRaw;
+                  }
+
+                  // Canonical label from candidate row (ensures consistency)
+                  const canonLabel = _formatCandidateLabel(cand);
+                  const finalLabel = canonLabel || initialLabel;
+
+                  // Persist canonical label everywhere + repaint chosen label/input if needed
+                  try {
+                    const fs1 = (window.modalCtx.formState ||= { main:{}, pay:{} });
+                    fs1.main ||= {};
+                    fs1.main.candidate_display = finalLabel;
+
+                    window.modalCtx.data = window.modalCtx.data || {};
+                    window.modalCtx.data.candidate_display = finalLabel;
+
+                    const labEl = document.getElementById('candidatePickLabel');
+                    if (labEl) labEl.textContent = finalLabel ? `Chosen: ${finalLabel}` : '';
+
+                    const inp = document.getElementById('candidate_name_display');
+                    if (inp) inp.value = finalLabel || '';
+                  } catch {}
+
+                  // Derive pay method snapshot (no silent PAYE fallback)
+                  const { derived, locked, unknown } = _derivePayMethodFromCandidate(cand);
+
+                  const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+                  fsm.pay_method_snapshot = derived; // '' when unknown
+                  fsm.__pay_locked = locked;
+                  fsm.__candidate_pay_method_unknown = unknown;
+
+                  // Apply to select (lock only when known; existing contracts remain locked)
+                  const hasId = !!window.modalCtx?.data?.id;
+                  const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                  if (sel) {
+                    if (derived) sel.value = derived;
+                    if (hasId) sel.disabled = true;
+                    else sel.disabled = !!locked;
+                  }
+
+                  if (unknown) {
+                    alert('Candidate payment method is not yet set. Please amend the candidate payment method in the candidate record to PAYE or Umbrella first.');
+                  }
+
+                  try { computeContractMargins(); } catch {}
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                } catch (e) {
+                  // Fetch failure is treated as unknown (safety-first)
+                  try {
+                    const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
+                    fsm.pay_method_snapshot = '';
+                    fsm.__pay_locked = false;
+                    fsm.__candidate_pay_method_unknown = true;
+
+                    const hasId = !!window.modalCtx?.data?.id;
+                    const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
+                    if (sel && !hasId) sel.disabled = false;
+
+                    alert('Candidate payment method is not yet set. Please amend the candidate payment method in the candidate record to PAYE or Umbrella first.');
+                  } catch {}
+
+                  if (LOGC) console.warn('[CONTRACTS] candidate selection: pay-method resolve failed (treated as unknown)', e);
+                }
+              })();
             };
 
             const wireTypeahead = async (entity, inputEl, hiddenName, labelElId) => {
@@ -30867,6 +31905,15 @@ const stage = (e) => {
               };
 
               const selectRow = (id, label) => {
+                // ✅ Candidate: use canonical handler (includes pay-method lock + warning)
+                if (hiddenName === 'candidate_id') {
+                  applyContractCandidateSelection({ id, label, candidate: null });
+                  closeMenu();
+                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                  return;
+                }
+
+                // Client (unchanged behaviour)
                 setContractFormValue(hiddenName, id);
                 inputEl.value = label || '';
                 const labEl = document.getElementById(labelElId);
@@ -30876,40 +31923,13 @@ const stage = (e) => {
                   const fs = (window.modalCtx.formState ||= { __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null), main:{}, pay:{} });
                   fs.main ||= {};
                   fs.main[hiddenName] = id;
-                  if (hiddenName === 'candidate_id') fs.main['candidate_display'] = label;
-                  if (hiddenName === 'client_id')    fs.main['client_name']       = label;
+                  if (hiddenName === 'client_id') fs.main['client_name'] = label;
                 } catch {}
 
                 try {
                   window.modalCtx.data = window.modalCtx.data || {};
-                  if (hiddenName === 'candidate_id') { window.modalCtx.data.candidate_id = id; window.modalCtx.data.candidate_display = label; }
-                  if (hiddenName === 'client_id')    { window.modalCtx.data.client_id    = id; window.modalCtx.data.client_name = label; }
+                  if (hiddenName === 'client_id') { window.modalCtx.data.client_id = id; window.modalCtx.data.client_name = label; }
                 } catch {}
-if (hiddenName === 'candidate_id') {
-  (async () => {
-    try {
-      const candRaw = await getCandidate(id);
-      // Support both shapes: { candidate:{...} } or flat row
-      const cand = (candRaw && candRaw.candidate) ? candRaw.candidate : candRaw;
-
-      const pmRaw = cand && cand.pay_method ? String(cand.pay_method).toUpperCase() : '';
-      const derived =
-        (pmRaw === 'UMBRELLA' && cand && cand.umbrella_id)
-          ? 'UMBRELLA'
-          : 'PAYE';
-
-      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-      fsm.pay_method_snapshot = derived;
-      fsm.__pay_locked = true;
-      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-      if (sel) { sel.value = derived; sel.disabled = true; }
-      computeContractMargins();
-    } catch (e) {
-      if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e);
-    }
-  })();
-}
-
 
                 closeMenu();
                 try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
@@ -30970,69 +31990,11 @@ if (hiddenName === 'candidate_id') {
 
                 // Ensure datasets are primed before opening picker (fast + up-to-date)
                 try { await ensurePrimed('candidates'); } catch {}
-
-                openCandidatePicker(async ({ id, label }) => {
+                openCandidatePicker(async ({ id, label, candidate }) => {
                   if (LOGC) console.log('[CONTRACTS] Pick Candidate → selected', { id, label });
 
-                  // Update hidden + visible fields
-                  setContractFormValue('candidate_id', id);
-                  const lab = document.getElementById('candidatePickLabel');
-                  if (lab) lab.textContent = `Chosen: ${label}`;
-
-                  const candInput2 = document.getElementById('candidate_name_display');
-                  if (candInput2) candInput2.value = label || '';
-
-                  // Stage into formState + modalCtx.data
-                  try {
-                    const fs2 = (window.modalCtx.formState ||= {
-                      __forId: (window.modalCtx.data?.id ?? window.modalCtx.openToken ?? null),
-                      main:{},
-                      pay:{}
-                    });
-                    fs2.main ||= {};
-                    fs2.main.candidate_id = id;
-                    fs2.main.candidate_display = label;
-                  } catch {}
-
-                  try {
-                    window.modalCtx.data = window.modalCtx.data || {};
-                    window.modalCtx.data.candidate_id = id;
-                    window.modalCtx.data.candidate_display = label;
-                  } catch {}
-
-                  // Mark non-calendar dirty (programmatic changes won't trigger input handler reliably)
-                  try {
-                    window.modalCtx = window.modalCtx || {};
-                    window.modalCtx.__nonCalendarDirty = true;
-                    window.modalCtx.__calendarOnly = false;
-                  } catch {}
-
-                  // Derive + lock pay_method_snapshot from candidate (same logic as typeahead selectRow)
-                  (async () => {
-                    try {
-                      const candRaw = await getCandidate(id);
-                      const cand = (candRaw && candRaw.candidate) ? candRaw.candidate : candRaw;
-
-                      const pmRaw = cand && cand.pay_method ? String(cand.pay_method).toUpperCase() : '';
-                      const derived =
-                        (pmRaw === 'UMBRELLA' && cand && cand.umbrella_id)
-                          ? 'UMBRELLA'
-                          : 'PAYE';
-
-                      const fsm = (window.modalCtx.formState ||= { main:{}, pay:{} }).main ||= {};
-                      fsm.pay_method_snapshot = derived;
-                      fsm.__pay_locked = true;
-
-                      const sel = document.querySelector('select[name="pay_method_snapshot"], select[name="default_pay_method_snapshot"]');
-                      if (sel) { sel.value = derived; sel.disabled = true; }
-
-                      try { computeContractMargins(); } catch {}
-                    } catch (e) {
-                      if (LOGC) console.warn('[CONTRACTS] derive pay method failed', e);
-                    }
-                  })();
-
-                  try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
+                  // ✅ Use the single canonical handler (label canonicalisation + pay-method lock + unknown warning)
+                  applyContractCandidateSelection({ id, label, candidate: candidate || null });
                 }, { ignoreMembership: true }); // ✅ ALWAYS full DB candidate picker
               });
 
@@ -31847,27 +32809,8 @@ if (chooseBtn && !chooseBtn.__wired) {
         window.addEventListener('contracts-main-rendered', rewire);
         window.addEventListener('contracts-rates-rendered', rewire);
       }
-
- // Re-wire when the user clicks between Main / Rates / Calendar
-      const tabsEl = document.getElementById('modalTabs');
-      if (tabsEl && !tabsEl.__wired_contract_stage) {
-        tabsEl.__wired_contract_stage = true;
-        tabsEl.addEventListener('click', () => {
-          const fr = window.__getModalFrame?.();
-          const prevDirty = fr?.isDirty;
-          if (fr) fr._suppressDirty = true;
-
-          snapshotContractForm();
-          setTimeout(() => {
-            wire();
-            if (fr) {
-              fr._suppressDirty = false;
-              fr.isDirty = prevDirty;
-              fr._updateButtons && fr._updateButtons();
-            }
-          }, 0);
-        });
-      }
+      // ✅ REMOVED: tabs click snapshot/rewire listener (race-prone + redundant)
+      // Tab changes are handled via showModal framework + explicit contracts-*-rendered rewires above.
 
     },
 
@@ -31920,7 +32863,59 @@ if (chooseBtn && !chooseBtn.__wired) {
   }, 0);
 }
 
+function formatCandidateLabel(row) {
+  // Canonical label for candidates used across typeahead + picker:
+  //   "Last, First" + optional role (first role token from roles_display etc.)
+  // Robust to varying row shapes: {first_name,last_name}, {first,last}, {display_name}, etc.
 
+  const r = (row && typeof row === 'object') ? row : {};
+
+  const clean = (v) => String(v ?? '').trim();
+
+  // --- role (optional) ---
+  // Keep the existing UX style: if roles_display exists, take the first token before separators.
+  let role = clean(r.roles_display || r.role_display || r.role || r.role_code || '');
+  if (role) {
+    role = clean(role.split(/[•;,]/)[0] || '');
+  }
+
+  // --- first/last ---
+  let first = clean(r.first_name || r.first || r.forename || r.given_name || '');
+  let last  = clean(r.last_name  || r.last  || r.surname  || r.family_name || '');
+
+  // Fallback: parse from display_name / name / label if needed
+  if (!first && !last) {
+    const dn = clean(r.display_name || r.name || r.label || '');
+    if (dn) {
+      // If already "Last, First"
+      const m = dn.match(/^\s*([^,]+?)\s*,\s*(.+?)\s*$/);
+      if (m) {
+        last = clean(m[1]);
+        first = clean(m[2]);
+      } else {
+        // If "First Last" (or multi-part first): last = last word
+        const parts = dn.split(/\s+/).filter(Boolean);
+        if (parts.length === 1) {
+          // single token; treat as last (best-effort)
+          last = parts[0];
+        } else if (parts.length > 1) {
+          last = parts[parts.length - 1];
+          first = parts.slice(0, -1).join(' ');
+        }
+      }
+    }
+  }
+
+  // Compose canonical label
+  let label = '';
+  if (last && first) label = `${last}, ${first}`;
+  else label = (last || first || '').trim();
+
+  // Optional role suffix (only if we have a base label)
+  if (label && role) label = `${label} ${role}`.trim();
+
+  return label;
+}
 
 // ============================================================================
 // CANDIDATE – RENDER CALENDAR TAB
@@ -42063,7 +43058,6 @@ function renderSummary(rows){
     filters: null,
     sort: { key: null, dir: 'asc' }
   });
-
   // Ensure we always have a sort object
   if (!st.sort || typeof st.sort !== 'object') {
     st.sort = { key: null, dir: 'asc' };
@@ -42072,6 +43066,17 @@ function renderSummary(rows){
 
   const page     = Number(st.page || 1);
   const pageSize = st.pageSize; // 50 | 100 | 200 | 'ALL'
+
+  // ✅ Umbrellas: default filter to enabled=true (show only enabled by default)
+  // Only apply once per section-session so user toggles aren't overwritten.
+  if (currentSection === 'umbrellas') {
+    if (!st._umbrellasFilterInitDone) {
+      const cur = (st.filters && typeof st.filters === 'object') ? { ...(st.filters || {}) } : {};
+      if (!Object.prototype.hasOwnProperty.call(cur, 'enabled')) cur.enabled = true;
+      st.filters = cur;
+      st._umbrellasFilterInitDone = true;
+    }
+  }
 
   // ── selection state (per section) — explicit IDs only
   window.__selection = window.__selection || {};
@@ -42264,9 +43269,61 @@ function renderSummary(rows){
     const data = await loadSection();
     renderSummary(data);
   });
-
   topControls.appendChild(sizeLabel);
   topControls.appendChild(sizeSel);
+
+  // ✅ Umbrellas: checkbox to include disabled (i.e., remove enabled filter)
+  if (currentSection === 'umbrellas') {
+    const lab = document.createElement('label');
+    lab.className = 'mini';
+    lab.style.display = 'flex';
+    lab.style.alignItems = 'center';
+    lab.style.gap = '8px';
+    lab.style.userSelect = 'none';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.id = 'showDisabledUmbrellas';
+
+    const curFilters0 = (window.__listState[currentSection].filters && typeof window.__listState[currentSection].filters === 'object')
+      ? window.__listState[currentSection].filters
+      : null;
+
+    const enabledIsTrue =
+      !!(curFilters0 &&
+         Object.prototype.hasOwnProperty.call(curFilters0, 'enabled') &&
+         (curFilters0.enabled === true || String(curFilters0.enabled).toLowerCase() === 'true'));
+
+    // unchecked => enabled=true (hide disabled)
+    // checked   => no enabled filter (show all)
+    cb.checked = !enabledIsTrue;
+
+    cb.addEventListener('change', async () => {
+      const cur = { ...(window.__listState[currentSection].filters || {}) };
+
+      if (cb.checked) {
+        if (Object.prototype.hasOwnProperty.call(cur, 'enabled')) delete cur.enabled;
+      } else {
+        cur.enabled = true;
+      }
+
+      window.__listState[currentSection].filters = cur;
+      window.__listState[currentSection].page = 1;
+
+      // Ensure defaults don't overwrite user intent
+      window.__listState[currentSection]._umbrellasFilterInitDone = true;
+
+      const data = await loadSection();
+      renderSummary(data);
+    });
+
+    const txt = document.createElement('span');
+    txt.textContent = 'Show disabled umbrella companies';
+
+    lab.appendChild(cb);
+    lab.appendChild(txt);
+    topControls.appendChild(lab);
+  }
 
   // ─────────────────────────────────────────────────────────────
   // Invoices quick filters row (Status multi + Week ending + Issued + q)
@@ -46600,8 +47657,14 @@ try {
     opts.showSave = false;
     opts.showApply = false;
   }
-} catch {}
 
+  // ✅ NEW: Job Titles is a utility modal (embedded Save/Delete; no global footer Save/Discard)
+  if (k === 'job-titles') {
+    opts.showSave = false;
+    opts.showApply = false;
+    opts.noParentGate = true;
+  }
+} catch {}
 
 
 // ✅ Back-compat: if caller seeded global `modalCtx` (legacy) but not `window.modalCtx`,
@@ -46956,116 +48019,143 @@ function setFormReadOnly(root, ro) {
   const _allBefore = root.querySelectorAll('input, select, textarea, button');
   const beforeDisabled = Array.from(_allBefore).filter(el => el.disabled).length;
 
-  root.querySelectorAll('input, select, textarea, button').forEach((el) => {
-    const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
+ // AFTER (updated setFormReadOnly loop)
+// ✅ NEW: keep Candidate "display_name" locked whenever it is blank (even in edit/create mode),
+// because create-mode should not allow manual editing; system generates on save.
+root.querySelectorAll('input, select, textarea, button').forEach((el) => {
+  const isDisplayOnly = el.id === 'tms_ref_display' || el.id === 'cli_ref_display';
 
-    // Always lock display-only fields
-    if (isDisplayOnly) {
-      el.setAttribute('disabled','true');
-      el.setAttribute('readonly','true');
-      return;
+  // ✅ NEW: Candidate Display Name auto-lock (only when blank)
+  const shouldAutoLockCandidateDisplayName = (() => {
+    try {
+      const nm = String(el.getAttribute('name') || '');
+      if (nm !== 'display_name') return false;
+
+      const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+      const ent = String((top && top.entity) || (window.modalCtx && window.modalCtx.entity) || '');
+      if (ent !== 'candidates') return false;
+
+      const d = (window.modalCtx && window.modalCtx.data && typeof window.modalCtx.data === 'object')
+        ? window.modalCtx.data
+        : {};
+
+      const dn = (Object.prototype.hasOwnProperty.call(d, 'display_name') ? d.display_name : '');
+      const dnBlank = (String(dn == null ? '' : dn).trim() === '');
+
+      const domBlank = (String((el.value == null ? '' : el.value)).trim() === '');
+
+      // Lock if blank by either the canonical row value or the current DOM value
+      return (dnBlank || domBlank);
+    } catch {
+      return false;
     }
+  })();
 
-    // Buttons: in ro mode, keep specific IDs + any timesheet action buttons enabled
-    if (el.type === 'button' || el.tagName === 'BUTTON') {
-      const allow = new Set([
-        'btnCloseModal',
-        'btnDelete',
-        'btnEditModal',
-        'btnSave',
-        'btnRelated',
+  // Always lock display-only fields (and candidate display_name when blank)
+  if (isDisplayOnly || shouldAutoLockCandidateDisplayName) {
+    el.setAttribute('disabled','true');
+    el.setAttribute('readonly','true');
+    return;
+  }
 
-        // ✅ Keep ONLY non-conversion footer actions
-        'btnTsDeleteTimesheet',
-        'btnTsProcessTimesheet',
-        'btnTsUnprocessTimesheet',   // ✅ NEW
-        'btnTsAuthorise',
-        'btnTsUnauthorise'
+  // Buttons: in ro mode, keep specific IDs + any timesheet action buttons enabled
+  if (el.type === 'button' || el.tagName === 'BUTTON') {
+    const allow = new Set([
+      'btnCloseModal',
+      'btnDelete',
+      'btnEditModal',
+      'btnSave',
+      'btnRelated',
+
+      // ✅ Keep ONLY non-conversion footer actions
+      'btnTsDeleteTimesheet',
+      'btnTsProcessTimesheet',
+      'btnTsUnprocessTimesheet',   // ✅ NEW
+      'btnTsAuthorise',
+      'btnTsUnauthorise'
+    ]);
+
+    // Keep Timesheet action buttons enabled in VIEW only if they are "safe view actions".
+    // Do NOT keep weekly schedule edit buttons enabled (reset / add/remove shift lines).
+    try {
+      const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+      const isTimesheetFrame = !!(top && top.entity === 'timesheets');
+
+      const tsAction = (el.getAttribute('data-ts-action') || '').toLowerCase();
+
+      // Evidence table actions (View/Delete) are not data-ts-action
+      const hasEvidenceAction =
+        !!el.getAttribute('data-evidence-view') ||
+        !!el.getAttribute('data-evidence-remove');
+
+      // Actions that must NEVER be clickable in VIEW (schedule-driven weekly grid)
+      const scheduleEditActions = new Set([
+        'reset-schedule',
+        'extra-shift-add',
+        'extra-shift-remove',
+        'extra-break-add',
+        'extra-break-remove'
       ]);
 
-      // Keep Timesheet action buttons enabled in VIEW only if they are "safe view actions".
-      // Do NOT keep weekly schedule edit buttons enabled (reset / add/remove shift lines).
-      try {
-        const top = (typeof currentFrame === 'function') ? currentFrame() : null;
-        const isTimesheetFrame = !!(top && top.entity === 'timesheets');
-
-        const tsAction = (el.getAttribute('data-ts-action') || '').toLowerCase();
-
-        // Evidence table actions (View/Delete) are not data-ts-action
-        const hasEvidenceAction =
-          !!el.getAttribute('data-evidence-view') ||
-          !!el.getAttribute('data-evidence-remove');
-
-        // Actions that must NEVER be clickable in VIEW (schedule-driven weekly grid)
-        const scheduleEditActions = new Set([
-          'reset-schedule',
-          'extra-shift-add',
-          'extra-shift-remove',
-          'extra-break-add',
-          'extra-break-remove'
-        ]);
-
-        // Hard block schedule edit actions when read-only
-        if (isTimesheetFrame && ro && tsAction && scheduleEditActions.has(tsAction)) {
-          el.disabled = true;
-          return;
-        }
-
-        if (isTimesheetFrame && hasEvidenceAction) {
-          el.disabled = false;
-          return;
-        }
-
-        // Only auto-enable data-ts-action buttons in VIEW if they are NOT schedule edit actions
-        if (isTimesheetFrame && ro && tsAction && !scheduleEditActions.has(tsAction)) {
-          el.disabled = false;
-          return;
-        }
-      } catch {}
-
-         // ✅ Invoice modal internal buttons must remain clickable in VIEW.
-      // This invoice modal uses data-action="inv-*", so we allow only SAFE view actions.
-      try {
-        const top = (typeof currentFrame === 'function') ? currentFrame() : null;
-        const isInvoiceFrame = !!(top && top.entity === 'invoices');
-
-        const act = String(el.getAttribute('data-action') || '').toLowerCase();
-
-           const safeDataActions = new Set([
-          'inv-open-pdf',
-          'inv-email',
-          'inv-open-reference-numbers',
-          'inv-set-tab',
-          'inv-close',
-          'inv-delete-invoice'
-        ]);
-
-
-        if (isInvoiceFrame && ro && act && safeDataActions.has(act)) {
-          el.disabled = false;
-          return;
-        }
-      } catch {}
-
-
-      // In read-only mode, disable everything except allow-listed buttons
-      if (ro) {
-        el.disabled = !allow.has(el.id);
-      } else {
-        el.disabled = false;
+      // Hard block schedule edit actions when read-only
+      if (isTimesheetFrame && ro && tsAction && scheduleEditActions.has(tsAction)) {
+        el.disabled = true;
+        return;
       }
-      return;
-    }
 
-    // Non-button inputs/selects/textareas
+      if (isTimesheetFrame && hasEvidenceAction) {
+        el.disabled = false;
+        return;
+      }
+
+      // Only auto-enable data-ts-action buttons in VIEW if they are NOT schedule edit actions
+      if (isTimesheetFrame && ro && tsAction && !scheduleEditActions.has(tsAction)) {
+        el.disabled = false;
+        return;
+      }
+    } catch {}
+
+    // ✅ Invoice modal internal buttons must remain clickable in VIEW.
+    // This invoice modal uses data-action="inv-*", so we allow only SAFE view actions.
+    try {
+      const top = (typeof currentFrame === 'function') ? currentFrame() : null;
+      const isInvoiceFrame = !!(top && top.entity === 'invoices');
+
+      const act = String(el.getAttribute('data-action') || '').toLowerCase();
+
+      const safeDataActions = new Set([
+        'inv-open-pdf',
+        'inv-email',
+        'inv-open-reference-numbers',
+        'inv-set-tab',
+        'inv-close',
+        'inv-delete-invoice'
+      ]);
+
+      if (isInvoiceFrame && ro && act && safeDataActions.has(act)) {
+        el.disabled = false;
+        return;
+      }
+    } catch {}
+
+    // In read-only mode, disable everything except allow-listed buttons
     if (ro) {
-      el.setAttribute('disabled','true');
-      el.setAttribute('readonly','true');
+      el.disabled = !allow.has(el.id);
     } else {
-      el.removeAttribute('disabled');
-      el.removeAttribute('readonly');
+      el.disabled = false;
     }
-  });
+    return;
+  }
+
+  // Non-button inputs/selects/textareas
+  if (ro) {
+    el.setAttribute('disabled','true');
+    el.setAttribute('readonly','true');
+  } else {
+    el.removeAttribute('disabled');
+    el.removeAttribute('readonly');
+  }
+});
 
   const _allAfter = root.querySelectorAll('input, select, textarea, button');
   const afterDisabled = Array.from(_allAfter).filter(el => el.disabled).length;
@@ -47188,12 +48278,13 @@ const frame = {
   if (!hasId && opts.kind === 'rate-preset') return 'edit';
 
     // NEW: utility modals – always view-only, no Save/Edit
-  const isUtilityKind =
+   const isUtilityKind =
     opts.kind === 'timesheets-resolve' ||
     opts.kind === 'resolve-candidate'  ||
     opts.kind === 'resolve-client'     ||
     opts.kind === 'invoice-reference-numbers' ||
     opts.kind === 'invoice-send-email-confirm' ||
+    opts.kind === 'job-titles' ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-')) ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('invoice-batch-')) ||
     (typeof opts.kind === 'string' && opts.kind.startsWith('import-summary-invoice-batch-'));
@@ -47234,17 +48325,75 @@ persistCurrentTabState() {
   const fs = window.modalCtx.formState || { __forId: initial, main:{}, pay:{} };
   if (fs.__forId == null) fs.__forId = initial;
 
+  // ✅ Settings modal: persist current Settings form values across tab switches
+  // Reason: showModal replaces DOM on setTab(), so unsaved edits vanish unless staged.
+  try {
+    if (this.entity === 'settings' && typeof collectForm === 'function') {
+      const hasSettingsForm = !!document.getElementById('settingsForm');
+      if (hasSettingsForm) {
+        const c = collectForm('#settingsForm', true) || {};
+
+        // Stage into formState.main (safe; Settings is a singleton row)
+        fs.main = { ...(fs.main || {}), ...c };
+
+        // Also mirror into modalCtx.data so renderSettingsTab sees latest values immediately
+        try {
+          window.modalCtx.data = { ...(window.modalCtx.data || {}), ...c };
+        } catch {}
+      }
+
+      // If leaving Remittances tab, force-snapshot include JSON (checkboxes are data-noCollect)
+      if (this.currentTabKey === 'remittances') {
+        try {
+          if (typeof buildRemittanceIncludesJsonFromUi === 'function') {
+            const inc = buildRemittanceIncludesJsonFromUi();
+            if (inc && typeof inc === 'object') {
+              window.modalCtx.remittanceDraft = (window.modalCtx.remittanceDraft && typeof window.modalCtx.remittanceDraft === 'object')
+                ? window.modalCtx.remittanceDraft
+                : { ui_scope: 'WEEKLY', remittance_includes_json: null, remittance_header_message: '', remittance_footer_message: '', dirty: false };
+
+              window.modalCtx.remittanceDraft.remittance_includes_json = inc;
+              window.modalCtx.remittanceDraft.dirty = true;
+
+              window.modalCtx.data = window.modalCtx.data || {};
+              window.modalCtx.data.remittance_includes_json = inc;
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
   // Preserve schedule inputs even when blank ('') so cleared days don't get dropped
-  const keepScheduleBlanks = (obj) => {
+  // ✅ DO NOT rely on collectForm() including empty keys; read schedule inputs directly from DOM.
+  const keepScheduleBlanks = (obj, rootEl) => {
     const out = {};
     const days = ['mon','tue','wed','thu','fri','sat','sun'];
     const parts = ['start','end','break'];
     days.forEach(d => {
       parts.forEach(p => {
         const k = `${d}_${p}`;
-        if (Object.prototype.hasOwnProperty.call(obj, k)) {
-          out[k] = (obj[k] == null ? '' : String(obj[k]));
+        let has = false;
+        let v;
+
+        // Prefer DOM value if the input exists (captures clears even when collectForm omits the key)
+        try {
+          if (rootEl && typeof rootEl.querySelector === 'function') {
+            const el = rootEl.querySelector(`[name="${k}"]`);
+            if (el) {
+              has = true;
+              v = el.value;
+            }
+          }
+        } catch {}
+
+        // Fallback: only if collectForm included it
+        if (!has && Object.prototype.hasOwnProperty.call(obj, k)) {
+          has = true;
+          v = obj[k];
         }
+
+        if (has) out[k] = (v == null ? '' : String(v));
       });
     });
     return out;
@@ -47308,11 +48457,11 @@ persistCurrentTabState() {
       }
     } catch {}
 
-    const sched  = keepScheduleBlanks(c);
+    const rootEl = document.querySelector(sel);
+    const sched  = keepScheduleBlanks(c, rootEl);
     fs.main = { ...(fs.main||{}), ...merged, ...sched };
   }
 }
-
 
  if (this.currentTabKey === 'pay' && byId('tab-pay')) {
   const c = collectForm('#tab-pay');
@@ -47343,22 +48492,24 @@ persistCurrentTabState() {
     // as part of the candidate "main" payload
     fs.main = { ...(fs.main || {}), ...stripEmpty(c) };
   }
-
   // Persist contract-specific state when leaving Rates **or** Additional Rates
 if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.currentTabKey === 'extras')) {
   try {
-    // Only bother capturing the paye/umb/charge_* fields from the Rates tab itself
+    // ─────────────────────────────────────────────
+    // RATES TAB: stage paye/umb/charge + mileage
+    // ─────────────────────────────────────────────
     if (this.currentTabKey === 'rates') {
       const rt = byId('contractRatesTab');
       if (rt) {
         const rForm = {};
         rt.querySelectorAll('input, select, textarea').forEach(el => {
-          if (el.name) {
-            rForm[el.name] = (el.type === 'checkbox'
-              ? (el.checked ? 'on' : '')
-              : el.value);
-          }
+          if (!el || !el.name) return;
+          rForm[el.name] = (el.type === 'checkbox')
+            ? (el.checked ? 'on' : '')
+            : el.value;
         });
+
+        // PAYE/UMB/CHARGE buckets → fs.pay
         const onlyRates = {};
         for (const [k, v] of Object.entries(rForm)) {
           if (/^(paye_|umb_|charge_)/.test(k)) {
@@ -47366,18 +48517,92 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
           }
         }
         fs.pay = { ...(fs.pay || {}), ...stripEmpty(onlyRates) };
+
+        // ✅ NEW: mileage fields → fs.main (belt-and-braces)
+        fs.main = fs.main || {};
+        if (Object.prototype.hasOwnProperty.call(rForm, 'mileage_charge_rate')) {
+          fs.main.mileage_charge_rate = (rForm.mileage_charge_rate == null) ? '' : String(rForm.mileage_charge_rate);
+        }
+        if (Object.prototype.hasOwnProperty.call(rForm, 'mileage_pay_rate')) {
+          fs.main.mileage_pay_rate = (rForm.mileage_pay_rate == null) ? '' : String(rForm.mileage_pay_rate);
+        }
       }
     }
 
-    // Always collect the full contract form so Main + Additional Rates fields are staged
-    const mainSel = byId('contractForm') ? '#contractForm' : null;
-    if (mainSel) {
-      const m = collectForm(mainSel);
-      // keep existing behavior for most fields, then re-add schedule blanks explicitly
-      const mergedMain = { ...stripEmpty(m) };
-      const sched      = keepScheduleBlanks(m);
-      fs.main = { ...(fs.main || {}), ...mergedMain, ...sched };
+    // ─────────────────────────────────────────────
+    // EXTRAS TAB: stage authoritative additional_rates_json
+    // ─────────────────────────────────────────────
+    if (this.currentTabKey === 'extras') {
+      const xt = byId('contractAdditionalRatesTab');
+      if (xt) {
+        const normaliseFrequency = (raw) => {
+          if (!raw) return null;
+          const s = String(raw).trim().toUpperCase();
+          const ALLOWED = [
+            'ONE_PER_WEEK',
+            'ONE_PER_DAY',
+            'WEEKENDS_AND_BH_ONLY',
+            'WEEKDAYS_EXCL_BH_ONLY'
+          ];
+          return ALLOWED.includes(s) ? s : null;
+        };
+
+        const rows = [];
+        for (let i = 1; i <= 5; i++) {
+          const code = `EX${i}`;
+
+          const bnEl = xt.querySelector(`input[name="extra_bucket_name_${i}"]`);
+          const unEl = xt.querySelector(`input[name="extra_unit_name_${i}"]`);
+          const frEl = xt.querySelector(`select[name="extra_frequency_${i}"]`);
+          const prEl = xt.querySelector(`input[name="extra_pay_${i}"]`);
+          const crEl = xt.querySelector(`input[name="extra_charge_${i}"]`);
+
+          const bucket_name = String(bnEl?.value || '').trim();
+          const unit_name_raw = String(unEl?.value || '').trim();
+          const freqRaw = String(frEl?.value || '').trim();
+          const payRaw = String(prEl?.value || '').trim();
+          const chargeRaw = String(crEl?.value || '').trim();
+
+          const hasAny = !!(bucket_name || unit_name_raw || freqRaw || payRaw || chargeRaw);
+          if (!hasAny) continue;
+
+          const payNum = payRaw === '' ? null : Number(payRaw);
+          const chargeNum = chargeRaw === '' ? null : Number(chargeRaw);
+          const frequency = normaliseFrequency(freqRaw) || 'ONE_PER_WEEK';
+
+          rows.push({
+            code,
+            bucket_name,
+            unit_name: unit_name_raw || null,
+            frequency,
+            pay_rate: Number.isFinite(payNum) ? payNum : null,
+            charge_rate: Number.isFinite(chargeNum) ? chargeNum : null
+          });
+        }
+
+        // Authoritative JSON (critical)
+        fs.main = fs.main || {};
+        fs.main.additional_rates_json = rows.length ? rows : null;
+
+        // Optional: also stage raw inputs (non-critical, but helps preserve typed values on rerender)
+        xt.querySelectorAll('input, select, textarea').forEach(el => {
+          if (!el || !el.name) return;
+          const nm = String(el.name);
+          if (
+            /^extra_bucket_name_\d+$/.test(nm) ||
+            /^extra_unit_name_\d+$/.test(nm) ||
+            /^extra_frequency_\d+$/.test(nm) ||
+            /^extra_pay_\d+$/.test(nm) ||
+            /^extra_charge_\d+$/.test(nm)
+          ) {
+            fs.main[nm] = (el.type === 'checkbox') ? (el.checked ? 'on' : '') : el.value;
+          }
+        });
+      }
     }
+
+    // ✅ REMOVED: "Always collect the full contract form..." block
+    // It is ineffective when leaving rates/extras because #contractForm is not present on those tabs.
   } catch (e) {
     L('persistCurrentTabState contracts/rates+extras failed', e);
   }
@@ -47457,7 +48682,6 @@ if (this.entity === 'contracts' && (this.currentTabKey === 'rates' || this.curre
   window.modalCtx.formState = fs;
   L('persistCurrentTabState EXIT', { forId: fs.__forId, mainKeys: Object.keys(fs.main||{}), payKeys: Object.keys(fs.pay||{}) });
 },
-
 // inside showModal(...), in the `const frame = { ... }` object:
 mergedRowForTab(k) {
   L('mergedRowForTab ENTER', { k });
@@ -47507,6 +48731,21 @@ mergedRowForTab(k) {
         'contact_tel',
         'contact_mobile',
         'contact_email'
+      ]);
+
+      for (const key of PRESERVE_EMPTY_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(mainStaged, key)) {
+          const v = mainStaged[key];
+          if (v === '') out[key] = ''; // keep explicit blank
+        }
+      }
+    }
+
+    // ✅ NEW: Contracts — preserve clearable nullable text fields (do not drop '')
+    if (this.entity === 'contracts') {
+      const PRESERVE_EMPTY_KEYS = new Set([
+        'display_site',
+        'ward_hint'
       ]);
 
       for (const key of PRESERVE_EMPTY_KEYS) {
@@ -47575,9 +48814,16 @@ mergedRowForTab(k) {
   return out;
 },
 
-
    _attachDirtyTracker() {
     if (this._detachDirty) { try { this._detachDirty(); } catch {} this._detachDirty = null; }
+
+    // ✅ Job Titles modal is immediate-action + embedded Save/Delete → NEVER mark dirty
+    if (this.kind === 'job-titles') {
+      this.isDirty = false;
+      L('_attachDirtyTracker(skip: job-titles utility modal)');
+      return;
+    }
+
     const root = byId('modalBody'); if (!root) { L('_attachDirtyTracker(skip: no modalBody)'); return; }
     const onDirty = (ev) => {
       if (ev && !ev.isTrusted) return;
@@ -49692,12 +50938,28 @@ function setFrameMode(frameObj, mode) {
       .catch(() => {});
   }
 }
+
 // ✅ NEW: persist parent staged state before opening child modal
-// Prevents "typed fields disappear" when a child modal opens before parent state is staged.
+// FIX: parent persistence must run against the parent's stored ctxRef,
+// because child openers may have re-seeded window.modalCtx before calling showModal().
 try {
   const p = currentFrame();
   if (p && typeof p.persistCurrentTabState === 'function') {
-    p.persistCurrentTabState();
+    const prevCtx = window.modalCtx;
+    const parentCtx = p._ctxRef || null;
+
+    if (parentCtx && typeof parentCtx === 'object') {
+      window.modalCtx = parentCtx;
+      try {
+        p.persistCurrentTabState();
+      } finally {
+        // restore child/new ctx (whatever was active when showModal was invoked)
+        window.modalCtx = prevCtx;
+      }
+    } else {
+      // fallback (should be rare): no ctxRef to bind; run as-is
+      p.persistCurrentTabState();
+    }
   }
 } catch {}
 
@@ -49847,23 +51109,49 @@ let _pushedRight = false;
 
   tabsEl.appendChild(b);
 });
-
-
 L('renderTop tabs (global)', { count: (top.tabs||[]).length, active: top.currentTabKey });
 
+// ✅ NEW: render sequencing token to prevent stale async setTab from wiring wrong frame
+const _renderToken = `rt:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+try { top._renderToken = _renderToken; } catch {}
 
-  if (top.currentTabKey) top.setTab(top.currentTabKey);
-  else if (top.tabs && top.tabs[0]) top.setTab(top.tabs[0].key);
-  else byId('modalBody').innerHTML = top.renderTab('form',{})||'';
+// ✅ Cache footer/header nodes OUTSIDE the promise so later code can use them safely
+const modalNode = byId('modal');
+const btnSave   = byId('btnSave');
+const btnClose  = byId('btnCloseModal');
+const btnDel    = byId('btnDelete');
+const header    = byId('modalDrag');
 
-  const btnSave  = byId('btnSave');
-  const btnClose = byId('btnCloseModal');
-  const btnDel   = byId('btnDelete');
-  const header   = byId('modalDrag');
-  const modalNode= byId('modal');
+// ✅ If core nodes are missing, abort renderTop early (prevents ReferenceError cascades)
+if (!btnSave || !btnClose || !btnDel || !header) {
+  console.warn('[MODAL][renderTop] missing core modal nodes', {
+    hasSave: !!btnSave, hasClose: !!btnClose, hasDelete: !!btnDel, hasHeader: !!header
+  });
+  GE();
+  return;
+}
 
-   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
-   if (modalNode) {
+// ✅ NEW: kick tab render, but DO NOT run post-render wiring until setTab completes
+const _tabPromise = (() => {
+  try {
+    if (top.currentTabKey) return Promise.resolve(top.setTab(top.currentTabKey));
+    if (top.tabs && top.tabs[0]) return Promise.resolve(top.setTab(top.tabs[0].key));
+    byId('modalBody').innerHTML = top.renderTab('form', {}) || '';
+    return Promise.resolve(true);
+  } catch (e) {
+    console.warn('[MODAL][renderTop] setTab failed', e);
+    return Promise.resolve(false);
+  }
+})();
+
+_tabPromise.then(() => {
+  // ✅ If stack/top changed since we started, abort (prevents cross-frame wiring)
+  const topNow = currentFrame();
+  if (!topNow || topNow !== top) return;
+  if (top._renderToken !== _renderToken) return;
+
+  const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : true;
+  if (modalNode) {
     const parentIsContracts =
       !!(parent && ((parent.entity === 'contracts') || (parent.kind === 'contracts')));
     const isContracts =
@@ -49880,32 +51168,38 @@ L('renderTop tabs (global)', { count: (top.tabs||[]).length, active: top.current
     if (LOGC && isContracts && !isImportSummary) {
       console.log('[CONTRACTS][MODAL] contract-modal class applied to #modal (inherited:', parentIsContracts, ')');
     }
-   // Job Titles: apply narrower modal sizing
-const isJobTitles = (top.kind === 'job-titles');
-modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
 
-// Evidence replace: temporarily use a larger modal footprint
-const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
-modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
+    // Job Titles: apply narrower modal sizing
+    const isJobTitles = (top.kind === 'job-titles');
+    modalNode.classList.toggle('jobtitles-modal', !!isJobTitles);
 
-// Candidate Advances: use a slightly wider modal footprint
-const isAdvances = (top.kind === 'candidate-advances');
-modalNode.classList.toggle('advances-modal', !!isAdvances);
+    // Evidence replace: temporarily use a larger modal footprint
+    const isEvidenceReplace = (top.kind === 'timesheet-evidence-replace');
+    modalNode.classList.toggle('evidence-modal', !!isEvidenceReplace);
 
-// ✅ Resolve Timesheets: larger/taller footprint (kills the unnecessary scrollbar)
-const isResolve = (top.kind === 'timesheets-resolve');
-modalNode.classList.toggle('resolve-modal', !!isResolve);
+    // Candidate Advances: use a slightly wider modal footprint
+    const isAdvances = (top.kind === 'candidate-advances');
+    modalNode.classList.toggle('advances-modal', !!isAdvances);
 
-// ✅ Invoice batch modals (Generate/Issue): larger + no outer modal scrollbar (CSS handles overflow)
-const isInvBatch =
-  (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
-  (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'));
+    // ✅ Resolve Timesheets: larger/taller footprint (kills the unnecessary scrollbar)
+    const isResolve = (top.kind === 'timesheets-resolve');
+    modalNode.classList.toggle('resolve-modal', !!isResolve);
 
-modalNode.classList.toggle('invbatch-modal', !!isInvBatch);
-modalNode.classList.toggle('invbatch-generate-modal', !!(typeof top.kind === 'string' && top.kind.includes('generate')));
-modalNode.classList.toggle('invbatch-issue-modal',    !!(typeof top.kind === 'string' && top.kind.includes('issue')));
+    // ✅ Invoice batch modals (Generate/Issue): larger + no outer modal scrollbar (CSS handles overflow)
+    const isInvBatch =
+      (typeof top.kind === 'string' && top.kind.startsWith('invoice-batch-')) ||
+      (typeof top.kind === 'string' && top.kind.startsWith('import-summary-invoice-batch-'));
 
+    modalNode.classList.toggle('invbatch-modal', !!isInvBatch);
+    modalNode.classList.toggle('invbatch-generate-modal', !!(typeof top.kind === 'string' && top.kind.includes('generate')));
+    modalNode.classList.toggle('invbatch-issue-modal',    !!(typeof top.kind === 'string' && top.kind.includes('issue')));
   }
+
+  // ... (renderTop continues here exactly as before, but now it runs ONLY after setTab finished)
+
+}).catch((e) => {
+  console.warn('[MODAL][renderTop] post-tab wiring failed', e);
+});
 
 
 
@@ -49936,7 +51230,6 @@ modalNode.classList.toggle('invbatch-issue-modal',    !!(typeof top.kind === 'st
 
   const showChildDelete = isChild && (top.kind==='client-rate' || top.kind==='candidate-override') && top.hasId;
   btnDel.style.display = showChildDelete ? '' : 'none'; btnDel.onclick = null;
-
 let btnEdit = byId('btnEditModal');
 if (!btnEdit) {
   btnEdit = document.createElement('button');
@@ -49948,7 +51241,18 @@ if (!btnEdit) {
   if (bar) bar.insertBefore(btnEdit, btnSave);
   L('renderTop (global): created btnEdit');
 }
-
+// ✅ Ensure footer Delete sits immediately LEFT of Edit (not header)
+try {
+  const bar2 = btnSave?.parentElement || btnClose?.parentElement;
+  if (bar2 && btnDel && btnEdit) {
+    // If it's not already immediately before Edit, move it there
+    if (btnDel.parentElement === bar2 && btnDel.nextSibling !== btnEdit) {
+      bar2.insertBefore(btnDel, btnEdit);
+    } else if (btnDel.parentElement !== bar2) {
+      bar2.insertBefore(btnDel, btnEdit);
+    }
+  }
+} catch {}
 // ─────────────────────────────────────────────────────────────
 // NEW: Timesheet footer buttons (created once; shown/hidden in _updateButtons)
 // ─────────────────────────────────────────────────────────────
@@ -51363,14 +52667,32 @@ try {
         relatedBtn.onclick = null;
       }
     }
-
-      // Default Save/Edit display logic
+    // Default Save/Edit display logic
     if (top.mode === 'create') {
       btnSave.style.display = '';
-      btnSave.disabled = top._saving;
+
+      // ✅ NEW: Contracts create-mode gating must respect eligibility (incl. unknown pay method)
+      if (top.entity === 'contracts') {
+        let gate = null;
+        let gateOk = true;
+        try {
+          gate = (typeof computeContractSaveEligibility === 'function') ? computeContractSaveEligibility() : null;
+          gateOk = (gate && typeof gate === 'object' && Object.prototype.hasOwnProperty.call(gate, 'ok'))
+            ? !!gate.ok
+            : !!gate;
+        } catch {
+          gateOk = true; // non-fatal fallback (do not brick UI if eligibility throws)
+        }
+
+        btnSave.disabled = !!top._saving || !gateOk;
+      } else {
+        btnSave.disabled = !!top._saving;
+      }
+
     } else if (top.mode === 'view') {
       btnSave.style.display = 'none';
       btnSave.disabled = true;
+
     } else {
       btnSave.style.display = '';
 
@@ -51378,7 +52700,10 @@ try {
 
       if (top.entity === 'contracts') {
         try {
-          gateOK = (typeof computeContractSaveEligibility === 'function') ? !!computeContractSaveEligibility() : true;
+          const gate = (typeof computeContractSaveEligibility === 'function') ? computeContractSaveEligibility() : null;
+          gateOK = (gate && typeof gate === 'object' && Object.prototype.hasOwnProperty.call(gate, 'ok'))
+            ? !!gate.ok
+            : !!gate;
         } catch { gateOK = true; }
       }
 
@@ -51396,9 +52721,7 @@ try {
     }
 
 
-  // 🔹 Top-level Invoice Modal → wire global Delete button (VIEW mode only, eligible only)
-// NOTE: This aligns with your brief: delete is only possible AFTER unissue + remove all lines + Save.
-// We DO NOT delete in edit mode; we only show the delete button in VIEW when invoice is eligible.
+ // 🔹 Top-level Invoice Modal → wire global Delete button (VIEW mode only, eligible only)
 if (!isChild && top.entity === 'invoices' && top.kind === 'invoice-modal') {
   const mc = window.modalCtx || {};
   const det = mc.data || mc.dataLoaded || mc.invoiceDetail || null;
@@ -51439,8 +52762,108 @@ if (!isChild && top.entity === 'invoices' && top.kind === 'invoice-modal') {
     btnDel.style.display = 'none';
     btnDel.disabled = true;
     btnDel.onclick = null;
-    // restore default label if other flows rely on it
     btnDel.textContent = 'Delete';
+  }
+
+} else
+
+// ✅ NEW: Top-level Candidate/Client → Delete in FOOTER (VIEW mode only)
+// - Visible only when entity is candidates or clients AND mode=view AND hasId
+// - Red when eligible
+// - Greyed + tooltip when blocked (without using native disabled so title works)
+if (!isChild && (top.entity === 'candidates' || top.entity === 'clients')) {
+  const mc = window.modalCtx || {};
+  const ent = String(top.entity || '');
+  const show = (top.mode === 'view' && top.hasId);
+
+  // Eligibility can be stored by the modal opener on modalCtx.deleteEligibility (or delete_eligibility)
+  const elig =
+    (mc && typeof mc.deleteEligibility === 'object' && mc.deleteEligibility) ? mc.deleteEligibility :
+    (mc && typeof mc.delete_eligibility === 'object' && mc.delete_eligibility) ? mc.delete_eligibility :
+    null;
+
+  const canDelete = !!(elig && (elig.can_delete === true || String(elig.can_delete).toLowerCase() === 'true'));
+  const reason = String((elig && (elig.reason || elig.block_reason || elig.message)) || '').trim();
+
+  if (show) {
+    btnDel.style.display = '';
+
+    // Label per entity
+    btnDel.textContent = (ent === 'candidates') ? 'Delete Candidate' : 'Delete Client';
+
+    // Ensure footer styling: red when eligible; greyed when not
+    // (keep title hover reliable by NOT using native disabled)
+    btnDel.disabled = false;
+    btnDel.className = canDelete ? 'btn btn-warn' : 'btn btn-outline btn-sm';
+    btnDel.style.opacity = canDelete ? '' : '0.45';
+    btnDel.style.filter  = canDelete ? '' : 'grayscale(60%)';
+    btnDel.setAttribute('aria-disabled', canDelete ? 'false' : 'true');
+    btnDel.setAttribute('data-disabled', canDelete ? '' : '1');
+
+    if (!canDelete && reason) btnDel.setAttribute('title', reason);
+    else if (!canDelete) btnDel.setAttribute('title', 'This record cannot be deleted.');
+    else btnDel.removeAttribute('title');
+
+ btnDel.onclick = async (ev) => {
+  try { ev && ev.preventDefault && ev.preventDefault(); } catch {}
+  try { ev && ev.stopPropagation && ev.stopPropagation(); } catch {}
+
+  // Block click when not eligible (but still show tooltip)
+  if (!canDelete) {
+    const msg = btnDel.getAttribute('title') || 'This record cannot be deleted.';
+    if (window.__toast) window.__toast(msg);
+    else alert(msg);
+    return;
+  }
+
+  const id = window.modalCtx?.data?.id || null;
+  if (!id) {
+    alert('Missing id; cannot delete.');
+    return;
+  }
+
+  const label = (ent === 'candidates') ? 'candidate' : 'client';
+  const ok = window.confirm(`Permanently delete this ${label}? This cannot be undone.`);
+  if (!ok) return;
+
+  try {
+    // ✅ Prefer explicit handlers if you already have them
+    if (ent === 'candidates' && typeof deleteCandidate === 'function') {
+      await deleteCandidate(id);
+    } else if (ent === 'clients' && typeof deleteClient === 'function') {
+      await deleteClient(id);
+
+    // ✅ Fallback to generic handler names if those are what your codebase uses
+    } else if (ent === 'candidates' && typeof handleCandidateDelete === 'function') {
+      await handleCandidateDelete(id);
+    } else if (ent === 'clients' && typeof handleClientDelete === 'function') {
+      await handleClientDelete(id);
+
+    } else {
+      alert('Delete handler is not available (no deleteCandidate/deleteClient/handleCandidateDelete/handleClientDelete function found).');
+      return;
+    }
+
+    try { discardAllModalsAndState(); } catch {}
+    try { await renderAll(); } catch {}
+    try { window.__toast && window.__toast('Deleted'); } catch {}
+
+  } catch (e) {
+    alert(e?.message || 'Delete failed');
+  }
+};
+
+  } else {
+    btnDel.style.display = 'none';
+    btnDel.disabled = true;
+    btnDel.onclick = null;
+    btnDel.textContent = 'Delete';
+    btnDel.className = 'btn btn-outline btn-sm';
+    btnDel.style.opacity = '';
+    btnDel.style.filter  = '';
+    btnDel.removeAttribute('title');
+    btnDel.removeAttribute('aria-disabled');
+    btnDel.removeAttribute('data-disabled');
   }
 
 } else
@@ -51482,20 +52905,21 @@ if (!isChild && top.entity === 'contracts') {
     btnDel.style.display = 'none';
     btnDel.disabled = true;
     btnDel.onclick = null;
-
-    // ✅ FIX: reset label when hidden so it can’t carry over from other entities
     btnDel.textContent = 'Delete';
   }
 } else if (!isChild) {
+  // ✅ Default: any other TOP-LEVEL modal → hide + fully reset Delete button state
   btnDel.style.display = 'none';
   btnDel.disabled = true;
   btnDel.onclick = null;
-
-  // ✅ FIX: reset label on any non-child non-contract/non-invoice top frame
   btnDel.textContent = 'Delete';
+  btnDel.className = 'btn btn-outline btn-sm';
+  btnDel.style.opacity = '';
+  btnDel.style.filter  = '';
+  btnDel.removeAttribute('title');
+  btnDel.removeAttribute('aria-disabled');
+  btnDel.removeAttribute('data-disabled');
 }
-
-
   }
 
   setCloseLabel();
@@ -52309,6 +53733,7 @@ bindSave(btnSave, top);
 
   GE();
 }
+
 
   byId('modalBack').style.display='flex';
   window.__getModalFrame = currentFrame;
@@ -60304,7 +61729,6 @@ async function renderSettingsPanel(content) {
 }
 
 
-
 function renderContractAdditionalRatesTab(ctx) {
   const LOGC = (typeof window.__LOG_CONTRACTS === 'boolean') ? window.__LOG_CONTRACTS : false;
 
@@ -60312,12 +61736,20 @@ function renderContractAdditionalRatesTab(ctx) {
   const payMethod = String(merged?.pay_method_snapshot || 'PAYE').toUpperCase();
   const payLabel  = (payMethod === 'UMBRELLA') ? 'Pay (Umbrella)' : 'Pay (PAYE)';
 
-  const extras = Array.isArray(merged.additional_rates_json)
-    ? merged.additional_rates_json
-    : [];
+  // ✅ Prefer staged authoritative JSON if present (prevents values “disappearing” on tab switches)
+  const stagedArr = (() => {
+    try {
+      const fs = window.modalCtx?.formState || null;
+      const a = fs?.main?.additional_rates_json;
+      return Array.isArray(a) ? a : null;
+    } catch { return null; }
+  })();
+
+  const extras = stagedArr
+    ? stagedArr
+    : (Array.isArray(merged.additional_rates_json) ? merged.additional_rates_json : []);
 
   const findSlot = (code) => extras.find(e => e && String(e.code || '').toUpperCase() === String(code).toUpperCase()) || null;
-  const num = (v) => (v == null || v === '') ? '' : String(v);
 
   const freqOptions = [
     ['ONE_PER_WEEK',         'One per week'],
@@ -60343,7 +61775,7 @@ function renderContractAdditionalRatesTab(ctx) {
     const payRate    = (cfg.pay_rate != null && Number.isFinite(Number(cfg.pay_rate))) ? Number(cfg.pay_rate) : null;
     const chargeRate = (cfg.charge_rate != null && Number.isFinite(Number(cfg.charge_rate))) ? Number(cfg.charge_rate) : null;
 
-      let marginStr = '';
+    let marginStr = '';
     if (payRate != null && chargeRate != null) {
       const fin = (window.modalCtx && window.modalCtx.finance && typeof window.modalCtx.finance === 'object')
         ? window.modalCtx.finance
@@ -60377,7 +61809,6 @@ function renderContractAdditionalRatesTab(ctx) {
       }
       marginStr = mg.toFixed(2);
     }
-
 
     rowsHtml.push(`
       <div class="row extra-rate-row" data-slot="${esc(code)}">
@@ -60443,13 +61874,13 @@ function renderContractAdditionalRatesTab(ctx) {
     </div>
   `;
 
-  // Wire up margin recalculation + Clear buttons after DOM render
+  // Wire up staging + margin recalculation + Clear buttons after DOM render
   setTimeout(() => {
     try {
       const root = document.getElementById('contractAdditionalRatesTab');
       if (!root) return;
 
-        const getErniMult = () => {
+      const getErniMult = () => {
         try {
           const fin = (window.modalCtx && window.modalCtx.finance && typeof window.modalCtx.finance === 'object')
             ? window.modalCtx.finance
@@ -60463,7 +61894,6 @@ function renderContractAdditionalRatesTab(ctx) {
         } catch {}
         return 1;
       };
-
 
       const getPayMethod = () => {
         try {
@@ -60487,65 +61917,169 @@ function renderContractAdditionalRatesTab(ctx) {
           const span     = root.querySelector(`span[data-role="extra-margin"][data-slot="${code}"]`);
           if (!span) continue;
 
-          const payVal    = payEl ? Number(payEl.value || 0) : 0;
-          const chargeVal = chargeEl ? Number(chargeEl.value || 0) : 0;
-
-          if (!Number.isFinite(payVal) || !Number.isFinite(chargeVal) || (!payEl?.value && !chargeEl?.value)) {
+          const payHas = !!(payEl && String(payEl.value || '').trim() !== '');
+          const chgHas = !!(chargeEl && String(chargeEl.value || '').trim() !== '');
+          if (!payHas && !chgHas) {
             span.textContent = '';
             continue;
           }
 
-          let mg;
-          if (pm === 'PAYE') {
-            mg = chargeVal - (payVal * erniMult);
-          } else {
-            mg = chargeVal - payVal;
+          const payVal = payEl ? Number(payEl.value) : NaN;
+          const chargeVal = chargeEl ? Number(chargeEl.value) : NaN;
+
+          if (!Number.isFinite(payVal) || !Number.isFinite(chargeVal)) {
+            span.textContent = '';
+            continue;
           }
+
+          const mg = (pm === 'PAYE') ? (chargeVal - (payVal * erniMult)) : (chargeVal - payVal);
           span.textContent = `£${mg.toFixed(2)}`;
         }
       };
 
-      // Wire Clear buttons
+      // ✅ NEW: stage authoritative additional_rates_json from DOM + mirror to modalCtx.data
+      const stageAdditionalRatesFromDom = () => {
+        const normaliseFrequency = (raw) => {
+          if (!raw) return null;
+          const s = String(raw).trim().toUpperCase();
+          const ALLOWED = [
+            'ONE_PER_WEEK',
+            'ONE_PER_DAY',
+            'WEEKENDS_AND_BH_ONLY',
+            'WEEKDAYS_EXCL_BH_ONLY'
+          ];
+          return ALLOWED.includes(s) ? s : null;
+        };
+
+        const rows = [];
+        for (let i = 1; i <= 5; i++) {
+          const code = `EX${i}`;
+
+          const bnEl = root.querySelector(`input[name="extra_bucket_name_${i}"]`);
+          const unEl = root.querySelector(`input[name="extra_unit_name_${i}"]`);
+          const frEl = root.querySelector(`select[name="extra_frequency_${i}"]`);
+          const prEl = root.querySelector(`input[name="extra_pay_${i}"]`);
+          const crEl = root.querySelector(`input[name="extra_charge_${i}"]`);
+
+          const bucket_name = String(bnEl?.value || '').trim();
+          const unit_name_raw = String(unEl?.value || '').trim();
+          const freqRaw = String(frEl?.value || '').trim();
+          const payRaw = String(prEl?.value || '').trim();
+          const chargeRaw = String(crEl?.value || '').trim();
+
+          const hasAny = !!(bucket_name || unit_name_raw || freqRaw || payRaw || chargeRaw);
+          if (!hasAny) continue;
+
+          const payNum = payRaw === '' ? null : Number(payRaw);
+          const chargeNum = chargeRaw === '' ? null : Number(chargeRaw);
+          const frequency = normaliseFrequency(freqRaw) || 'ONE_PER_WEEK';
+
+          rows.push({
+            code,
+            bucket_name,
+            unit_name: unit_name_raw || null,
+            frequency,
+            pay_rate: Number.isFinite(payNum) ? payNum : null,
+            charge_rate: Number.isFinite(chargeNum) ? chargeNum : null
+          });
+        }
+
+        const finalArr = rows.length ? rows : null;
+
+        try {
+          const fs = (window.modalCtx.formState ||= { main:{}, pay:{} });
+          fs.main ||= {};
+          fs.main.additional_rates_json = finalArr;
+        } catch {}
+
+        try {
+          window.modalCtx.data = window.modalCtx.data || {};
+          window.modalCtx.data.additional_rates_json = (typeof structuredClone === 'function')
+            ? structuredClone(finalArr)
+            : (finalArr ? JSON.parse(JSON.stringify(finalArr)) : null);
+        } catch {
+          try {
+            window.modalCtx.data = window.modalCtx.data || {};
+            window.modalCtx.data.additional_rates_json = finalArr;
+          } catch {}
+        }
+      };
+
+      // ✅ UPDATED: Wire Clear buttons to also update staged state
       root.querySelectorAll('button[data-extra-clear]').forEach(btn => {
         if (btn.__wiredClear) return;
         btn.__wiredClear = true;
         btn.addEventListener('click', () => {
           const slot = btn.getAttribute('data-extra-clear');
-          const idx  = slot && slot.replace(/^EX/, '');
+          const idx = slot && slot.replace(/^EX/, '');
           if (!idx) return;
-          ['bucket_name','unit_name','pay','charge'].forEach(suffix => {
-            const name = suffix === 'bucket_name'
-              ? `extra_bucket_name_${idx}`
-              : suffix === 'unit_name'
-                ? `extra_unit_name_${idx}`
-                : suffix === 'pay'
-                  ? `extra_pay_${idx}`
-                  : `extra_charge_${idx}`;
+
+          // Clear DOM + stage cleared values
+          const fields = [
+            `extra_bucket_name_${idx}`,
+            `extra_unit_name_${idx}`,
+            `extra_frequency_${idx}`,
+            `extra_pay_${idx}`,
+            `extra_charge_${idx}`
+          ];
+
+          for (const name of fields) {
             const el = root.querySelector(`[name="${name}"]`);
-            if (el) {
+            if (!el) continue;
+
+            if (name.startsWith('extra_frequency_')) {
+              // reset to default option
+              el.value = 'ONE_PER_WEEK';
+              setContractFormValue(name, 'ONE_PER_WEEK');
+            } else {
               el.value = '';
-              try { el.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
-              try { el.dispatchEvent(new Event('change',{ bubbles:true })); } catch {}
+              setContractFormValue(name, '');
             }
-          });
+
+            try { el.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+            try { el.dispatchEvent(new Event('change', { bubbles:true })); } catch {}
+          }
+
           const span = root.querySelector(`span[data-role="extra-margin"][data-slot="${slot}"]`);
           if (span) span.textContent = '';
+
+          stageAdditionalRatesFromDom();
+          recalcMargins();
           try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
         });
       });
 
-      // Recalc margins on input changes
+      // ✅ UPDATED: Stage ALL extra_* input changes + keep additional_rates_json authoritative
       const onChange = (ev) => {
         const t = ev.target;
         if (!t || !t.name) return;
-        if (/^extra_(pay|charge)_\d+$/.test(t.name)) {
+
+        const nm = String(t.name);
+
+        if (
+          /^extra_bucket_name_\d+$/.test(nm) ||
+          /^extra_unit_name_\d+$/.test(nm) ||
+          /^extra_frequency_\d+$/.test(nm) ||
+          /^extra_pay_\d+$/.test(nm) ||
+          /^extra_charge_\d+$/.test(nm)
+        ) {
+          setContractFormValue(nm, (t.type === 'checkbox') ? (t.checked ? 'on' : '') : t.value);
+
+          // Rebuild authoritative array every time
+          stageAdditionalRatesFromDom();
+
+          // Margin recalc for pay/charge changes (safe to call always, cheap)
           recalcMargins();
+
           try { window.dispatchEvent(new Event('modal-dirty')); } catch {}
         }
       };
+
       root.addEventListener('input', onChange, true);
       root.addEventListener('change', onChange, true);
 
+      // Initialise staged JSON from DOM on first render
+      stageAdditionalRatesFromDom();
       recalcMargins();
 
       // Signal for any wiring that listens for this tab
@@ -60556,7 +62090,7 @@ function renderContractAdditionalRatesTab(ctx) {
         window.dispatchEvent(new Event('contracts-extras-rendered'));
       }
 
-      if (LOGC) console.log('[CONTRACTS] renderContractAdditionalRatesTab wired');
+      if (LOGC) console.log('[CONTRACTS] renderContractAdditionalRatesTab wired (staging+margin)');
     } catch (e) {
       if (LOGC) console.warn('[CONTRACTS] extras tab wiring failed', e);
     }
@@ -60564,7 +62098,6 @@ function renderContractAdditionalRatesTab(ctx) {
 
   return html;
 }
-
 
 
 // ===== Generic modal plumbing =====
@@ -60901,15 +62434,34 @@ async function apiDeleteJson(urlPath, bodyObj) {
   return (json != null ? json : {});
 }
 
-
 async function apiDeleteJobTitle(id) {
   const url = API(`/api/job-titles/${encodeURIComponent(id)}`);
   const res = await authFetch(url, { method: 'DELETE' });
-  if (!res.ok) throw new Error('Failed to delete job title');
+
+  if (!res.ok) {
+    let msg = '';
+    try {
+      const txt = await res.text();
+      if (txt && txt.trim()) {
+        try {
+          const j = JSON.parse(txt);
+          if (j && typeof j === 'object') {
+            if (typeof j.message === 'string' && j.message.trim()) msg = j.message.trim();
+            else if (typeof j.error === 'string' && j.error.trim()) msg = j.error.trim();
+          }
+        } catch {
+          msg = txt.trim();
+        }
+      }
+    } catch {}
+
+    if (!msg) msg = 'Failed to delete job title';
+    throw new Error(msg);
+  }
+
   const data = (await res.json().catch(() => ({}))) || {};
   return data;
 }
-
 function openJobTitleSettingsModal() {
   const S = {
     loading: false,
@@ -61133,8 +62685,8 @@ function openJobTitleSettingsModal() {
           </select>
         </div>
 
-        <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;flex-direction:row;align-items:center;gap:6px;justify-content:flex-end">
-          <button type="button" class="btn mini" style="padding:4px 8px" id="jt_btn_delete" ${(e.isNew || (node && Array.isArray(node.children) && node.children.length)) ? 'disabled' : ''}>Delete</button>
+              <div class="row" style="grid-column:1/-1;margin-top:8px;display:flex;flex-direction:row;align-items:center;gap:6px;justify-content:flex-end">
+          <button type="button" class="btn mini danger" style="padding:4px 8px" id="jt_btn_delete" ${e.isNew ? 'disabled' : ''}>Delete</button>
           <button type="button" class="btn mini primary" style="padding:4px 10px" id="jt_btn_save">Save</button>
         </div>
       </form>
@@ -61376,14 +62928,20 @@ function openJobTitleSettingsModal() {
         }
       };
     }
-
-    if (form && deleteBtn && !deleteBtn.disabled) {
+    if (form && deleteBtn) {
       deleteBtn.onclick = async () => {
         if (!S.editing || !S.editing.id) return;
         const node = S.byId[S.editing.id];
         if (!node) return;
 
-        if (!window.confirm(`Delete "${node.label}"?`)) return;
+        const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+
+        const msg =
+          hasChildren
+            ? `Delete "${node.label}"?\n\nThis category has ${node.children.length} child item(s).\nThe server will attempt to delete children too, but will refuse if any are assigned to workers.`
+            : `Delete "${node.label}"?`;
+
+        if (!window.confirm(msg)) return;
 
         try {
           const res = await apiDeleteJobTitle(node.id);
@@ -61397,7 +62955,8 @@ function openJobTitleSettingsModal() {
           await refreshFromCache();
         } catch (err) {
           console.error('job title delete failed', err);
-          alert('Failed to delete job title – it may still be in use.');
+          const msg = (err && err.message) ? String(err.message) : 'Failed to delete job title – it may still be in use.';
+          alert(msg);
         }
       };
     }
@@ -61447,7 +63006,6 @@ function openJobTitleSettingsModal() {
   // Initial load after modal is mounted
   refreshFromCache().catch((e) => console.error('[JOB_TITLES] initial refresh failed', e));
 }
-
 
 // =============== NEW: Job Titles Settings modal (side panel) ===========
 // =============== NEW: Job Titles Settings modal (side panel) ===========
@@ -63068,6 +64626,10 @@ function buildQuickFilters(section, text) {
       // backend supports ?q=... (ilike on name / invoice_no depending on endpoint)
       return { q: q };
 
+    case 'contracts':
+      // ✅ NEW: contracts quick search uses free-text q
+      return { q: q };
+
     case 'timesheets': {
       // Pick ONE field to avoid AND-ing and missing matches
       const looksLikeUUID   = /^[0-9a-f-]{10,}$/i.test(q);
@@ -63080,13 +64642,13 @@ function buildQuickFilters(section, text) {
     }
 
     case 'candidates':
-      return { first_name: q, last_name: q, email: q, phone: q };
+      // ✅ FIX: single free-text key so backend can OR-match first/surname properly
+      return { q: q };
 
     default:
       return {};
   }
 }
-
 // ✅ Quick search: use heuristic builder (includes timesheets fix)
 
 async function openSearch() {
@@ -63111,6 +64673,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ================== NEW: openSettings (parent modal; opens in View) ==================
+
 async function openSettings() {
   const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
 
@@ -63143,6 +64706,12 @@ async function openSettings() {
       ? deep(prevCtx.finance_new_draft)
       : { date_from:'', date_to:'', vat:'', hol:'', erni:'' };
 
+  // ✅ Preserve remittance draft across re-opens (so tab state survives)
+  const prevRemDraft =
+    (prevCtx && prevCtx.entity === 'settings' && prevCtx.remittanceDraft)
+      ? deep(prevCtx.remittanceDraft)
+      : null;
+
   // Seed modal context (IMPORTANT: showModal reads window.modalCtx)
   window.modalCtx = modalCtx = {
     entity: 'settings',
@@ -63153,10 +64722,18 @@ async function openSettings() {
     openToken: 'settings:' + Date.now()
   };
 
-  // Open in VIEW mode (hasId=true) and let showModal manage Edit/Cancel/Discard/Save
+  // ✅ Restore remittance draft (if any), otherwise it will be initialised by renderSettingsTab('remittances', ...)
+  if (prevRemDraft && typeof prevRemDraft === 'object') {
+    modalCtx.remittanceDraft = prevRemDraft;
+  }
+
+  // ✅ Add the Remittances tab to the Settings modal tabs list
   showModal(
     'Settings',
-    [{ key:'main', label:'Defaults' }],
+    [
+      { key:'main', label:'Defaults' },
+      { key:'remittances', label:'Remittances' }
+    ],
     renderSettingsTab,
     handleSaveSettings,
     true // hasId → opens in View mode
@@ -63167,6 +64744,8 @@ async function openSettings() {
   // Best-effort: initial sync/bounds after render
   setTimeout(() => { try { __settingsFinanceSync(); } catch {} }, 0);
 }
+
+
 function __ensureSettingsFinanceWindowsWiring() {
   if (window.__settingsFinanceWindowsWired) return;
   window.__settingsFinanceWindowsWired = true;
@@ -63368,257 +64947,593 @@ function __settingsFinanceSync() {
 
 // ================== NEW: renderSettingsTab (tab renderer; showModal controls read-only) ==================
 function renderSettingsTab(key, s = {}) {
-  if (key !== 'main') return '';
+  // Normalize tab key (back-compat: allow singular)
+  const k0 = String(key || '').trim().toLowerCase();
+  const k = (k0 === 'remittance') ? 'remittances' : k0;
 
-  // Finance windows are now loaded separately (handleGetSettings returns { settings, finance_windows }).
-  // We keep settings_defaults fields here for non-finance settings only.
-  const fws = (modalCtx && Array.isArray(modalCtx.finance_windows)) ? modalCtx.finance_windows : [];
+  // ─────────────────────────────────────────────────────────────
+  // Tab: Defaults (existing)
+  // ─────────────────────────────────────────────────────────────
+  if (k === 'main') {
+    // Finance windows are now loaded separately (handleGetSettings returns { settings, finance_windows }).
+    // We keep settings_defaults fields here for non-finance settings only.
+    const fws = (modalCtx && Array.isArray(modalCtx.finance_windows)) ? modalCtx.finance_windows : [];
 
-  // Determine "today" (YYYY-MM-DD). Prefer existing helper if present.
-  let todayYmd = null;
-  try { todayYmd = (typeof toLocalParts === 'function') ? (toLocalParts(new Date().toISOString(), null)?.ymd || null) : null; } catch {}
-  if (!todayYmd) todayYmd = new Date().toISOString().slice(0, 10);
+    // Determine "today" (YYYY-MM-DD). Prefer existing helper if present.
+    let todayYmd = null;
+    try { todayYmd = (typeof toLocalParts === 'function') ? (toLocalParts(new Date().toISOString(), null)?.ymd || null) : null; } catch {}
+    if (!todayYmd) todayYmd = new Date().toISOString().slice(0, 10);
 
-  const asYmd = (v) => {
-    if (!v) return null;
-    const s = String(v).slice(0, 10);
-    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
-  };
+    const asYmd = (v) => {
+      if (!v) return null;
+      const s = String(v).slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+    };
 
-  const sortDesc = (a, b) => (asYmd(b?.date_from) || '').localeCompare(asYmd(a?.date_from) || '');
-  const sortAsc  = (a, b) => (asYmd(a?.date_from) || '').localeCompare(asYmd(b?.date_from) || '');
+    const sortDesc = (a, b) => (asYmd(b?.date_from) || '').localeCompare(asYmd(a?.date_from) || '');
+    const sortAsc  = (a, b) => (asYmd(a?.date_from) || '').localeCompare(asYmd(b?.date_from) || '');
 
-  const current = (fws || [])
-    .filter(w => {
-      const df = asYmd(w?.date_from);
-      const dt = asYmd(w?.date_to);
-      return df && df <= todayYmd && (!dt || dt >= todayYmd);
-    })
-    .sort(sortDesc)[0] || null;
+    const current = (fws || [])
+      .filter(w => {
+        const df = asYmd(w?.date_from);
+        const dt = asYmd(w?.date_to);
+        return df && df <= todayYmd && (!dt || dt >= todayYmd);
+      })
+      .sort(sortDesc)[0] || null;
 
-  const futureList = (fws || [])
-    .filter(w => {
-      const df = asYmd(w?.date_from);
-      return df && df > todayYmd;
-    })
-    .sort(sortAsc);
+    const futureList = (fws || [])
+      .filter(w => {
+        const df = asYmd(w?.date_from);
+        return df && df > todayYmd;
+      })
+      .sort(sortAsc);
 
-  const future = futureList[0] || null;
-  const futureExtraCount = Math.max(0, futureList.length - 1);
+    const future = futureList[0] || null;
+    const futureExtraCount = Math.max(0, futureList.length - 1);
 
-  const uk = (iso) => {
-    try { return iso ? formatIsoToUk(String(iso).slice(0, 10)) : ''; } catch { return iso ? String(iso).slice(0, 10) : ''; }
-  };
+    const uk = (iso) => {
+      try { return iso ? formatIsoToUk(String(iso).slice(0, 10)) : ''; } catch { return iso ? String(iso).slice(0, 10) : ''; }
+    };
 
-  const fmt2 = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n.toFixed(2) : '';
-  };
+    const fmt2 = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(2) : '';
+    };
 
-  const cur = {
-    id: current?.id || null,
-    date_from: uk(current?.date_from || ''),
-    date_to: uk(current?.date_to || ''),
-    vat: (current?.vat_rate_pct ?? ''),
-    hol: (current?.holiday_pay_pct ?? ''),
-    erni: (current?.erni_pct ?? ''),
+    const cur = {
+      id: current?.id || null,
+      date_from: uk(current?.date_from || ''),
+      date_to: uk(current?.date_to || ''),
+      vat: (current?.vat_rate_pct ?? ''),
+      hol: (current?.holiday_pay_pct ?? ''),
+      erni: (current?.erni_pct ?? ''),
 
-    // ✅ NEW (date-linked per finance window)
-    mpay: (current?.mileage_pay_defaults ?? ''),
-    mchg: (current?.mileage_charge_defaults ?? '')
-  };
+      // ✅ NEW (date-linked per finance window)
+      mpay: (current?.mileage_pay_defaults ?? ''),
+      mchg: (current?.mileage_charge_defaults ?? '')
+    };
 
-  const fut = {
-    id: future?.id || null,
-    date_from: uk(future?.date_from || ''),
-    date_to: uk(future?.date_to || ''),
-    vat: (future?.vat_rate_pct ?? ''),
-    hol: (future?.holiday_pay_pct ?? ''),
-    erni: (future?.erni_pct ?? ''),
+    const fut = {
+      id: future?.id || null,
+      date_from: uk(future?.date_from || ''),
+      date_to: uk(future?.date_to || ''),
+      vat: (future?.vat_rate_pct ?? ''),
+      hol: (future?.holiday_pay_pct ?? ''),
+      erni: (future?.erni_pct ?? ''),
 
-    // ✅ NEW (date-linked per finance window)
-    mpay: (future?.mileage_pay_defaults ?? ''),
-    mchg: (future?.mileage_charge_defaults ?? '')
-  };
+      // ✅ NEW (date-linked per finance window)
+      mpay: (future?.mileage_pay_defaults ?? ''),
+      mchg: (future?.mileage_charge_defaults ?? '')
+    };
 
-  // Draft "Add new" values live on modalCtx so they survive re-renders
-  const draft = (modalCtx && modalCtx.finance_new_draft && typeof modalCtx.finance_new_draft === 'object')
-    ? modalCtx.finance_new_draft
-    : (modalCtx.finance_new_draft = { date_from: '', date_to: '', vat: '', hol: '', erni: '', mpay: '', mchg: '' });
+    // Draft "Add new" values live on modalCtx so they survive re-renders
+    const draft = (modalCtx && modalCtx.finance_new_draft && typeof modalCtx.finance_new_draft === 'object')
+      ? modalCtx.finance_new_draft
+      : (modalCtx.finance_new_draft = { date_from: '', date_to: '', vat: '', hol: '', erni: '', mpay: '', mchg: '' });
 
-  const financeCard = `
-    <div class="row" style="grid-column:1/-1">
-      <div id="settingsFinanceWindows" style="padding:12px;border:1px solid rgba(255,255,255,0.12);border-radius:12px;background:rgba(255,255,255,0.04)">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px">
-          <div>
-            <div style="font-weight:700;font-size:14px">Finance windows</div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.7)">
-              VAT / Holiday pay / ERNI / Mileage defaults are controlled by date windows. Windows cannot overlap.
-              ${futureExtraCount ? `<span style="margin-left:6px;color:rgba(255,200,120,0.95)">(+${futureExtraCount} more future window${futureExtraCount>1?'s':''} not shown)</span>` : ``}
+    const financeCard = `
+      <div class="row" style="grid-column:1/-1">
+        <div id="settingsFinanceWindows" style="padding:12px;border:1px solid rgba(255,255,255,0.12);border-radius:12px;background:rgba(255,255,255,0.04)">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px">
+            <div>
+              <div style="font-weight:700;font-size:14px">Finance windows</div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.7)">
+                VAT / Holiday pay / ERNI / Mileage defaults are controlled by date windows. Windows cannot overlap.
+                ${futureExtraCount ? `<span style="margin-left:6px;color:rgba(255,200,120,0.95)">(+${futureExtraCount} more future window${futureExtraCount>1?'s':''} not shown)</span>` : ``}
+              </div>
+            </div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.6);text-align:right">
+              Today: <strong>${todayYmd}</strong><br/>
+              UK dates (DD/MM/YYYY)
             </div>
           </div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.6);text-align:right">
-            Today: <strong>${todayYmd}</strong><br/>
-            UK dates (DD/MM/YYYY)
+
+          <div style="display:grid;grid-template-columns: 140px 150px 150px 95px 110px 95px 140px 140px;gap:8px;align-items:end">
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">Type</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">Start</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">End</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">VAT %</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">Holiday %</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">ERNI %</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">Mileage Pay</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7)">Mileage Charge</div>
+
+            <!-- CURRENT -->
+            <div style="font-weight:600">Current</div>
+            <input id="fw_cur_from" class="js-ukdp" type="text" value="${cur.date_from}" placeholder="DD/MM/YYYY" disabled
+                   style="opacity:0.7" />
+            <input id="fw_cur_to" class="js-ukdp" type="text" value="${cur.date_to}" placeholder="(open)"
+                   data-row="current" />
+            <input id="fw_cur_vat" type="number" step="0.01" value="${cur.vat}" placeholder="e.g. 20" data-row="current" />
+            <input id="fw_cur_hol" type="number" step="0.01" value="${cur.hol}" placeholder="e.g. 12.07" data-row="current" />
+            <input id="fw_cur_erni" type="number" step="0.01" value="${cur.erni}" placeholder="e.g. 15" data-row="current" />
+
+            <input
+              id="fw_cur_mpay"
+              type="number"
+              inputmode="decimal"
+              step="0.01"
+              min="0.01"
+              placeholder="0.00"
+              value="${fmt2(cur.mpay)}"
+              data-row="current"
+              data-norm="pence2dp_nonzero"
+              onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
+            />
+            <input
+              id="fw_cur_mcharge"
+              type="number"
+              inputmode="decimal"
+              step="0.01"
+              min="0.01"
+              placeholder="0.00"
+              value="${fmt2(cur.mchg)}"
+              data-row="current"
+              data-norm="pence2dp_nonzero"
+              onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
+            />
+
+            <!-- FUTURE (next upcoming only) -->
+            <div style="font-weight:600">Future</div>
+            <input id="fw_fut_from" class="js-ukdp" type="text" value="${fut.date_from}" placeholder="DD/MM/YYYY"
+                   data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+            <input id="fw_fut_to" class="js-ukdp" type="text" value="${fut.date_to}" placeholder="(open)"
+                   data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+            <input id="fw_fut_vat" type="number" step="0.01" value="${fut.vat}" placeholder="e.g. 20"
+                   data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+            <input id="fw_fut_hol" type="number" step="0.01" value="${fut.hol}" placeholder="e.g. 12.07"
+                   data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+            <input id="fw_fut_erni" type="number" step="0.01" value="${fut.erni}" placeholder="e.g. 15"
+                   data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
+
+            <input
+              id="fw_fut_mpay"
+              type="number"
+              inputmode="decimal"
+              step="0.01"
+              min="0.01"
+              placeholder="0.00"
+              value="${fmt2(fut.mpay)}"
+              data-row="future"
+              ${fut.id ? '' : 'disabled style="opacity:0.6"'}
+              data-norm="pence2dp_nonzero"
+              onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
+            />
+            <input
+              id="fw_fut_mcharge"
+              type="number"
+              inputmode="decimal"
+              step="0.01"
+              min="0.01"
+              placeholder="0.00"
+              value="${fmt2(fut.mchg)}"
+              data-row="future"
+              ${fut.id ? '' : 'disabled style="opacity:0.6"'}
+              data-norm="pence2dp_nonzero"
+              onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
+            />
+
+            <!-- ADD NEW (draft) -->
+            <div style="font-weight:600">Add new</div>
+            <input id="fw_new_from" class="js-ukdp" type="text" value="${draft.date_from || ''}" placeholder="DD/MM/YYYY"
+                   data-row="new" />
+            <input id="fw_new_to" class="js-ukdp" type="text" value="${draft.date_to || ''}" placeholder="(open)"
+                   data-row="new" />
+            <input id="fw_new_vat" type="number" step="0.01" value="${draft.vat ?? ''}" placeholder="e.g. 20" data-row="new" />
+            <input id="fw_new_hol" type="number" step="0.01" value="${draft.hol ?? ''}" placeholder="e.g. 12.07" data-row="new" />
+            <input id="fw_new_erni" type="number" step="0.01" value="${draft.erni ?? ''}" placeholder="e.g. 15" data-row="new" />
+
+            <input
+              id="fw_new_mpay"
+              type="number"
+              inputmode="decimal"
+              step="0.01"
+              min="0.01"
+              placeholder="0.00"
+              value="${fmt2(draft.mpay ?? '')}"
+              data-row="new"
+              data-norm="pence2dp_nonzero"
+              onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
+            />
+            <input
+              id="fw_new_mcharge"
+              type="number"
+              inputmode="decimal"
+              step="0.01"
+              min="0.01"
+              placeholder="0.00"
+              value="${fmt2(draft.mchg ?? '')}"
+              data-row="new"
+              data-norm="pence2dp_nonzero"
+              onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
+            />
+          </div>
+
+          <div id="fw_hint" style="margin-top:10px;font-size:12px;color:rgba(255,255,255,0.65)">
+            Tip: selecting a new Start date will automatically adjust the Current End date to avoid overlaps.
+          </div>
+
+          <!-- hidden ids for save logic (handled in handleSaveSettings later) -->
+          <input type="hidden" id="fw_cur_id" value="${cur.id || ''}" />
+          <input type="hidden" id="fw_fut_id" value="${fut.id || ''}" />
+        </div>
+      </div>
+    `;
+
+    return html(`
+      <div class="form" id="settingsForm">
+        ${input('timezone_id','Timezone', s.timezone_id || 'Europe/London')}
+
+        ${input('day_start','Day shift starts',  s.day_start  || '06:00')}
+        ${input('day_end','Day shift ends',      s.day_end    || '20:00')}
+        ${input('night_start','Night shift starts', s.night_start || '20:00')}
+        ${input('night_end','Night shift ends',     s.night_end   || '06:00')}
+
+        ${input('sat_start','Saturday starts',  s.sat_start || '00:00')}
+        ${input('sat_end','Saturday ends',      s.sat_end   || '00:00')}
+        ${input('sun_start','Sunday starts',    s.sun_start || '00:00')}
+        ${input('sun_end','Sunday ends',        s.sun_end   || '00:00')}
+
+        ${select('bh_source','Bank Holidays source', s.bh_source || 'MANUAL', ['MANUAL','FEED'])}
+        <div class="row" style="grid-column:1/-1">
+          <label>Bank Holidays list (JSON dates)</label>
+          <textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea>
+        </div>
+        ${input('bh_feed_url','BH feed URL', s.bh_feed_url || '')}
+
+        ${financeCard}
+      </div>
+    `);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Tab: Remittances (new)
+  //  - Weekly/Daily dropdown (UI-only)
+  //  - Checkbox groups (UI-only; NOT collected by collectForm)
+  //  - Header/Footer message (persisted; collected by collectForm)
+  //  - No JSON shown
+  // ─────────────────────────────────────────────────────────────
+  if (k === 'remittances') {
+    const deep = (o)=> JSON.parse(JSON.stringify(o || {}));
+    const isObj = (v) => !!(v && typeof v === 'object' && !Array.isArray(v));
+
+    const defaultCfg = {
+      weekly: {
+        include_item_types: {
+          SEGMENT_DELTA: true,
+          EXPENSE_DELTA: true,
+          MILEAGE_DELTA: true,
+          ADJUSTMENT_DELTA: true,
+          LOAN_REPAYMENT: true,
+          DEBT_CREATED: true
+        },
+        include_fields: {
+          client: true,
+          week_ending_date: true,
+          work_date: false,
+          job_title: true,
+          band: true,
+          reference_number: true,
+          worked_times: true
+        }
+      },
+      daily: {
+        include_item_types: {
+          SEGMENT_DELTA: true,
+          EXPENSE_DELTA: true,
+          MILEAGE_DELTA: true,
+          ADJUSTMENT_DELTA: true,
+          LOAN_REPAYMENT: true,
+          DEBT_CREATED: true
+        },
+        include_fields: {
+          client: true,
+          week_ending_date: true,
+          work_date: true,
+          job_title: true,
+          band: true,
+          reference_number: true,
+          worked_times: true
+        }
+      },
+      defaults: {
+        unknown_item_type: true,
+        missing_scope: 'WEEKLY'
+      }
+    };
+
+    const cfgIn = isObj(s.remittance_includes_json) ? s.remittance_includes_json : null;
+
+    const cfg = (() => {
+      const out = deep(defaultCfg);
+      if (!cfgIn) return out;
+
+      try {
+        if (isObj(cfgIn.weekly)) {
+          if (isObj(cfgIn.weekly.include_item_types)) out.weekly.include_item_types = { ...out.weekly.include_item_types, ...cfgIn.weekly.include_item_types };
+          if (isObj(cfgIn.weekly.include_fields)) out.weekly.include_fields = { ...out.weekly.include_fields, ...cfgIn.weekly.include_fields };
+        }
+        if (isObj(cfgIn.daily)) {
+          if (isObj(cfgIn.daily.include_item_types)) out.daily.include_item_types = { ...out.daily.include_item_types, ...cfgIn.daily.include_item_types };
+          if (isObj(cfgIn.daily.include_fields)) out.daily.include_fields = { ...out.daily.include_fields, ...cfgIn.daily.include_fields };
+        }
+        if (isObj(cfgIn.defaults)) out.defaults = { ...out.defaults, ...cfgIn.defaults };
+      } catch {}
+      return out;
+    })();
+
+    // Seed a stable draft store for the remittances tab so values survive tab switches/re-renders.
+    try {
+      if (modalCtx && typeof modalCtx === 'object') {
+        if (!modalCtx.remittanceDraft || typeof modalCtx.remittanceDraft !== 'object') {
+          modalCtx.remittanceDraft = {
+            ui_scope: 'WEEKLY',
+            remittance_includes_json: deep(cfg),
+            remittance_header_message: (s.remittance_header_message == null ? '' : String(s.remittance_header_message)),
+            remittance_footer_message: (s.remittance_footer_message == null ? '' : String(s.remittance_footer_message)),
+            dirty: false
+          };
+        } else {
+          if (!('remittance_includes_json' in modalCtx.remittanceDraft)) modalCtx.remittanceDraft.remittance_includes_json = deep(cfg);
+          if (!('remittance_header_message' in modalCtx.remittanceDraft)) modalCtx.remittanceDraft.remittance_header_message = (s.remittance_header_message == null ? '' : String(s.remittance_header_message));
+          if (!('remittance_footer_message' in modalCtx.remittanceDraft)) modalCtx.remittanceDraft.remittance_footer_message = (s.remittance_footer_message == null ? '' : String(s.remittance_footer_message));
+          if (!('ui_scope' in modalCtx.remittanceDraft)) modalCtx.remittanceDraft.ui_scope = 'WEEKLY';
+          if (!('dirty' in modalCtx.remittanceDraft)) modalCtx.remittanceDraft.dirty = false;
+        }
+      }
+    } catch {}
+
+    const draft = (modalCtx && modalCtx.remittanceDraft && typeof modalCtx.remittanceDraft === 'object') ? modalCtx.remittanceDraft : {
+      ui_scope: 'WEEKLY',
+      remittance_includes_json: deep(cfg),
+      remittance_header_message: (s.remittance_header_message == null ? '' : String(s.remittance_header_message)),
+      remittance_footer_message: (s.remittance_footer_message == null ? '' : String(s.remittance_footer_message)),
+      dirty: false
+    };
+
+    const scopeUi = String(draft.ui_scope || 'WEEKLY').trim().toUpperCase();
+    const scopeSelWeekly = (scopeUi === 'WEEKLY') ? 'selected' : '';
+    const scopeSelDaily  = (scopeUi === 'DAILY') ? 'selected' : '';
+
+    const itemTypes = [
+      { key: 'SEGMENT_DELTA',    label: 'Hours / rate adjustments' },
+      { key: 'EXPENSE_DELTA',    label: 'Expenses' },
+      { key: 'MILEAGE_DELTA',    label: 'Mileage' },
+      { key: 'ADJUSTMENT_DELTA', label: 'Adjustments' },
+      { key: 'LOAN_REPAYMENT',   label: 'Loan repayments' },
+      { key: 'DEBT_CREATED',     label: 'Overpayment correction' }
+    ];
+
+    const fields = [
+      { key: 'client',           label: 'Client' },
+      { key: 'week_ending_date', label: 'Week ending date' },
+      { key: 'work_date',        label: 'Work date (daily only where applicable)' },
+      { key: 'job_title',        label: 'Job title / role' },
+      { key: 'band',             label: 'Band' },
+      { key: 'reference_number', label: 'Reference number' },
+      { key: 'worked_times',     label: 'Worked times (start/end/break/minutes)' }
+    ];
+
+    const boolish = (v, dflt) => {
+      if (typeof v === 'boolean') return v;
+      if (v === 1 || v === '1') return true;
+      if (v === 0 || v === '0') return false;
+      if (v == null) return !!dflt;
+      const s = String(v).trim().toLowerCase();
+      if (s === 'true' || s === 't' || s === 'yes' || s === 'y' || s === 'on') return true;
+      if (s === 'false' || s === 'f' || s === 'no' || s === 'n' || s === 'off') return false;
+      return !!dflt;
+    };
+
+    const getCfg = (scope, group, k, dflt) => {
+      try {
+        const S = (scope === 'DAILY') ? 'daily' : 'weekly';
+        const o = draft?.remittance_includes_json || cfg;
+        const v = o?.[S]?.[group]?.[k];
+        return boolish(v, dflt);
+      } catch {
+        return !!dflt;
+      }
+    };
+
+    const mkCheck = (id, text, checked) => `
+      <label class="inline chk-tight" style="display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;">
+        <input type="checkbox" id="${id}" data-noCollect="true" ${checked ? 'checked' : ''} />
+        <span>${escapeHtml(text)}</span>
+      </label>
+    `;
+
+    const mkGroup = (scope, title, list, kind) => {
+      const bits = list.map((x) => {
+        const id = `rem_${scope.toLowerCase()}_${kind}_${x.key}`;
+        const checked = (kind === 'item')
+          ? getCfg(scope, 'include_item_types', x.key, true)
+          : getCfg(scope, 'include_fields', x.key, true);
+        return mkCheck(id, x.label, checked);
+      }).join('');
+
+      return `
+        <div style="padding:12px;border:1px solid rgba(255,255,255,0.12);border-radius:12px;background:rgba(255,255,255,0.04);margin-top:10px">
+          <div style="font-weight:700;font-size:14px;margin-bottom:6px">${escapeHtml(title)}</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:6px">
+            Applies to <strong>${escapeHtml(scope)}</strong> timesheets.
+          </div>
+          ${bits}
+        </div>
+      `;
+    };
+
+    // Wire UI behaviours + draft syncing (safe, idempotent per openToken).
+    try {
+      const token = String(modalCtx?.openToken || '');
+      const wireKey = `remit:${token}`;
+      if (modalCtx && modalCtx.__remittanceWiredKey !== wireKey) {
+        modalCtx.__remittanceWiredKey = wireKey;
+
+        setTimeout(() => {
+          try {
+            const sel = document.getElementById('remScopeSelect');
+            const wEl = document.getElementById('remScopeWeekly');
+            const dEl = document.getElementById('remScopeDaily');
+
+            const applyScope = (sc) => {
+              const up = String(sc || '').trim().toUpperCase();
+              if (modalCtx && modalCtx.remittanceDraft) modalCtx.remittanceDraft.ui_scope = (up === 'DAILY') ? 'DAILY' : 'WEEKLY';
+              if (wEl) wEl.style.display = (up === 'DAILY') ? 'none' : '';
+              if (dEl) dEl.style.display = (up === 'DAILY') ? '' : 'none';
+            };
+
+            if (sel) {
+              sel.addEventListener('change', () => {
+                applyScope(sel.value);
+              });
+              applyScope(sel.value || scopeUi);
+            } else {
+              applyScope(scopeUi);
+            }
+
+            try {
+              if (typeof applyRemittanceIncludesJsonToUi === 'function') {
+                const baseJson = (modalCtx && modalCtx.remittanceDraft && modalCtx.remittanceDraft.remittance_includes_json)
+                  ? modalCtx.remittanceDraft.remittance_includes_json
+                  : deep(cfg);
+                applyRemittanceIncludesJsonToUi(baseJson);
+              }
+            } catch {}
+
+            const root = document.getElementById('settingsRemittancesRoot');
+            if (root) {
+              const syncDraftFromDom = () => {
+                try {
+                  const hdr = document.getElementById('remittance_header_message');
+                  const ftr = document.getElementById('remittance_footer_message');
+
+                  if (modalCtx && modalCtx.remittanceDraft) {
+                    if (hdr) modalCtx.remittanceDraft.remittance_header_message = String(hdr.value ?? '');
+                    if (ftr) modalCtx.remittanceDraft.remittance_footer_message = String(ftr.value ?? '');
+                  }
+
+                  let inc = null;
+                  try {
+                    if (typeof buildRemittanceIncludesJsonFromUi === 'function') {
+                      inc = buildRemittanceIncludesJsonFromUi();
+                    }
+                  } catch {}
+
+                  if (inc && modalCtx && modalCtx.remittanceDraft) {
+                    modalCtx.remittanceDraft.remittance_includes_json = inc;
+                    modalCtx.remittanceDraft.dirty = true;
+
+                    if (modalCtx.data && typeof modalCtx.data === 'object') {
+                      modalCtx.data.remittance_includes_json = inc;
+                      modalCtx.data.remittance_header_message = modalCtx.remittanceDraft.remittance_header_message;
+                      modalCtx.data.remittance_footer_message = modalCtx.remittanceDraft.remittance_footer_message;
+                    }
+                  }
+                } catch {}
+              };
+
+              root.addEventListener('change', (e) => {
+                const t = e && e.target;
+                if (!t) return;
+                if (t && t.id && String(t.id).startsWith('rem_')) syncDraftFromDom();
+              }, true);
+
+              root.addEventListener('input', (e) => {
+                const t = e && e.target;
+                if (!t) return;
+                const id = String(t.id || '');
+                if (id === 'remittance_header_message' || id === 'remittance_footer_message') {
+                  syncDraftFromDom();
+                }
+              }, true);
+            }
+          } catch {}
+        }, 0);
+      }
+    } catch {}
+
+    const wkWrapStyle = (scopeUi === 'DAILY') ? 'display:none;' : '';
+    const dyWrapStyle = (scopeUi === 'DAILY') ? '' : 'display:none;';
+
+    return html(`
+      <div class="form" id="settingsForm">
+        <div class="row" style="grid-column:1/-1">
+          <div id="settingsRemittancesRoot" style="padding:12px;border:1px solid rgba(255,255,255,0.12);border-radius:12px;background:rgba(255,255,255,0.04)">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px">
+              <div>
+                <div style="font-weight:700;font-size:14px">Remittances</div>
+                <div style="font-size:12px;color:rgba(255,255,255,0.7)">
+                  Configure what appears in remittance advice. No JSON is shown — use the tick boxes below.
+                </div>
+              </div>
+              <div style="display:flex;gap:10px;align-items:center">
+                <div style="font-size:12px;color:rgba(255,255,255,0.7)">Edit:</div>
+                <select id="remScopeSelect" data-noCollect="true" style="min-width:130px">
+                  <option value="WEEKLY" ${scopeSelWeekly}>Weekly</option>
+                  <option value="DAILY" ${scopeSelDaily}>Daily</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="row" style="grid-column:1/-1">
+              <label>Header message</label>
+              <div class="controls">
+                <textarea id="remittance_header_message" name="remittance_header_message" placeholder="e.g. Please see below remittance advice:">${escapeHtml(draft.remittance_header_message || '')}</textarea>
+              </div>
+            </div>
+
+            <div class="row" style="grid-column:1/-1">
+              <label>Footer message</label>
+              <div class="controls">
+                <textarea id="remittance_footer_message" name="remittance_footer_message" placeholder="e.g. Many thanks, Arthur Rai Medical Services">${escapeHtml(draft.remittance_footer_message || '')}</textarea>
+              </div>
+            </div>
+
+            <div id="remScopeWeekly" style="${wkWrapStyle}">
+              ${mkGroup('WEEKLY', 'Include item types', itemTypes, 'item')}
+              ${mkGroup('WEEKLY', 'Include details', fields, 'field')}
+            </div>
+
+            <div id="remScopeDaily" style="${dyWrapStyle}">
+              ${mkGroup('DAILY', 'Include item types', itemTypes, 'item')}
+              ${mkGroup('DAILY', 'Include details', fields, 'field')}
+            </div>
+
+            <div style="margin-top:10px;font-size:12px;color:rgba(255,255,255,0.65)">
+              Notes:
+              <ul style="margin:6px 0 0 18px;padding:0">
+                <li>Job title / band will be included only when present and enabled.</li>
+                <li>Daily timesheets do not rely on contracts; values are sourced from the best available timesheet context.</li>
+              </ul>
+            </div>
           </div>
         </div>
-
-        <div style="display:grid;grid-template-columns: 140px 150px 150px 95px 110px 95px 140px 140px;gap:8px;align-items:end">
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Type</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Start</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">End</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">VAT %</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Holiday %</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">ERNI %</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Mileage Pay</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.7)">Mileage Charge</div>
-
-          <!-- CURRENT -->
-          <div style="font-weight:600">Current</div>
-          <input id="fw_cur_from" class="js-ukdp" type="text" value="${cur.date_from}" placeholder="DD/MM/YYYY" disabled
-                 style="opacity:0.7" />
-          <input id="fw_cur_to" class="js-ukdp" type="text" value="${cur.date_to}" placeholder="(open)"
-                 data-row="current" />
-          <input id="fw_cur_vat" type="number" step="0.01" value="${cur.vat}" placeholder="e.g. 20" data-row="current" />
-          <input id="fw_cur_hol" type="number" step="0.01" value="${cur.hol}" placeholder="e.g. 12.07" data-row="current" />
-          <input id="fw_cur_erni" type="number" step="0.01" value="${cur.erni}" placeholder="e.g. 15" data-row="current" />
-
-          <input
-            id="fw_cur_mpay"
-            type="number"
-            inputmode="decimal"
-            step="0.01"
-            min="0.01"
-            placeholder="0.00"
-            value="${fmt2(cur.mpay)}"
-            data-row="current"
-            data-norm="pence2dp_nonzero"
-            onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
-          />
-          <input
-            id="fw_cur_mcharge"
-            type="number"
-            inputmode="decimal"
-            step="0.01"
-            min="0.01"
-            placeholder="0.00"
-            value="${fmt2(cur.mchg)}"
-            data-row="current"
-            data-norm="pence2dp_nonzero"
-            onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
-          />
-
-          <!-- FUTURE (next upcoming only) -->
-          <div style="font-weight:600">Future</div>
-          <input id="fw_fut_from" class="js-ukdp" type="text" value="${fut.date_from}" placeholder="DD/MM/YYYY"
-                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
-          <input id="fw_fut_to" class="js-ukdp" type="text" value="${fut.date_to}" placeholder="(open)"
-                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
-          <input id="fw_fut_vat" type="number" step="0.01" value="${fut.vat}" placeholder="e.g. 20"
-                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
-          <input id="fw_fut_hol" type="number" step="0.01" value="${fut.hol}" placeholder="e.g. 12.07"
-                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
-          <input id="fw_fut_erni" type="number" step="0.01" value="${fut.erni}" placeholder="e.g. 15"
-                 data-row="future" ${fut.id ? '' : 'disabled style="opacity:0.6"'} />
-
-          <input
-            id="fw_fut_mpay"
-            type="number"
-            inputmode="decimal"
-            step="0.01"
-            min="0.01"
-            placeholder="0.00"
-            value="${fmt2(fut.mpay)}"
-            data-row="future"
-            ${fut.id ? '' : 'disabled style="opacity:0.6"'}
-            data-norm="pence2dp_nonzero"
-            onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
-          />
-          <input
-            id="fw_fut_mcharge"
-            type="number"
-            inputmode="decimal"
-            step="0.01"
-            min="0.01"
-            placeholder="0.00"
-            value="${fmt2(fut.mchg)}"
-            data-row="future"
-            ${fut.id ? '' : 'disabled style="opacity:0.6"'}
-            data-norm="pence2dp_nonzero"
-            onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
-          />
-
-          <!-- ADD NEW (draft) -->
-          <div style="font-weight:600">Add new</div>
-          <input id="fw_new_from" class="js-ukdp" type="text" value="${draft.date_from || ''}" placeholder="DD/MM/YYYY"
-                 data-row="new" />
-          <input id="fw_new_to" class="js-ukdp" type="text" value="${draft.date_to || ''}" placeholder="(open)"
-                 data-row="new" />
-          <input id="fw_new_vat" type="number" step="0.01" value="${draft.vat ?? ''}" placeholder="e.g. 20" data-row="new" />
-          <input id="fw_new_hol" type="number" step="0.01" value="${draft.hol ?? ''}" placeholder="e.g. 12.07" data-row="new" />
-          <input id="fw_new_erni" type="number" step="0.01" value="${draft.erni ?? ''}" placeholder="e.g. 15" data-row="new" />
-
-          <input
-            id="fw_new_mpay"
-            type="number"
-            inputmode="decimal"
-            step="0.01"
-            min="0.01"
-            placeholder="0.00"
-            value="${fmt2(draft.mpay ?? '')}"
-            data-row="new"
-            data-norm="pence2dp_nonzero"
-            onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
-          />
-          <input
-            id="fw_new_mcharge"
-            type="number"
-            inputmode="decimal"
-            step="0.01"
-            min="0.01"
-            placeholder="0.00"
-            value="${fmt2(draft.mchg ?? '')}"
-            data-row="new"
-            data-norm="pence2dp_nonzero"
-            onblur="window.__normPence2dpNonZero && window.__normPence2dpNonZero(this)"
-          />
-        </div>
-
-        <div id="fw_hint" style="margin-top:10px;font-size:12px;color:rgba(255,255,255,0.65)">
-          Tip: selecting a new Start date will automatically adjust the Current End date to avoid overlaps.
-        </div>
-
-        <!-- hidden ids for save logic (handled in handleSaveSettings later) -->
-        <input type="hidden" id="fw_cur_id" value="${cur.id || ''}" />
-        <input type="hidden" id="fw_fut_id" value="${fut.id || ''}" />
       </div>
-    </div>
-  `;
+    `);
+  }
 
-  return html(`
-    <div class="form" id="settingsForm">
-      ${input('timezone_id','Timezone', s.timezone_id || 'Europe/London')}
-
-      ${input('day_start','Day shift starts',  s.day_start  || '06:00')}
-      ${input('day_end','Day shift ends',      s.day_end    || '20:00')}
-      ${input('night_start','Night shift starts', s.night_start || '20:00')}
-      ${input('night_end','Night shift ends',     s.night_end   || '06:00')}
-
-      ${input('sat_start','Saturday starts',  s.sat_start || '00:00')}
-      ${input('sat_end','Saturday ends',      s.sat_end   || '00:00')}
-      ${input('sun_start','Sunday starts',    s.sun_start || '00:00')}
-      ${input('sun_end','Sunday ends',        s.sun_end   || '00:00')}
-
-      ${select('bh_source','Bank Holidays source', s.bh_source || 'MANUAL', ['MANUAL','FEED'])}
-      <div class="row" style="grid-column:1/-1">
-        <label>Bank Holidays list (JSON dates)</label>
-        <textarea name="bh_list">${JSON.stringify(s.bh_list || [], null, 2)}</textarea>
-      </div>
-      ${input('bh_feed_url','BH feed URL', s.bh_feed_url || '')}
-
-      ${financeCard}
-    </div>
-  `);
+  return '';
 }
 
 /**
@@ -63700,6 +65615,120 @@ async function handleSaveSettings() {
 
   // ✅ Never send modal-only id to backend
   try { delete payload.id; } catch {}
+
+  // ─────────────────────────────────────────────
+  // ✅ Remittances (new tab): build JSON from UI (checkboxes) + messages
+  // - No JSON shown to user.
+  // - Wire-in points for:
+  //   buildRemittanceIncludesJsonFromUi()
+  //   applyRemittanceIncludesJsonToUi(json) (used at render time)
+  // - We only include remittance settings when:
+  //   (a) the user changed them (modalCtx.remittanceDraft.dirty), OR
+  //   (b) the remittances UI is currently mounted.
+  // ─────────────────────────────────────────────
+  const remRootMounted = !!byId('settingsRemittancesRoot');
+
+  const getRemDraft = () => {
+    try {
+      const mc = (window.modalCtx && typeof window.modalCtx === 'object') ? window.modalCtx : (modalCtx || null);
+      const d = mc && mc.remittanceDraft && typeof mc.remittanceDraft === 'object' ? mc.remittanceDraft : null;
+      return d;
+    } catch { return null; }
+  };
+
+  const buildRemittanceIncludesFallback = () => {
+    const isObj = (v) => !!(v && typeof v === 'object' && !Array.isArray(v));
+
+    const def = {
+      weekly: { include_item_types: {}, include_fields: {} },
+      daily:  { include_item_types: {}, include_fields: {} },
+      defaults: { unknown_item_type: true, missing_scope: 'WEEKLY' }
+    };
+
+    const itemTypes = ['SEGMENT_DELTA','EXPENSE_DELTA','MILEAGE_DELTA','ADJUSTMENT_DELTA','LOAN_REPAYMENT','DEBT_CREATED'];
+    const fields = ['client','week_ending_date','work_date','job_title','band','reference_number','worked_times'];
+
+    itemTypes.forEach(k => { def.weekly.include_item_types[k] = true; def.daily.include_item_types[k] = true; });
+    fields.forEach(k => { def.weekly.include_fields[k] = true; def.daily.include_fields[k] = true; });
+
+    // default: daily work_date on; weekly work_date off
+    def.weekly.include_fields.work_date = false;
+    def.daily.include_fields.work_date = true;
+
+    const readCk = (id, dflt) => {
+      const el = byId(id);
+      if (!el) return !!dflt;
+      return !!el.checked;
+    };
+
+    itemTypes.forEach((it) => {
+      def.weekly.include_item_types[it] = readCk(`rem_weekly_item_${it}`, true);
+      def.daily.include_item_types[it]  = readCk(`rem_daily_item_${it}`, true);
+    });
+
+    fields.forEach((f) => {
+      def.weekly.include_fields[f] = readCk(`rem_weekly_field_${f}`, def.weekly.include_fields[f]);
+      def.daily.include_fields[f]  = readCk(`rem_daily_field_${f}`, def.daily.include_fields[f]);
+    });
+
+    // Preserve defaults if present in an existing draft object (if any)
+    const d = getRemDraft();
+    if (d && isObj(d.remittance_includes_json) && isObj(d.remittance_includes_json.defaults)) {
+      def.defaults = { ...def.defaults, ...d.remittance_includes_json.defaults };
+    }
+
+    return def;
+  };
+
+  const buildRemittanceIncludes = () => {
+    try {
+      if (typeof buildRemittanceIncludesJsonFromUi === 'function') {
+        const j = buildRemittanceIncludesJsonFromUi();
+        if (j && typeof j === 'object' && !Array.isArray(j)) return j;
+      }
+    } catch {}
+    return buildRemittanceIncludesFallback();
+  };
+
+  try {
+    const rd = getRemDraft();
+
+    const shouldIncludeRem = !!(remRootMounted || (rd && rd.dirty === true));
+    if (shouldIncludeRem) {
+      // Prefer draft values if present (persists across tab switches)
+      let hdr = null;
+      let ftr = null;
+      if (rd && ('remittance_header_message' in rd)) hdr = rd.remittance_header_message;
+      if (rd && ('remittance_footer_message' in rd)) ftr = rd.remittance_footer_message;
+
+      // If UI mounted, prefer live DOM values (captures last edits)
+      if (remRootMounted) {
+        const hEl = byId('remittance_header_message');
+        const fEl = byId('remittance_footer_message');
+        if (hEl) hdr = String(hEl.value ?? '');
+        if (fEl) ftr = String(fEl.value ?? '');
+      }
+
+      // Include messages (backend will trim/normalise to null if blank)
+      if (hdr !== null && hdr !== undefined) payload.remittance_header_message = hdr;
+      if (ftr !== null && ftr !== undefined) payload.remittance_footer_message = ftr;
+
+      // Includes JSON
+      let inc = null;
+      if (rd && rd.remittance_includes_json && typeof rd.remittance_includes_json === 'object') {
+        inc = rd.remittance_includes_json;
+      }
+      if (remRootMounted) {
+        inc = buildRemittanceIncludes();
+      }
+      if (!inc) inc = buildRemittanceIncludes();
+
+      payload.remittance_includes_json = inc;
+
+      // Mark clean post-save (the refresh below will re-seed)
+      if (rd) rd.dirty = true; // keep true until save succeeds
+    }
+  } catch {}
 
   // ─────────────────────────────────────────────
   // Read finance window inputs (Current / Future / Add new)
@@ -63862,8 +65891,14 @@ async function handleSaveSettings() {
   // Save (minimise calls; enforce safe order)
   // ─────────────────────────────────────────────
   try {
-    // 1) Save non-finance settings_defaults
+    // 1) Save non-finance settings_defaults (including remittances settings if present)
     await saveSettings(payload);
+
+    // If remittance draft existed, mark clean after successful saveSettings call
+    try {
+      const rd = getRemDraft();
+      if (rd) rd.dirty = false;
+    } catch {}
 
     // 2) Finance windows updates (order matters)
     if (curId && patchCurrent) {
@@ -63901,6 +65936,19 @@ async function handleSaveSettings() {
     // ✅ Clear draft "Add new" row after successful save (including mileage)
     modalCtx.finance_new_draft = { date_from:'', date_to:'', vat:'', hol:'', erni:'', mpay:'', mcharge:'' };
 
+    // ✅ Refresh remittance draft baseline after successful save
+    try {
+      const rd = (modalCtx && modalCtx.remittanceDraft && typeof modalCtx.remittanceDraft === 'object') ? modalCtx.remittanceDraft : null;
+      if (rd) {
+        const keepScope = String(rd.ui_scope || 'WEEKLY').toUpperCase();
+        rd.ui_scope = (keepScope === 'DAILY') ? 'DAILY' : 'WEEKLY';
+        rd.remittance_includes_json = (modalCtx.data && modalCtx.data.remittance_includes_json) ? modalCtx.data.remittance_includes_json : (rd.remittance_includes_json || null);
+        rd.remittance_header_message = (modalCtx.data && modalCtx.data.remittance_header_message != null) ? String(modalCtx.data.remittance_header_message) : (rd.remittance_header_message || '');
+        rd.remittance_footer_message = (modalCtx.data && modalCtx.data.remittance_footer_message != null) ? String(modalCtx.data.remittance_footer_message) : (rd.remittance_footer_message || '');
+        rd.dirty = false;
+      }
+    } catch {}
+
     return { ok:true, saved: modalCtx.data };
   } catch {
     // Fallback: keep current modalCtx.data and return merged payload (non-finance only)
@@ -63915,6 +65963,170 @@ async function handleSaveSettings() {
     return { ok:true, saved };
   }
 }
+
+function buildRemittanceIncludesJsonFromUi() {
+  const byId = (id) => document.getElementById(id);
+
+  const itemTypes = [
+    'SEGMENT_DELTA',
+    'EXPENSE_DELTA',
+    'MILEAGE_DELTA',
+    'ADJUSTMENT_DELTA',
+    'LOAN_REPAYMENT',
+    'DEBT_CREATED'
+  ];
+
+  const fields = [
+    'client',
+    'week_ending_date',
+    'work_date',
+    'job_title',
+    'band',
+    'reference_number',
+    'worked_times'
+  ];
+
+  const readCk = (id, dflt) => {
+    const el = byId(id);
+    if (!el) return !!dflt;
+    return !!el.checked;
+  };
+
+  // Preserve defaults if present (so we don't stomp future keys)
+  const existingDefaults = (() => {
+    try {
+      const mc = (window.modalCtx && typeof window.modalCtx === 'object') ? window.modalCtx : (typeof modalCtx !== 'undefined' ? modalCtx : null);
+      const d1 = mc?.remittanceDraft?.remittance_includes_json?.defaults;
+      const d2 = mc?.data?.remittance_includes_json?.defaults;
+      const d = (d1 && typeof d1 === 'object' && !Array.isArray(d1)) ? d1
+            : (d2 && typeof d2 === 'object' && !Array.isArray(d2)) ? d2
+            : null;
+      return d ? JSON.parse(JSON.stringify(d)) : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const out = {
+    weekly: { include_item_types: {}, include_fields: {} },
+    daily:  { include_item_types: {}, include_fields: {} },
+    defaults: existingDefaults || { unknown_item_type: true, missing_scope: 'WEEKLY' }
+  };
+
+  // Weekly
+  itemTypes.forEach((k) => {
+    out.weekly.include_item_types[k] = readCk(`rem_weekly_item_${k}`, true);
+  });
+  fields.forEach((k) => {
+    // Default weekly.work_date false unless explicitly ticked
+    const defVal = (k === 'work_date') ? false : true;
+    out.weekly.include_fields[k] = readCk(`rem_weekly_field_${k}`, defVal);
+  });
+
+  // Daily
+  itemTypes.forEach((k) => {
+    out.daily.include_item_types[k] = readCk(`rem_daily_item_${k}`, true);
+  });
+  fields.forEach((k) => {
+    // Default daily.work_date true unless explicitly unticked
+    const defVal = (k === 'work_date') ? true : true;
+    out.daily.include_fields[k] = readCk(`rem_daily_field_${k}`, defVal);
+  });
+
+  // Normalise defaults a little (safe, deterministic)
+  try {
+    if (out.defaults && typeof out.defaults === 'object' && !Array.isArray(out.defaults)) {
+      if (out.defaults.unknown_item_type === undefined || out.defaults.unknown_item_type === null) out.defaults.unknown_item_type = true;
+      const ms = String(out.defaults.missing_scope || 'WEEKLY').trim().toUpperCase();
+      out.defaults.missing_scope = (ms === 'DAILY') ? 'DAILY' : 'WEEKLY';
+    } else {
+      out.defaults = { unknown_item_type: true, missing_scope: 'WEEKLY' };
+    }
+  } catch {
+    out.defaults = { unknown_item_type: true, missing_scope: 'WEEKLY' };
+  }
+
+  return out;
+}
+
+function applyRemittanceIncludesJsonToUi(json) {
+  const byId = (id) => document.getElementById(id);
+
+  const itemTypes = [
+    'SEGMENT_DELTA',
+    'EXPENSE_DELTA',
+    'MILEAGE_DELTA',
+    'ADJUSTMENT_DELTA',
+    'LOAN_REPAYMENT',
+    'DEBT_CREATED'
+  ];
+
+  const fields = [
+    'client',
+    'week_ending_date',
+    'work_date',
+    'job_title',
+    'band',
+    'reference_number',
+    'worked_times'
+  ];
+
+  const isObj = (v) => !!(v && typeof v === 'object' && !Array.isArray(v));
+
+  const toBoolMaybe = (v) => {
+    if (typeof v === 'boolean') return v;
+    if (v === 1 || v === '1') return true;
+    if (v === 0 || v === '0') return false;
+    if (v == null) return null;
+    const s = String(v).trim().toLowerCase();
+    if (s === 'true' || s === 't' || s === 'yes' || s === 'y' || s === 'on') return true;
+    if (s === 'false' || s === 'f' || s === 'no' || s === 'n' || s === 'off') return false;
+    return null;
+  };
+
+  const getVal = (scope, group, key) => {
+    try {
+      if (!isObj(json)) return null;
+      const node = (scope === 'DAILY') ? json.daily : json.weekly;
+      if (!isObj(node)) return null;
+      const grp = node[group];
+      if (!isObj(grp)) return null;
+      return toBoolMaybe(grp[key]);
+    } catch {
+      return null;
+    }
+  };
+
+  const setCkIfExists = (id, v) => {
+    const el = byId(id);
+    if (!el) return;
+    if (v === null) return; // leave as-is (keeps HTML defaults)
+    el.checked = !!v;
+  };
+
+  // Weekly
+  itemTypes.forEach((k) => {
+    const v = getVal('WEEKLY', 'include_item_types', k);
+    setCkIfExists(`rem_weekly_item_${k}`, v);
+  });
+  fields.forEach((k) => {
+    const v = getVal('WEEKLY', 'include_fields', k);
+    setCkIfExists(`rem_weekly_field_${k}`, v);
+  });
+
+  // Daily
+  itemTypes.forEach((k) => {
+    const v = getVal('DAILY', 'include_item_types', k);
+    setCkIfExists(`rem_daily_item_${k}`, v);
+  });
+  fields.forEach((k) => {
+    const v = getVal('DAILY', 'include_fields', k);
+    setCkIfExists(`rem_daily_field_${k}`, v);
+  });
+}
+
+
+
 
 
 // ================== NEW: handleSaveSettings (parent onSave; persist then stay open in View) ==================
@@ -70220,10 +72432,18 @@ const onSaveTimesheet = async () => {
   const shouldChangeHold =
     (payHoldDesired === true  && !currentOnHold) ||
     (payHoldDesired === false &&  currentOnHold);
-
   const alreadyPaid      = !!tsfinLocal.paid_at_utc;
   const wantsMarkPaid    = !!st.markPaid;
-  const shouldMarkPaid   = wantsMarkPaid && !alreadyPaid;
+
+  // ✅ MARK-PAID BYPASS REMOVED:
+  // Settlement must be snapshot-based via Banking → External Reconcile (or normal rail settlement).
+  if (wantsMarkPaid) {
+    const msg = alreadyPaid
+      ? 'This timesheet is already marked paid. To reconcile payments, use Banking → External Reconcile (snapshot-based).'
+      : 'Mark Paid is no longer available here. Use Banking → External Reconcile (snapshot-based) instead.';
+    alert(msg);
+    try { st.markPaid = false; } catch {}
+  }
 
   L('staged state', {
     tsIdSave,
@@ -70248,8 +72468,7 @@ const onSaveTimesheet = async () => {
 
     refChanged,
     lockedNow,
-    shouldChangeHold,
-    shouldMarkPaid
+    shouldChangeHold
   });
 
   const tasks = [];
@@ -70511,14 +72730,7 @@ if (det.isSegmentsMode && (hasSegOverrides || hasSegTargets) && (tsIdSave || row
       await toggleTimesheetPayHold(tsIdSave, onHold, reason, expected);
     });
   }
-
-  // Mark paid
-  if (shouldMarkPaid && tsIdSave) {
-    tasks.push(async () => {
-      const expected = window.modalCtx?.timesheetMeta?.expected_timesheet_id || tsIdSave;
-      await markTimesheetPaid(tsIdSave, expected);
-    });
-  }
+  // ✅ Mark Paid removed: use Banking → External Reconcile (snapshot-based)
 
   // ─────────────────────────────────────────────────────────────
   // ✅ Expenses save (NEW)
@@ -72872,94 +75084,6 @@ async function toggleTimesheetPayHold(ctxOrId, onHold, reason = '', expectedTime
 }
 
 
-async function markTimesheetPaid(ctxOrId, expectedTimesheetId, paymentReference) {
-  const { LOGM, L, GC, GE } = getTsLoggers('[TS][MARK-PAID]');
-  GC('markTimesheetPaid');
-
-  const mc  = window.modalCtx || {};
-  const row = (mc.data && mc.data.timesheet_id) ? mc.data : (ctxOrId && ctxOrId.row ? ctxOrId.row : {});
-  const tsId = (typeof ctxOrId === 'string') ? ctxOrId : (row.timesheet_id || row.id || mc.data?.id || null);
-
-  if (!tsId) {
-    L('ERROR: missing timesheetId');
-    GE();
-    throw new Error('markTimesheetPaid: timesheetId is required');
-  }
-
-  const expected =
-    (expectedTimesheetId != null ? String(expectedTimesheetId) : '') ||
-    (mc.timesheetMeta && mc.timesheetMeta.expected_timesheet_id) ||
-    tsId;
-
-  const encId   = encodeURIComponent(tsId);
-  const urlPath = `/api/timesheets/${encId}/mark-paid`;
-
-  const payload = {
-    paid: true,
-    expected_timesheet_id: expected
-  };
-  if (paymentReference != null && String(paymentReference).trim()) {
-    payload.payment_reference = String(paymentReference).trim();
-  }
-
-  L('REQUEST', { url: API(urlPath), tsId, payload });
-
-  // ✅ FIX: backend route is PATCH, not POST (preserves err.status + err.json for TIMESHEET_MOVED handling upstream)
-  const json = await apiPatchJson(urlPath, payload);
-
-  L('mark-paid result', json);
-
-  // Refresh details
-  const resolvedId =
-    (json && (json.current_timesheet_id || json.timesheet_id))
-      ? (json.current_timesheet_id || json.timesheet_id)
-      : tsId;
-
-  let newDetails = mc.timesheetDetails;
-  try {
-    newDetails = await fetchTimesheetDetails(resolvedId);
-    window.modalCtx.timesheetDetails = newDetails;
-  } catch (err) {
-    L('refresh details failed (non-fatal)', err);
-  }
-
-  const tsfin = newDetails?.tsfin || {};
-  const updatedRow = {
-    ...(mc.data || row),
-    paid_at_utc: tsfin.paid_at_utc || mc.data?.paid_at_utc,
-    summary_stage: 'PAID',
-    timesheet_id: resolvedId,
-    id: resolvedId
-  };
-
-  window.modalCtx.data = updatedRow;
-
-  if (window.modalCtx?.timesheetMeta) {
-    window.modalCtx.timesheetMeta.expected_timesheet_id = resolvedId;
-  }
-
-  try {
-    window.__pendingFocus = {
-      section: 'timesheets',
-      ids: [String(resolvedId)],
-      primaryIds: [String(resolvedId)]
-    };
-  } catch {}
-
-  // ✅ Keep the summary grid consistent
-  try {
-    if (typeof refreshTimesheetsSummaryAfterRotation === 'function') {
-      await refreshTimesheetsSummaryAfterRotation(resolvedId);
-    }
-  } catch (e) {
-    L('summary refresh failed (non-fatal)', e);
-  }
-
-  L('UPDATED ROW', updatedRow);
-  GE();
-  return { ok: true, updatedRow, details: newDetails };
-}
-
 
 
 
@@ -73373,6 +75497,7 @@ async function saveNhspDeferrals(ctxOrId, deferrals) {
   return { ok: true };
 }
 
+
 async function listTimesheetsSummary(filters = {}) {
   window.__listState = window.__listState || {};
   const st = (window.__listState['timesheets'] ||= {
@@ -73401,6 +75526,16 @@ async function listTimesheetsSummary(filters = {}) {
   // Work on a safe copy
   const f0 = (filters && typeof filters === 'object') ? filters : {};
   const f = { ...(f0 || {}) };
+
+  // ✅ Quick-search passthrough: serialize q (or name) into the summary endpoint
+  try {
+    const rawQ =
+      (Object.prototype.hasOwnProperty.call(f, 'q') ? f.q : null) ||
+      (Object.prototype.hasOwnProperty.call(f, 'name') ? f.name : null) ||
+      null;
+    const txt = (rawQ != null) ? String(rawQ || '').trim() : '';
+    if (txt) qs.set('q', txt);
+  } catch {}
 
   // ─────────────────────────────────────────────────────────────
   // Canonical filters:
@@ -73583,6 +75718,167 @@ async function listTimesheetsSummary(filters = {}) {
   return rows;
 }
 
+
+async function deleteCandidate(candidateId) {
+  const id = String(candidateId || '').trim();
+  if (!id) throw new Error('Missing candidateId');
+
+  // Optional eligibility pre-check (blocks with a readable reason if cannot delete)
+  try {
+    const er = await authFetch(API(`/api/candidates/${encodeURIComponent(id)}/delete-eligibility`));
+    const etxt = await er.text().catch(() => '');
+    let ej = null;
+    try { ej = etxt ? JSON.parse(etxt) : null; } catch { ej = null; }
+
+    if (er.ok && ej && typeof ej === 'object') {
+      const can = (ej.can_delete === true) || (String(ej.can_delete).toLowerCase() === 'true');
+      if (!can) {
+        const reason =
+          (typeof ej.reason === 'string' && ej.reason.trim()) ? ej.reason.trim() :
+          (typeof ej.message === 'string' && ej.message.trim()) ? ej.message.trim() :
+          (typeof ej.error === 'string' && ej.error.trim()) ? ej.error.trim() :
+          'This candidate cannot be deleted.';
+        alert(reason);
+        return false;
+      }
+    } else if (!er.ok && etxt && etxt.trim()) {
+      // If eligibility endpoint fails, we still allow the delete attempt (eligibility is a UX layer),
+      // but surface the failure quietly in console for diagnosis.
+      try { console.warn('[deleteCandidate] delete-eligibility failed (non-blocking)', { status: er.status, body: etxt.slice(0, 400) }); } catch {}
+    }
+  } catch (e) {
+    // Non-blocking: proceed to delete attempt even if eligibility check fails
+    try { console.warn('[deleteCandidate] delete-eligibility error (non-blocking)', e); } catch {}
+  }
+
+  // ✅ FIX: do NOT show an additional confirm here.
+  // Confirmation must be handled by the caller (modal footer / UI flow) to avoid double prompts.
+
+  // Apply delete
+  const res = await authFetch(API(`/api/candidates/${encodeURIComponent(id)}`), { method: 'DELETE' });
+  const txt = await res.text().catch(() => '');
+
+  let json = null;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  if (!res.ok) {
+    const msg =
+      (json && typeof json === 'object' && (json.message || json.error))
+        ? String(json.message || json.error)
+        : (txt || `Delete failed (${res.status})`);
+    alert(msg);
+    return false;
+  }
+
+  // Clear selection state for this section (remove id if present)
+  try {
+    window.__selection = window.__selection || {};
+    const sel = window.__selection['candidates'];
+    if (sel && sel.ids && typeof sel.ids.delete === 'function') sel.ids.delete(id);
+  } catch {}
+
+  // Remove from currentRows cache if present (best-effort)
+  try {
+    if (Array.isArray(window.currentRows)) {
+      window.currentRows = window.currentRows.filter(r => String(r?.id || '') !== id);
+    }
+  } catch {}
+
+  // Central post-delete cleanup hook (preferred)
+  try {
+    if (typeof window.__afterRecordDeleteCleanup === 'function') {
+      await window.__afterRecordDeleteCleanup('candidates', id);
+      return true;
+    }
+  } catch {}
+
+  // Fallback: close modals + refresh summary
+  try { discardAllModalsAndState(); } catch {}
+  try { await renderAll(); } catch {}
+  try { renderTopNav(); } catch {}
+
+  return true;
+}
+
+async function deleteClient(clientId) {
+  const id = String(clientId || '').trim();
+  if (!id) throw new Error('Missing clientId');
+
+  // Optional eligibility pre-check (blocks with a readable reason if cannot delete)
+  try {
+    const er = await authFetch(API(`/api/clients/${encodeURIComponent(id)}/delete-eligibility`));
+    const etxt = await er.text().catch(() => '');
+    let ej = null;
+    try { ej = etxt ? JSON.parse(etxt) : null; } catch { ej = null; }
+
+    if (er.ok && ej && typeof ej === 'object') {
+      const can = (ej.can_delete === true) || (String(ej.can_delete).toLowerCase() === 'true');
+      if (!can) {
+        const reason =
+          (typeof ej.reason === 'string' && ej.reason.trim()) ? ej.reason.trim() :
+          (typeof ej.message === 'string' && ej.message.trim()) ? ej.message.trim() :
+          (typeof ej.error === 'string' && ej.error.trim()) ? ej.error.trim() :
+          'This client cannot be deleted.';
+        alert(reason);
+        return false;
+      }
+    } else if (!er.ok && etxt && etxt.trim()) {
+      // Non-blocking: still allow delete attempt, but log
+      try { console.warn('[deleteClient] delete-eligibility failed (non-blocking)', { status: er.status, body: etxt.slice(0, 400) }); } catch {}
+    }
+  } catch (e) {
+    // Non-blocking: proceed to delete attempt even if eligibility check fails
+    try { console.warn('[deleteClient] delete-eligibility error (non-blocking)', e); } catch {}
+  }
+
+  // ✅ FIX: do NOT show an additional confirm here.
+  // Confirmation must be handled by the caller (modal footer / UI flow) to avoid double prompts.
+
+  // Apply delete
+  const res = await authFetch(API(`/api/clients/${encodeURIComponent(id)}`), { method: 'DELETE' });
+  const txt = await res.text().catch(() => '');
+
+  let json = null;
+  try { json = txt ? JSON.parse(txt) : null; } catch { json = null; }
+
+  if (!res.ok) {
+    const msg =
+      (json && typeof json === 'object' && (json.message || json.error))
+        ? String(json.message || json.error)
+        : (txt || `Delete failed (${res.status})`);
+    alert(msg);
+    return false;
+  }
+
+  // Clear selection state for this section (remove id if present)
+  try {
+    window.__selection = window.__selection || {};
+    const sel = window.__selection['clients'];
+    if (sel && sel.ids && typeof sel.ids.delete === 'function') sel.ids.delete(id);
+  } catch {}
+
+  // Remove from currentRows cache if present (best-effort)
+  try {
+    if (Array.isArray(window.currentRows)) {
+      window.currentRows = window.currentRows.filter(r => String(r?.id || '') !== id);
+    }
+  } catch {}
+
+  // Central post-delete cleanup hook (preferred)
+  try {
+    if (typeof window.__afterRecordDeleteCleanup === 'function') {
+      await window.__afterRecordDeleteCleanup('clients', id);
+      return true;
+    }
+  } catch {}
+
+  // Fallback: close modals + refresh summary
+  try { discardAllModalsAndState(); } catch {}
+  try { await renderAll(); } catch {}
+  try { renderTopNav(); } catch {}
+
+  return true;
+}
 
 
 // ======== Switch a timesheet to MANUAL (weekly) ========
@@ -75148,6 +77444,9 @@ async function bootstrapApp(){
       window.__auth = window.__auth || {};
       if (!window.__auth.user && SESSION?.user) window.__auth.user = SESSION.user;
       if (!window.__USER_ID && SESSION?.user?.id) window.__USER_ID = SESSION.user.id;
+
+      // ✅ Mark authenticated state for downstream guards (heartbeat / refresh fail UI suppression)
+      if (SESSION?.accessToken) window.__authState = 'AUTHENTICATED';
     }
 
     // If token exists but user.id is missing, hydrate via /api/me (non-blocking safety)
@@ -75231,6 +77530,14 @@ async function bootstrapApp(){
 
         const pingOnce = async (reason = '') => {
           if (hb._disabled) return;
+
+          // ✅ Hard gate: never ping unless we are definitely authenticated right now
+          try {
+            if (!SESSION?.accessToken) return;
+            const st = String(window.__authState || '');
+            if (st && st !== 'AUTHENTICATED') return;
+          } catch {}
+
           const now = Date.now();
           // throttle: never more than once per 1s even if focus + interval collide
           if (now - (hb._lastPingAtMs || 0) < 1000) return;
@@ -75247,11 +77554,32 @@ async function bootstrapApp(){
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload)
             });
-          } catch {
+          } catch (e) {
+            // ✅ If auth is gone, stop heartbeat immediately (no retry loop)
+            try {
+              const msg = String(e?.message || e || '');
+              if (/unauthor/i.test(msg)) {
+                hb._disabled = true;
+                try { if (hb._timer) clearInterval(hb._timer); } catch {}
+                hb._timer = null;
+                hb._started = false;
+              }
+            } catch {}
             return;
           }
 
           if (!res || !res.ok) {
+            // ✅ If auth is gone, stop heartbeat immediately (no retry loop)
+            try {
+              if (res && res.status === 401) {
+                hb._disabled = true;
+                try { if (hb._timer) clearInterval(hb._timer); } catch {}
+                hb._timer = null;
+                hb._started = false;
+                return;
+              }
+            } catch {}
+
             // If endpoint isn't deployed yet, stop trying this session (keep it silent).
             try {
               if (res && (res.status === 404 || res.status === 405 || res.status === 501)) {
@@ -75358,6 +77686,9 @@ async function bootstrapApp(){
   renderTools();
   await renderAll();
 }
+
+
+
 // Initialize
 initAuthUI();
 
