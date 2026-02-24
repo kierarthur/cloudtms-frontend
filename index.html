@@ -1397,6 +1397,12 @@ body{
     .tabc .grid-5{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
     .tabc .grid-7{ display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:10px; }
 
+    /* Contracts: keep form 2-col, but force schedule section to full width */
+    #modal.contract-modal #contractForm.form > .row:has(> label.section),
+    #modal.contract-modal #contractForm.form > .sched-grid{
+      grid-column: 1 / -1;
+    }
+
     #modal.contract-modal .form input,
     #modal.contract-modal .form select,
     #modal.contract-modal .form textarea{
