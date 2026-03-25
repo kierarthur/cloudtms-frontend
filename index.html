@@ -5,7 +5,7 @@
   <title>CloudTMS</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    :root{
+       :root{
       --bg:#020617;
       --panel:#0b1221;
       --muted:#1f2937;
@@ -18,6 +18,10 @@
       --line:#334155;
       --chip:#0ea5e9;
       --hover: rgba(79,70,229,.12);
+      --selection-blue:#2563eb;
+      --selection-blue-bg:rgba(37,99,235,.22);
+      --selection-blue-bg-strong:rgba(37,99,235,.34);
+      --selection-blue-border:#60a5fa;
       --radius:12px;
       --shadow: 0 6px 20px rgba(0,0,0,.25);
     }
@@ -44,8 +48,8 @@
 
   /* ===== Pager active page highlight ===== */
   .pager .pager-btn.active{
-    background:rgba(79,70,229,.35) !important;
-    border-color:#6366f1 !important;
+    background:var(--selection-blue-bg-strong) !important;
+    border-color:var(--selection-blue-border) !important;
     color:#fff !important;
     font-weight:700;
   }
@@ -311,18 +315,23 @@ body{
       flex-direction:column;
     }
 
-    .summary-body{
-      flex:1;
-      min-height:0;
-      overflow-y:auto;
-      overflow-x:auto;
-      scrollbar-width:thin;
-      scrollbar-color:#1e293b #020617;
-    }
-    .summary-body::-webkit-scrollbar{
-      width:8px;
-      height:8px;
-    }
+.summary-body{
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  overflow-x:auto;
+  scrollbar-width:thin;
+  scrollbar-color:#1e293b #020617;
+}
+.summary-body:focus,
+.summary-body:focus-visible{
+  outline:none;
+  box-shadow:none;
+}
+.summary-body::-webkit-scrollbar{
+  width:8px;
+  height:8px;
+}
     .summary-body::-webkit-scrollbar-track{
       background:#020617;
     }
@@ -515,9 +524,18 @@ body{
   background:#0b152a;
 }
 
-    .grid tr.active{
-      background:var(--hover);
-      box-shadow:inset 0 0 0 1px rgba(79,70,229,.4);
+     .grid tr.active,
+    .grid tr.selected,
+    .grid tr.active.selected{
+      background:var(--selection-blue-bg);
+      box-shadow:inset 0 0 0 1px var(--selection-blue-border);
+    }
+
+    .grid tbody tr.active:hover,
+    .grid tbody tr.selected:hover,
+    .grid tbody tr.active.selected:hover{
+      background:var(--selection-blue-bg-strong);
+      box-shadow:inset 0 0 0 1px var(--selection-blue-border);
     }
 
     .pill{
