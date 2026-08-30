@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Banking Pay — synthetic table verification</title>
+<link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/banking-table.css">
+<style>
+body{margin:24px;background:#07101f;color:#f8fafc;font:14px 'Segoe UI',sans-serif}main{max-width:1120px;margin:auto}
+.test-controls{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}button{color:inherit;background:#101f35;border:1px solid #2b405d;border-radius:5px;padding:6px 10px}
+#result{white-space:pre-wrap;overflow-wrap:anywhere}.test-note{color:#aebed2}button:disabled{opacity:.45}
+</style></head><body><main>
+<h1>Banking Pay table verification</h1><p class="test-note">Synthetic data only. No connection to CloudTMS, banking, provider or Draft services. This is an isolated component test, not the completed Banking Pay modal.</p>
+<div class="test-controls"><button id="reset">Reset fixture</button><button id="apply">Apply accepted selection</button><button id="invalid">Attempt invalid response</button><button id="narrow">Narrow layout</button><button id="large">Largest display scalar</button><button id="cycles">20 mount/unmount cycles</button></div>
+<button id="staging">Run staged-adoption checks</button>
+<div id="host"></div><p id="result" aria-live="polite">Ready</p>
+</main><script src="/fixture.js"></script><script src="/copy.js"></script><script src="/table.js"></script><script src="/browser-test.js"></script></body></html>

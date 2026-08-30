@@ -1,0 +1,13 @@
+{
+  "scope": "Disposable loopback PostgreSQL17 only; synthetic rollback fixtures",
+  "hosted_or_browser_acceptance": false,
+  "source": "scripts/benchmark-banking-pay-summary-local.mjs auto eligible_plpgsql",
+  "summary_ms": [875.16, 954.21, 888.35, 779.90, 804.81, 781.66],
+  "issue_index_ms": [456.08, 589.87, 493.53, 430.61, 437.59, 428.39],
+  "identical_full_summary_result_assertion": "passed",
+  "section_helper_calls_before_diagnostic": 2928064,
+  "section_helper_calls_after_diagnostic": 75444,
+  "combined_regression": {"tests": 43, "passed": 43, "failed": 0, "skipped": 0, "duration_ms": 100584.111},
+  "unchanged_boundaries": ["Certified eligibility statement", "Financial and Draft owners", "Existing per-operation timeout", "No global database configuration change"],
+  "remaining": ["Representative data and concurrency", "Worker path", "Browser lifecycle", "Clean latest-head release proof"]
+}

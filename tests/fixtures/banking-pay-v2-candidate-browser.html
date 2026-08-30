@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Candidate Banking — local component verification</title>
+<link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/banking-table.css">
+<style>
+body{margin:24px;background:#07101f;color:#f8fafc;font:14px 'Segoe UI',sans-serif;--panel:#101f35;--line:#2b405d}main{max-width:1280px;margin:auto}
+.fixture-controls{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}button{color:inherit;background:#152942;border:1px solid #3c526f;border-radius:5px;padding:6px 10px}
+.btn-xs{padding:3px 7px;font-size:12px}.mini{font-size:12px}.mono{font-variant-numeric:tabular-nums}.pill{display:inline-flex;padding:3px 7px;border-radius:5px;background:#193049;font-size:12px}
+.pill-ok{background:#113d36;color:#9de8c0}.pill-warn{background:#4f3c19;color:#ffe197}.pill-bad{background:#512b34;color:#ffc2cb}
+.banking-ready-mobile-row-summary{display:none}.fixture-note{color:#aebed2;font-size:13px}.fixture-shell{padding:20px;border:1px solid #2b405d;border-radius:12px;background:#0b1728}
+#result{white-space:pre-wrap;overflow-wrap:anywhere}button:disabled{opacity:.45}[hidden]{display:none!important}
+</style></head><body><main>
+<p class="fixture-note">Local Candidate Banking component · synthetic test records · no connection to payment or Draft services. Full application integration is still in progress.</p>
+<div class="fixture-controls"><button id="open">Open candidate fixture</button><button id="apply">Apply selected response</button><button id="invalid">Reject invalid page</button><button id="checks">Run component checks</button></div>
+<div id="main-host" class="fixture-shell"></div><div id="child-host" class="fixture-shell" hidden></div>
+<p id="result" role="status">Ready</p>
+</main><script src="/detail-fixture.js"></script><script src="/copy.js"></script><script src="/table.js"></script><script src="/legacy-details.js"></script><script src="/candidate.js"></script><script src="/candidate-test.js"></script></body></html>

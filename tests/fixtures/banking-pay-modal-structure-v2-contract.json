@@ -1,0 +1,1861 @@
+{
+  "contract": "BANKING_PAY_MODAL_STRUCTURE_V2",
+  "version": 1,
+  "authority": "Accepted Banking Pay Modal Structure Bible, 28 August 2026; canonical BP/MSG IDs are immutable.",
+  "requirements": [
+    {
+      "id": "BP-001",
+      "cells": [
+        "Open or adopt one shared pre-Draft Workbench",
+        "Worker open route and installed pay_workbench_session_open_shared_v2",
+        "Main modal controller",
+        "Retain the same pay date, week cutoff, filters and session signature. Never open one session per child modal."
+      ]
+    },
+    {
+      "id": "BP-002",
+      "cells": [
+        "PAYE and Umbrella scope",
+        "Existing filter modal and Workbench/Draft scope",
+        "Filters",
+        "Retain Both PAYE and Umbrella, PAYE only and Umbrella only exactly."
+      ]
+    },
+    {
+      "id": "BP-003",
+      "cells": [
+        "Candidate filter",
+        "Current candidate picker and session signature",
+        "Filters",
+        "Retain canonical candidate ID, not browser name matching."
+      ]
+    },
+    {
+      "id": "BP-004",
+      "cells": [
+        "Client filter",
+        "Current client picker and session signature",
+        "Filters",
+        "Retain canonical client ID and exact intersection with route/candidate filters."
+      ]
+    },
+    {
+      "id": "BP-005",
+      "cells": [
+        "Filter adoption fails closed",
+        "Current filter-save logic requires a replacement/current session to be adopted",
+        "Filters/main",
+        "If the new scope is not adopted, keep the prior list unchanged and explain the failure."
+      ]
+    },
+    {
+      "id": "BP-006",
+      "cells": [
+        "Hidden filtered selection safety",
+        "Current filter text and Draft validation",
+        "Filters/Draft gate",
+        "Preserve saved selections where current authority does, but never Draft a row outside the active filter scope."
+      ]
+    },
+    {
+      "id": "BP-007",
+      "cells": [
+        "Current session and progress version",
+        "Current Workbench state and every sensitive mutation",
+        "All four pre-Draft views",
+        "Carry the same current tuple on every read/mutation. Stale results must not repaint a newer view."
+      ]
+    },
+    {
+      "id": "BP-008",
+      "cells": [
+        "Light progress polling",
+        "Worker progress route and installed progress-light RPC",
+        "Main compact status",
+        "Retain bounded polling, coalesce refreshes and do not rebuild 100 rows for counter-only changes."
+      ]
+    },
+    {
+      "id": "BP-009",
+      "cells": [
+        "Candidate/source preparing state",
+        "Current progress model and candidate indicators",
+        "Main compact status; Updating detail",
+        "Keep visible without mixing it into Action Required."
+      ]
+    },
+    {
+      "id": "BP-010",
+      "cells": [
+        "Candidate/source failure state",
+        "Current failed candidate/job model and Draft gate",
+        "Main status; Action Required or Blocked by actionability",
+        "Never hide a failure merely because the Ready candidate table has no row for it."
+      ]
+    },
+    {
+      "id": "BP-011",
+      "cells": [
+        "Refresh Banking Pay",
+        "Current Refresh action and refresh-current-authority route",
+        "Fixed main header/overflow",
+        "Retain a full current refresh without clearing user decisions."
+      ]
+    },
+    {
+      "id": "BP-012",
+      "cells": [
+        "Clear all Decisions",
+        "Current action, confirmation and clear-all-decisions RPC",
+        "Fixed main header/overflow",
+        "Retain exact clearing of decisions, exclusions and selections followed by authoritative reload."
+      ]
+    },
+    {
+      "id": "BP-013",
+      "cells": [
+        "First usable page gate",
+        "Current readiness/first-page checks",
+        "Branded waiter",
+        "Do not expose an empty or stale large modal before the first candidate page and global summary are usable."
+      ]
+    },
+    {
+      "id": "BP-014",
+      "cells": [
+        "Retry and cancel loading",
+        "Current modal error handling",
+        "Waiter",
+        "A failed open must offer genuine Retry and Cancel; no fabricated percentage or countdown."
+      ]
+    },
+    {
+      "id": "BP-015",
+      "cells": [
+        "Close and reopen",
+        "Current modal/session adoption behaviour",
+        "Main and child modal shells",
+        "Closing presentation must not discard current server decisions. Reopen adopts current truth."
+      ]
+    },
+    {
+      "id": "BP-016",
+      "cells": [
+        "Memory/listener cleanup",
+        "Current memory and modal lifecycle tests",
+        "All modal shells",
+        "Abort late reads, clear timers/listeners and release old page graphs when modal closes."
+      ]
+    },
+    {
+      "id": "BP-020",
+      "cells": [
+        "Ready row membership",
+        "New support around current effective-section authority",
+        "Main candidate summary",
+        "Candidate appears only because at least one selectable effective Ready payment exists. No browser classification."
+      ]
+    },
+    {
+      "id": "BP-021",
+      "cells": [
+        "One physical row per candidate",
+        "New presentation",
+        "Main table",
+        "Fixed height; no wrapping, expanded rows, child rows or card conversion."
+      ]
+    },
+    {
+      "id": "BP-022",
+      "cells": [
+        "Alphabetical default order",
+        "New presentation contract",
+        "Main table",
+        "Sort entire result before paging using normalised display name plus candidate ID."
+      ]
+    },
+    {
+      "id": "BP-023",
+      "cells": [
+        "Header sorting",
+        "New support",
+        "Main table",
+        "Server sorts every matching candidate across all pages. Header indicates direction. Stable tie-breaker required."
+      ]
+    },
+    {
+      "id": "BP-024",
+      "cells": [
+        "100 candidates per page",
+        "New support",
+        "Main table",
+        "Page count and navigation describe candidates, not underlying payment rows."
+      ]
+    },
+    {
+      "id": "BP-025",
+      "cells": [
+        "Candidate identity/reference",
+        "Move/aggregate",
+        "Candidate column",
+        "Use server-published current display identity; fit on one line with ellipsis if required."
+      ]
+    },
+    {
+      "id": "BP-026",
+      "cells": [
+        "Candidate selection state",
+        "New aggregate over current row selection",
+        "Main checkbox",
+        "Checked/all, mixed/some, unchecked/none over all selectable Ready payments for the candidate, not just loaded detail rows."
+      ]
+    },
+    {
+      "id": "BP-027",
+      "cells": [
+        "Candidate select all",
+        "New atomic mutation",
+        "Main checkbox",
+        "Select every current selectable Ready payment for one candidate across all pages in one transaction/revision."
+      ]
+    },
+    {
+      "id": "BP-028",
+      "cells": [
+        "Candidate clear all",
+        "New atomic mutation",
+        "Main checkbox",
+        "Clear every selected Ready payment for one candidate across all pages in one transaction/revision."
+      ]
+    },
+    {
+      "id": "BP-029",
+      "cells": [
+        "Global Ready select/clear",
+        "Retain current server all-page selection",
+        "Main table header",
+        "Continue to select/clear the complete filtered Ready section across every candidate page."
+      ]
+    },
+    {
+      "id": "BP-030",
+      "cells": [
+        "Current payment display amount",
+        "New server aggregate of existing display authority",
+        "Ready to pay column",
+        "Sum only currently selected effective Ready display amounts. Preserve current signs. Do not calculate PAYE net."
+      ]
+    },
+    {
+      "id": "BP-031",
+      "cells": [
+        "Full-session headline",
+        "New support",
+        "Main header",
+        "Sum BP-030 over the complete filtered session, never the loaded 100 candidates."
+      ]
+    },
+    {
+      "id": "BP-032",
+      "cells": [
+        "Deductions indicator",
+        "New server boolean",
+        "Deductions column",
+        "Yes only for at least one selected canonical deduction. Never infer from a negative number, label or line-type list in JavaScript."
+      ]
+    },
+    {
+      "id": "BP-033",
+      "cells": [
+        "Deductions live update",
+        "New response projection",
+        "Main row",
+        "Tick/untick, promotion/demotion, resolution and exclusion must update Yes/dash at the accepted revision."
+      ]
+    },
+    {
+      "id": "BP-034",
+      "cells": [
+        "Exact Timesheets shortcut",
+        "Move current shortcut",
+        "Candidate or Ready to pay cell",
+        "Use exact currently relevant Ready Timesheet IDs. Never open a broad candidate search. Stop click and double-click propagation."
+      ]
+    },
+    {
+      "id": "BP-035",
+      "cells": [
+        "No Timesheet case",
+        "Retain valid non-Timesheet payments",
+        "Same inline location",
+        "Show no active shortcut or a neutral disabled icon; do not invent a Timesheet ID."
+      ]
+    },
+    {
+      "id": "BP-036",
+      "cells": [
+        "No selectable candidate case",
+        "Product correction",
+        "Main membership",
+        "Candidate is absent, not shown with a normal unchecked/disabled checkbox. Counts in other modals remain visible."
+      ]
+    },
+    {
+      "id": "BP-037",
+      "cells": [
+        "Main row open",
+        "New presentation",
+        "Main row",
+        "Double-click non-interactive area only. No View details button and no expansion."
+      ]
+    },
+    {
+      "id": "BP-038",
+      "cells": [
+        "Main state restoration",
+        "New modal coordination",
+        "Main modal",
+        "Closing Candidate Banking restores exact page, sort, filters, scroll, focus and the updated candidate row."
+      ]
+    },
+    {
+      "id": "BP-039",
+      "cells": [
+        "Main all-page export",
+        "Retain current Ready all-page CSV",
+        "Main fixed header/overflow",
+        "Preserve complete Ready export, current inclusion state and full breakdown without changing visible page cursor."
+      ]
+    },
+    {
+      "id": "BP-040",
+      "cells": [
+        "Action Required count/button",
+        "New summary over current action authority",
+        "Permanent main control",
+        "Count unique human tasks over the complete session. Button stays visible even when count is zero."
+      ]
+    },
+    {
+      "id": "BP-041",
+      "cells": [
+        "Updating count",
+        "New summary over current progress/jobs",
+        "Main status/Action Required",
+        "Count current non-terminal work separately."
+      ]
+    },
+    {
+      "id": "BP-042",
+      "cells": [
+        "Blocked count/button",
+        "New summary over current blocked authority",
+        "Permanent main control",
+        "Count unique passive economic blockers; exclude Action Required, Updating and indefinite snoozes."
+      ]
+    },
+    {
+      "id": "BP-043",
+      "cells": [
+        "Create Draft control",
+        "Retain",
+        "Fixed main area",
+        "Same existing Draft gate and route. The simpler list must not create a second Draft path."
+      ]
+    },
+    {
+      "id": "BP-050",
+      "cells": [
+        "Ready-only candidate read",
+        "Current candidate read is mixed",
+        "Candidate Banking",
+        "New database-filtered Ready-only page before limit; 100 maximum; keyset cursor."
+      ]
+    },
+    {
+      "id": "BP-051",
+      "cells": [
+        "Individual payment checkbox",
+        "Current Ready row checkbox",
+        "Candidate Banking row",
+        "Same selected-row mutation, exact revisions and fail-closed repaint."
+      ]
+    },
+    {
+      "id": "BP-052",
+      "cells": [
+        "Timesheet group checkbox",
+        "Current grouped checkbox",
+        "Candidate Banking group",
+        "Preserve all/none/mixed child state and exact eligible row IDs."
+      ]
+    },
+    {
+      "id": "BP-053",
+      "cells": [
+        "Candidate all/clear",
+        "Not atomic today",
+        "Candidate Banking header",
+        "Use the same new candidate-scoped mutation as main checkbox."
+      ]
+    },
+    {
+      "id": "BP-054",
+      "cells": [
+        "Line type",
+        "Current Line type column",
+        "Candidate Banking",
+        "Retain every friendly line type and correction/recovery identity."
+      ]
+    },
+    {
+      "id": "BP-055",
+      "cells": [
+        "Candidate/client/date/channel/state",
+        "Current Ready columns",
+        "Candidate Banking",
+        "Retain the detailed fields removed from the simple main table."
+      ]
+    },
+    {
+      "id": "BP-056",
+      "cells": [
+        "Current row amount",
+        "Current display helper",
+        "Candidate Banking",
+        "Preserve amount_display/section display precedence and existing recovery special cases."
+      ]
+    },
+    {
+      "id": "BP-057",
+      "cells": [
+        "Timesheet parent grouping",
+        "Current grouped rendering",
+        "Candidate Banking",
+        "Preserve one visible parent while retaining every economic row ID."
+      ]
+    },
+    {
+      "id": "BP-058",
+      "cells": [
+        "Timesheet component expansion",
+        "Current plus/minus breakdown",
+        "Candidate Banking only",
+        "Expansion stays local; it must never create an expandable main candidate row."
+      ]
+    },
+    {
+      "id": "BP-059",
+      "cells": [
+        "Segment detail",
+        "Date, client, role, band, start, finish, break, pay amount, state, action",
+        "Candidate Banking breakdown",
+        "Retain every field and exact segment identity."
+      ]
+    },
+    {
+      "id": "BP-060",
+      "cells": [
+        "Expense component detail",
+        "Exact expense code/label and amounts",
+        "Candidate Banking breakdown",
+        "Retain individual expense identities and current clamping information."
+      ]
+    },
+    {
+      "id": "BP-061",
+      "cells": [
+        "Snooze one payment",
+        "Snooze action",
+        "Candidate Banking where Ready action currently exists",
+        "Retain exact snooze identity and current conflict checks."
+      ]
+    },
+    {
+      "id": "BP-062",
+      "cells": [
+        "Manage dated snooze",
+        "Manage/Unsnooze action",
+        "Candidate Banking or Blocked according to effective state",
+        "Retain current clear/no-op/stale handling."
+      ]
+    },
+    {
+      "id": "BP-063",
+      "cells": [
+        "Snooze one segment",
+        "Current segment action",
+        "Candidate Banking breakdown",
+        "Retain whole-Timesheet versus segment conflict guard."
+      ]
+    },
+    {
+      "id": "BP-064",
+      "cells": [
+        "Snooze one expense",
+        "Current exact expense action",
+        "Candidate Banking breakdown",
+        "Retain stale-source guard and exact source reference."
+      ]
+    },
+    {
+      "id": "BP-065",
+      "cells": [
+        "Snooze/unsnooze all Timesheet expenses",
+        "Current bulk expense actions",
+        "Candidate Banking breakdown",
+        "Retain current set construction and confirmation modal."
+      ]
+    },
+    {
+      "id": "BP-066",
+      "cells": [
+        "Exclude/include Timesheet for this run",
+        "Current timesheet-exclusion action",
+        "Candidate Banking when row is Ready; Action Required/Blocked only where current effective state allows it",
+        "Keep exact candidate, Timesheet, expected session and progress versions."
+      ]
+    },
+    {
+      "id": "BP-067",
+      "cells": [
+        "Overpayment grouping",
+        "Current dedicated parent grouping",
+        "Candidate Banking",
+        "Preserve all underlying selectable IDs; presentation must never broaden Draft selection."
+      ]
+    },
+    {
+      "id": "BP-068",
+      "cells": [
+        "Overpayment breakdown",
+        "Original, outstanding and recoverable this run",
+        "Candidate Banking",
+        "Preserve every component and current row-level cap."
+      ]
+    },
+    {
+      "id": "BP-069",
+      "cells": [
+        "Manual-debt display",
+        "Scheduled due versus recoverable this run",
+        "Candidate Banking/Blocked as classified",
+        "Never substitute scheduled debt for an amount actually recoverable now."
+      ]
+    },
+    {
+      "id": "BP-070",
+      "cells": [
+        "Partial/zero deduction reclassification",
+        "Current selection recovery revalidation",
+        "Candidate Banking and Blocked",
+        "One authoritative identity per section; totals and row membership update together."
+      ]
+    },
+    {
+      "id": "BP-071",
+      "cells": [
+        "Resolved badge/correction badge",
+        "Current Ready indicators",
+        "Candidate Banking",
+        "Preserve correction versus resolved distinction."
+      ]
+    },
+    {
+      "id": "BP-072",
+      "cells": [
+        "Cancel Resolved Rate",
+        "Current exact BUCKETED cancellation",
+        "Candidate Banking",
+        "Preserve exact Timesheet owner, linked Timesheet rules, immutable Draft exclusion and confirmation."
+      ]
+    },
+    {
+      "id": "BP-073",
+      "cells": [
+        "Cancel Resolved Pay Channel",
+        "Current finance clear action",
+        "Candidate Banking for resolved Ready payment",
+        "Preserve finance-case owner and no-Timesheet taxable owner boundary."
+      ]
+    },
+    {
+      "id": "BP-074",
+      "cells": [
+        "Cancel Resolved Gross Total",
+        "Current finance clear action",
+        "Candidate Banking for resolved Ready payment",
+        "Preserve optional exact linked Timesheet and stale-identity failure."
+      ]
+    },
+    {
+      "id": "BP-075",
+      "cells": [
+        "Exact Timesheets navigation",
+        "Current row shortcut",
+        "Every applicable Candidate Banking row/group",
+        "Open only explicitly related Timesheets; multiple exact IDs stay exact."
+      ]
+    },
+    {
+      "id": "BP-076",
+      "cells": [
+        "Current-page and all-page detail export",
+        "Current all-page Ready CSV behaviour",
+        "Candidate Banking export menu",
+        "Ready-only, all pages, exact inclusion state, no Action/Blocked rows, visible page unchanged."
+      ]
+    },
+    {
+      "id": "BP-077",
+      "cells": [
+        "Candidate mutation settlement",
+        "Current targeted candidate refresh",
+        "Candidate Banking controller",
+        "Wait for a newer authoritative version, fetch all required pages, merge once and avoid broad full-session reopen."
+      ]
+    },
+    {
+      "id": "BP-080",
+      "cells": [
+        "Bucketed financial resolution",
+        "Suggested Rate/open bucketed review",
+        "Action Required task detail",
+        "Retain component basis, suggested rate, manual rate and exact server calculation."
+      ]
+    },
+    {
+      "id": "BP-081",
+      "cells": [
+        "Non-bucket resolution",
+        "Suggested Gross Total/non-bucket flow",
+        "Action Required task detail",
+        "Retain current gross-total authority and manual amount option."
+      ]
+    },
+    {
+      "id": "BP-082",
+      "cells": [
+        "Taxable payment-method restructure",
+        "Suggested Restructure/taxable flow",
+        "Action Required task detail",
+        "Retain source method, target method, remaining amount, weekly due, effective date and server tax authority."
+      ]
+    },
+    {
+      "id": "BP-083",
+      "cells": [
+        "Accept suggested component value",
+        "componentUseSuggested",
+        "Action Required task detail",
+        "Server validates the current suggestion fingerprint/basis."
+      ]
+    },
+    {
+      "id": "BP-084",
+      "cells": [
+        "Enter manual rate",
+        "componentManualRate",
+        "Action Required task detail",
+        "Retain source units/rate/charge basis and stale checks."
+      ]
+    },
+    {
+      "id": "BP-085",
+      "cells": [
+        "Enter manual amount",
+        "componentManualAmount",
+        "Action Required task detail",
+        "Retain current finance-case/component identity and server validation."
+      ]
+    },
+    {
+      "id": "BP-086",
+      "cells": [
+        "Clear component decision",
+        "componentClearResolution",
+        "Action Required or Candidate Banking according to current effective state",
+        "Inspect cleared/state_changed/no_op and returned revisions; HTTP success alone is not completion."
+      ]
+    },
+    {
+      "id": "BP-087",
+      "cells": [
+        "Include/exclude case for run",
+        "Current Include case/Exclude case",
+        "Action Required task detail",
+        "Preserve Timesheet exclusion semantics and later reclassification."
+      ]
+    },
+    {
+      "id": "BP-088",
+      "cells": [
+        "Case component table",
+        "Bucket, units, rates, pay, charge, margin and action",
+        "Action Required task detail",
+        "Retain every current column and component, even though the task list itself stays compact."
+      ]
+    },
+    {
+      "id": "BP-089",
+      "cells": [
+        "Case metadata",
+        "Candidate, date/week, client, amount, mixed/unresolved/stale indicators",
+        "Action Required detail",
+        "Retain complete affected context."
+      ]
+    },
+    {
+      "id": "BP-090",
+      "cells": [
+        "Missing bank details",
+        "Current BLOCKED_BANK_DETAILS rows",
+        "Action Required when person can correct",
+        "One task per canonical bank-account owner/fingerprint; expose all affected candidates/payments."
+      ]
+    },
+    {
+      "id": "BP-091",
+      "cells": [
+        "Accept bank mismatch with reason",
+        "Accept bank details and audited override route",
+        "Action Required task detail",
+        "Reason remains mandatory; bind to exact owner and bank-details hash; no silent acceptance."
+      ]
+    },
+    {
+      "id": "BP-092",
+      "cells": [
+        "Run account-name check",
+        "Current payee-readiness ensure action",
+        "Action Required task detail",
+        "Retain candidate/umbrella owner, checked-details hash, permissions and safe result envelope."
+      ]
+    },
+    {
+      "id": "BP-093",
+      "cells": [
+        "Near match/unavailable/fail review",
+        "Current bank result and acceptance path",
+        "Action Required task detail",
+        "Keep distinct result meanings; do not reduce them to one vague failure."
+      ]
+    },
+    {
+      "id": "BP-094",
+      "cells": [
+        "Set up bank account",
+        "Current payee-map ensure route",
+        "Action Required task detail",
+        "Retain payment provider/environment scope and safe no-payment-on-failure behaviour."
+      ]
+    },
+    {
+      "id": "BP-095",
+      "cells": [
+        "Inactive umbrella company",
+        "Current BLOCKED_UMBRELLA_INACTIVE authority",
+        "Action Required only when activation/review action exists",
+        "One umbrella-owned task can list multiple candidates."
+      ]
+    },
+    {
+      "id": "BP-096",
+      "cells": [
+        "Failed source/readiness retry",
+        "Current job/failure authority",
+        "Action Required when Retry is published",
+        "Keep retry generation/currentness; transition to Updating after acceptance."
+      ]
+    },
+    {
+      "id": "BP-097",
+      "cells": [
+        "Queued/running work",
+        "Current pending candidate/job states",
+        "Updating subsection",
+        "No red human-action task while CloudTMS is still working."
+      ]
+    },
+    {
+      "id": "BP-098",
+      "cells": [
+        "Failed work without action",
+        "Current terminal failure state",
+        "Blocked, not Action Required",
+        "Must remain prominent, counted and unselectable."
+      ]
+    },
+    {
+      "id": "BP-099",
+      "cells": [
+        "Task deduplication",
+        "Not available today",
+        "Action Required read model",
+        "Dedupe by real owner: finance case/version, payee/fingerprint, provider/environment, umbrella, or job generation."
+      ]
+    },
+    {
+      "id": "BP-100",
+      "cells": [
+        "Task list/detail split",
+        "Current detail is dispersed across rows",
+        "Action Required",
+        "List stays compact; opening task reveals every affected candidate, payment, component, Timesheet and control."
+      ]
+    },
+    {
+      "id": "BP-101",
+      "cells": [
+        "Exact Timesheets navigation",
+        "Current row shortcut",
+        "Task list/detail where applicable",
+        "Exact task-scoped IDs only; no broad candidate navigation."
+      ]
+    },
+    {
+      "id": "BP-102",
+      "cells": [
+        "Task search/sort/paging",
+        "New support",
+        "Action Required",
+        "Filter and sort complete task result before 100-row paging."
+      ]
+    },
+    {
+      "id": "BP-103",
+      "cells": [
+        "Draft blocker link",
+        "Current Draft blockers are messages",
+        "Fixed Draft area to Action Required",
+        "Link/focus the exact current task or a precise filtered list."
+      ]
+    },
+    {
+      "id": "BP-104",
+      "cells": [
+        "Resolved receipt while refreshing",
+        "Current mutation settlement behaviour",
+        "Action Required detail",
+        "Keep a short resolved/updating state until authoritative reclassification; never remove on HTTP 200 alone."
+      ]
+    },
+    {
+      "id": "BP-110",
+      "cells": [
+        "Passive blocked payment",
+        "Effective blocked_for_pay classification",
+        "Blocked modal",
+        "No selection checkbox; one economic identity once."
+      ]
+    },
+    {
+      "id": "BP-111",
+      "cells": [
+        "Insufficient funds to deduct",
+        "NO_PAY_HEADROOM recovery authority",
+        "Blocked modal",
+        "Show the affected/outstanding amount and plain reason; move only after recovery revalidation."
+      ]
+    },
+    {
+      "id": "BP-112",
+      "cells": [
+        "Partial passive recovery remainder",
+        "Current recovery presentation authority",
+        "Blocked modal when separately authoritative",
+        "No duplicate of the selected Ready recovery."
+      ]
+    },
+    {
+      "id": "BP-113",
+      "cells": [
+        "Dated snooze/on hold",
+        "Current dated snooze state",
+        "Blocked modal",
+        "Show until date and current optional Manage/Unsnooze control where permitted."
+      ]
+    },
+    {
+      "id": "BP-114",
+      "cells": [
+        "Do Not Pay",
+        "Current DO_NOT_PAY state",
+        "Blocked modal",
+        "Retain exact payment/Timesheet identity and deliberate status."
+      ]
+    },
+    {
+      "id": "BP-115",
+      "cells": [
+        "Blocked Timesheet",
+        "Current BLOCKED_TIMESHEET state",
+        "Blocked modal",
+        "Retain exact reason, segment detail where currently available and Timesheets shortcut."
+      ]
+    },
+    {
+      "id": "BP-116",
+      "cells": [
+        "Non-actionable terminal failure",
+        "Current progress/job authority",
+        "Blocked modal",
+        "Label as a system payment issue; never silently discard it."
+      ]
+    },
+    {
+      "id": "BP-117",
+      "cells": [
+        "Unknown/unclassified blocker",
+        "Current fail-closed fallback must be improved",
+        "Blocked modal",
+        "Visible, counted, unselectable and explicit that CloudTMS could not identify the reason. Raw codes stay in diagnostics."
+      ]
+    },
+    {
+      "id": "BP-118",
+      "cells": [
+        "Nominal affected amount",
+        "Current row/case amount authority",
+        "Blocked row/detail",
+        "Server value only; never a selected-to-pay total."
+      ]
+    },
+    {
+      "id": "BP-119",
+      "cells": [
+        "Clear condition",
+        "Not consistently published today",
+        "Blocked detail",
+        "Server supplies what must change before the item can become Ready. No vague needs review message."
+      ]
+    },
+    {
+      "id": "BP-120",
+      "cells": [
+        "Optional existing action",
+        "Snooze management/Timesheets where currently allowed",
+        "Blocked detail",
+        "Moving screens must not remove an existing safe action. Human resolution actions belong in Action Required."
+      ]
+    },
+    {
+      "id": "BP-121",
+      "cells": [
+        "Blocked search/sort/paging",
+        "Current section paging; new canonical list",
+        "Blocked modal",
+        "Apply classification/exclusion/filter/sort before 100-row paging."
+      ]
+    },
+    {
+      "id": "BP-122",
+      "cells": [
+        "Indefinite snooze management",
+        "Existing Loans / Snoozes tab",
+        "Snoozes tab only",
+        "Retain every current manage/unsnooze/export/filter action in Snoozes."
+      ]
+    },
+    {
+      "id": "BP-123",
+      "cells": [
+        "Indefinite exclusion",
+        "Current hidden classification plus new strict view filter",
+        "Every Banking Pay view/count",
+        "Exclude before count/page. No candidate row, Action task, Updating item, Blocked row, amount or hidden note."
+      ]
+    },
+    {
+      "id": "BP-124",
+      "cells": [
+        "Snooze expiry/clear",
+        "Current authoritative refresh",
+        "Snoozes/Blocked then normal reclassification",
+        "An expired/cleared item can re-enter Ready only after server classification."
+      ]
+    },
+    {
+      "id": "BP-130",
+      "cells": [
+        "Create Draft uses selected Ready identities",
+        "Existing Draft preparation",
+        "Keep unchanged. Candidate selection must resolve to the same exact selected preview-row identity set."
+      ]
+    },
+    {
+      "id": "BP-131",
+      "cells": [
+        "Selection recheck before Draft",
+        "Current session/progress and selected-row review",
+        "Keep fail-closed. A changed selection requires review; no Draft starts."
+      ]
+    },
+    {
+      "id": "BP-132",
+      "cells": [
+        "Recovery availability revalidation",
+        "Current selection RPC and Draft preparation",
+        "Keep server-owned and current. Browser totals never decide recoverability."
+      ]
+    },
+    {
+      "id": "BP-133",
+      "cells": [
+        "PAYE existing-Draft guard",
+        "Current PAYE guardrails",
+        "Keep exactly; Umbrella-ready work can continue only where current authority permits."
+      ]
+    },
+    {
+      "id": "BP-134",
+      "cells": [
+        "Same-week PAYE override",
+        "Password, 2FA and explicit confirmation",
+        "Keep exactly; wording can improve but security steps cannot be reduced."
+      ]
+    },
+    {
+      "id": "BP-135",
+      "cells": [
+        "Preparing/failure gate",
+        "Current progress and blocker codes",
+        "Create Draft remains disabled until current authority says it is safe."
+      ]
+    },
+    {
+      "id": "BP-136",
+      "cells": [
+        "Active Draft-create operation",
+        "Current status banner/poll/view/open batch controls",
+        "Keep visible and recoverable after modal repaint/reopen."
+      ]
+    },
+    {
+      "id": "BP-137",
+      "cells": [
+        "Idempotent Draft request",
+        "Existing operation/Draft authority",
+        "Candidate UI must not introduce a second submission path or double click."
+      ]
+    },
+    {
+      "id": "BP-138",
+      "cells": [
+        "Current payment display is not PAYE net",
+        "Existing pre-Draft policy",
+        "Headline/row never claim to be bank-out or net. PAYE is entered after Draft."
+      ]
+    },
+    {
+      "id": "BP-139",
+      "cells": [
+        "Pre-Draft live/post-Draft frozen boundary",
+        "Banking Pay Bible and existing Draft items",
+        "All new views are live pre-Draft only. Never rewrite frozen Draft facts after later changes."
+      ]
+    },
+    {
+      "id": "BP-140",
+      "cells": [
+        "One identity, one effective section",
+        "Current effective-section helper and atomic page adoption",
+        "No payment may appear simultaneously in Candidate Banking, Action Required and Blocked for the same current identity."
+      ]
+    },
+    {
+      "id": "BP-141",
+      "cells": [
+        "Cross-section movement",
+        "Current candidate/selection settlement",
+        "Remove from old view and add to new view at one accepted revision; update candidate row/headline/Deductions/Draft gate together."
+      ]
+    },
+    {
+      "id": "BP-142",
+      "cells": [
+        "No browser calculation of economics",
+        "Current database authority",
+        "Candidate summary fields are server-published. JavaScript formats but does not recalculate."
+      ]
+    },
+    {
+      "id": "BP-150",
+      "cells": [
+        "Open the created Draft batch and load its current status."
+      ]
+    },
+    {
+      "id": "BP-151",
+      "cells": [
+        "Frozen candidate/payment/component hierarchy and exact Timesheets drilldown."
+      ]
+    },
+    {
+      "id": "BP-152",
+      "cells": [
+        "PAYE payment entry after Draft, including manual net entry."
+      ]
+    },
+    {
+      "id": "BP-153",
+      "cells": [
+        "Sage CSV import, validation, worksheet export and print."
+      ]
+    },
+    {
+      "id": "BP-154",
+      "cells": [
+        "Detailed CSV and PDF export."
+      ]
+    },
+    {
+      "id": "BP-155",
+      "cells": [
+        "Authorisation, reauthorisation and golden-key/approval rules."
+      ]
+    },
+    {
+      "id": "BP-156",
+      "cells": [
+        "Payment scheduling and future date/time handling."
+      ]
+    },
+    {
+      "id": "BP-157",
+      "cells": [
+        "Provider execution and no-bank-payment audit paths."
+      ]
+    },
+    {
+      "id": "BP-158",
+      "cells": [
+        "Pre-provider retry and blocked-funds retry."
+      ]
+    },
+    {
+      "id": "BP-159",
+      "cells": [
+        "Bank CSV generation."
+      ]
+    },
+    {
+      "id": "BP-160",
+      "cells": [
+        "Remittance generation, preview and sending."
+      ]
+    },
+    {
+      "id": "BP-161",
+      "cells": [
+        "Cancel unsubmitted Draft, cancel scheduled batch and recalculate."
+      ]
+    },
+    {
+      "id": "BP-162",
+      "cells": [
+        "Payment issue review, returned/rejected handling, reversal and correction."
+      ]
+    },
+    {
+      "id": "BP-163",
+      "cells": [
+        "Settlement, provider facts, frozen audit history and cancellation history."
+      ]
+    },
+    {
+      "id": "BP-164",
+      "cells": [
+        "Current payment alerts, progress children and parent/child modal lifecycle."
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "id": "MSG-001",
+      "previous": "Cases / Resolutions",
+      "approved": "Action Required",
+      "reason": "This view will include every current human-action payment issue, not only finance resolutions. No case action is removed."
+    },
+    {
+      "id": "MSG-002",
+      "previous": "No Case Resolutions match the current Banking Pay filters.",
+      "approved": "No payments requiring action match the current Banking Pay filters.",
+      "reason": "Matches the wider Action Required meaning and keeps current filter behaviour."
+    },
+    {
+      "id": "MSG-003",
+      "previous": "No cases need resolution.",
+      "approved": "No payments currently need action.",
+      "reason": "Plain zero state for the wider task list."
+    },
+    {
+      "id": "MSG-004",
+      "previous": "Payment route, candidate and client filters intersect across Ready to Pay, Blocked for Pay and Case Resolutions. Hidden selections are preserved, but hidden rows are never drafted.",
+      "approved": "Payment route, candidate and client filters apply to Ready to pay, Action Required and Blocked for Pay. Selections outside the current filters remain saved, but those payments cannot be included in this Draft.",
+      "reason": "Removes intersect and updates the renamed view without weakening the Draft safety rule."
+    },
+    {
+      "id": "MSG-005",
+      "previous": "Choose Ready to Pay rows, then create a draft.",
+      "approved": "Choose the candidates to include, then create a Draft.",
+      "reason": "The main user action is now candidate selection. Payment-level selection remains in Candidate Banking."
+    },
+    {
+      "id": "MSG-006",
+      "previous": "Amount",
+      "approved": "Ready to pay",
+      "reason": "The column shows the current selected payment display amount. It does not claim to be PAYE net or final bank-out."
+    },
+    {
+      "id": "MSG-007",
+      "previous": "Amount {amount}",
+      "approved": "Ready to pay £{amount}",
+      "reason": "Makes the headline meaning explicit. The value must come from the full-session selected amount, not the current visible-page Amount."
+    },
+    {
+      "id": "MSG-008",
+      "previous": "{number} selected",
+      "approved": "{number} candidates included",
+      "reason": "The main count is candidate-based. The underlying payment selection is unchanged."
+    },
+    {
+      "id": "MSG-009",
+      "previous": "{selected}/{available} on this page",
+      "approved": "{selected} of {available} candidates on this page included",
+      "reason": "Removes ambiguity about whether the numbers are candidates or payment lines."
+    },
+    {
+      "id": "MSG-010",
+      "previous": "Tick all Ready to Pay lines",
+      "approved": "Include all eligible payments for every candidate",
+      "reason": "Used as the global checkbox label/tooltip. It still invokes the current server-owned all-page Ready selection."
+    },
+    {
+      "id": "MSG-011",
+      "previous": "Untick all Ready to Pay lines",
+      "approved": "Remove all eligible payments for every candidate",
+      "reason": "Used as the global clear label/tooltip. Remove means remove from this pay run, not delete payment records."
+    },
+    {
+      "id": "MSG-012",
+      "previous": "No payable rows found.",
+      "approved": "No candidates currently have payments ready to include.",
+      "reason": "Candidate-based, plain empty state."
+    },
+    {
+      "id": "MSG-013",
+      "previous": "No line-level items are currently ready to pay.",
+      "approved": "No candidates currently have payments ready to include.",
+      "reason": "Removes line-level technical language."
+    },
+    {
+      "id": "MSG-014",
+      "previous": "No Ready to Pay rows match the current Banking Pay filters.",
+      "approved": "No candidates with payments ready to include match the current Banking Pay filters.",
+      "reason": "Correct full-result filtered empty state."
+    },
+    {
+      "id": "MSG-015",
+      "previous": "No rows are blocked for pay.",
+      "approved": "No payments are currently blocked.",
+      "reason": "Uses the object the user understands: payments, not rows."
+    },
+    {
+      "id": "MSG-016",
+      "previous": "No Blocked for Pay rows match the current Banking Pay filters.",
+      "approved": "No blocked payments match the current Banking Pay filters.",
+      "reason": "Keeps the same filters and removes table-language jargon."
+    },
+    {
+      "id": "MSG-017",
+      "previous": "New candidate-level field; no current candidate Deductions label",
+      "approved": "Deductions",
+      "reason": "Exact new column name. Its value is Yes or a neutral dash only."
+    },
+    {
+      "id": "MSG-018",
+      "previous": "New candidate-level value; no current equivalent",
+      "approved": "Yes",
+      "reason": "Show only when at least one currently selected Ready payment is canonically a deduction."
+    },
+    {
+      "id": "MSG-019",
+      "previous": "New candidate-level value; no current equivalent",
+      "approved": "—",
+      "reason": "Show when no currently selected Ready payment is canonically a deduction. Do not show No, because the candidate may have an unselected or blocked deduction elsewhere."
+    },
+    {
+      "id": "MSG-020",
+      "previous": "No current no-Timesheet tooltip",
+      "approved": "No Ready Timesheet is linked to this candidate's selected payments.",
+      "reason": "Used only if the design keeps a neutral disabled Timesheets icon. Never open a broad candidate Timesheets search."
+    },
+    {
+      "id": "MSG-030",
+      "previous": "Insufficient funds",
+      "approved": "Insufficient funds to deduct",
+      "reason": "The current label is incomplete. The new label tells the user what cannot happen. The underlying NO_PAY_HEADROOM reason remains unchanged."
+    },
+    {
+      "id": "MSG-031",
+      "previous": "No credit balance to deduct",
+      "approved": "Insufficient funds to deduct",
+      "reason": "Credit balance is accounting language and does not explain the practical effect."
+    },
+    {
+      "id": "MSG-032",
+      "previous": "No available funds to recover this yet.",
+      "approved": "There is not enough pay available in this run to make this deduction.",
+      "reason": "Removes yet and states exactly why the deduction is not happening in this pay run."
+    },
+    {
+      "id": "MSG-033",
+      "previous": "No unreserved payable earnings are available for this recovery.",
+      "approved": "There is not enough pay available in this run to make this deduction.",
+      "reason": "Removes unreserved payable earnings, which is accurate internally but not user-friendly. The scheduled amount and amount deductible now remain separately displayed."
+    },
+    {
+      "id": "MSG-034",
+      "previous": "Scheduled recovery due",
+      "approved": "Deduction scheduled for this pay run",
+      "reason": "Keeps the scheduled figure distinct from what can actually be deducted now."
+    },
+    {
+      "id": "MSG-035",
+      "previous": "Recoverable this pay run: {amount}",
+      "approved": "Can be deducted now: £{amount}",
+      "reason": "Plain wording; the server still owns the amount."
+    },
+    {
+      "id": "MSG-036",
+      "previous": "No recovery can be made because there are no available funds to deduct from this pay run.",
+      "approved": "This deduction cannot be made because there is not enough pay available in this run.",
+      "reason": "Shorter and specific. No change to the outstanding amount or blocked state."
+    },
+    {
+      "id": "MSG-037",
+      "previous": "{recoverable} will be recovered from the total outstanding amount of {outstanding}.",
+      "approved": "£{recoverable} will be deducted in this pay run. £{outstanding} is still outstanding before this deduction.",
+      "reason": "Separates the amount taken now from the outstanding balance and avoids a long accounting sentence. Values remain server supplied."
+    },
+    {
+      "id": "MSG-038",
+      "previous": "No recovery can be made this pay run from the total outstanding amount of {outstanding}.",
+      "approved": "Nothing can be deducted in this pay run. £{outstanding} remains outstanding.",
+      "reason": "Direct, specific zero-deduction explanation."
+    },
+    {
+      "id": "MSG-040",
+      "previous": "PAYE > UMBR",
+      "approved": "Payment was originally PAYE. Candidate is now paid through an umbrella company.",
+      "reason": "Removes an abbreviation and arrow that require interpretation. This text must be derived from the current source and target methods."
+    },
+    {
+      "id": "MSG-041",
+      "previous": "This amount is currently determined as PAYE and needs resolution to convert it to Umbrella.",
+      "approved": "Payment was originally PAYE. Candidate is now paid through an umbrella company. Choose how this payment should be handled.",
+      "reason": "States what changed and what the user must do. The existing taxable restructure action and calculation remain unchanged."
+    },
+    {
+      "id": "MSG-042",
+      "previous": "UMBR > PAYE",
+      "approved": "Payment was originally through an umbrella company. Candidate is now PAYE.",
+      "reason": "Clear reverse direction with no abbreviation."
+    },
+    {
+      "id": "MSG-043",
+      "previous": "This amount is currently determined as Umbrella and needs resolution to convert it to PAYE.",
+      "approved": "Payment was originally through an umbrella company. Candidate is now PAYE. Choose how this payment should be handled.",
+      "reason": "Clear reverse source-to-target explanation."
+    },
+    {
+      "id": "MSG-044",
+      "previous": "Resolution required, when used for a payment-method change",
+      "approved": "Payment method changed",
+      "reason": "A specific task title is more useful than a generic red badge. The full source-to-target sentence follows it."
+    },
+    {
+      "id": "MSG-045",
+      "previous": "Resolution required, when a rate must be chosen",
+      "approved": "Rate decision required",
+      "reason": "The existing Suggested Rate, Accept suggestion and Manual rate controls remain."
+    },
+    {
+      "id": "MSG-046",
+      "previous": "Resolution required, when an amount must be chosen",
+      "approved": "Amount decision required",
+      "reason": "The existing Suggested Gross Total and Manual amount controls remain."
+    },
+    {
+      "id": "MSG-047",
+      "previous": "Suggested Restructure",
+      "approved": "Review suggested payment change",
+      "reason": "Restructure is finance jargon. The action still opens the current taxable restructure flow."
+    },
+    {
+      "id": "MSG-048",
+      "previous": "Existing arrangement",
+      "approved": "Original payment arrangement",
+      "reason": "Makes the source side explicit. No figures are removed."
+    },
+    {
+      "id": "MSG-049",
+      "previous": "Suggested arrangement",
+      "approved": "Suggested new payment arrangement",
+      "reason": "Makes the target side explicit. No figures are removed."
+    },
+    {
+      "id": "MSG-050",
+      "previous": "Current / source rate",
+      "approved": "Original rate",
+      "reason": "Shorter and clearer in the detailed component table."
+    },
+    {
+      "id": "MSG-051",
+      "previous": "Suggested / target rate",
+      "approved": "Suggested rate",
+      "reason": "Removes duplicate technical terms."
+    },
+    {
+      "id": "MSG-052",
+      "previous": "Current / source pay",
+      "approved": "Original payment amount",
+      "reason": "Clearer description of the source amount."
+    },
+    {
+      "id": "MSG-053",
+      "previous": "Current / source charge",
+      "approved": "Original client charge",
+      "reason": "Identifies what the charge refers to."
+    },
+    {
+      "id": "MSG-060",
+      "previous": "Payee setup in progress",
+      "approved": "Bank account setup in progress",
+      "reason": "Payee is unnecessary jargon. This remains Updating, not Action Required."
+    },
+    {
+      "id": "MSG-061",
+      "previous": "Payee readiness setup is queued or running. Refresh shortly.",
+      "approved": "CloudTMS is setting up this bank account for payment. This payment will update automatically when the setup finishes.",
+      "reason": "Explains what CloudTMS is doing and avoids telling the user to repeatedly refresh."
+    },
+    {
+      "id": "MSG-062",
+      "previous": "Payee setup failed",
+      "approved": "Bank account setup failed",
+      "reason": "Plain task/status name."
+    },
+    {
+      "id": "MSG-063",
+      "previous": "Payee readiness could not run. Retry setup or contact support.",
+      "approved": "CloudTMS could not finish setting up this bank account. Try again, or contact support if it keeps failing.",
+      "reason": "Specific failure and next action. Retry must only appear when the server permits it."
+    },
+    {
+      "id": "MSG-064",
+      "previous": "Umbrella inactive",
+      "approved": "Umbrella company inactive",
+      "reason": "Makes clear that the company account, not the candidate, is inactive."
+    },
+    {
+      "id": "MSG-065",
+      "previous": "Umbrella inactive. Re-enable or review the umbrella before payment setup.",
+      "approved": "This umbrella company is inactive. Reactivate it before trying to pay the affected candidates.",
+      "reason": "States the required action and recognises that one umbrella can affect several candidates."
+    },
+    {
+      "id": "MSG-066",
+      "previous": "Bank details missing.",
+      "approved": "Candidate bank details are missing.",
+      "reason": "Specifies the owner when the owner is the candidate."
+    },
+    {
+      "id": "MSG-067",
+      "previous": "Umbrella bank details missing.",
+      "approved": "The umbrella company's bank details are missing.",
+      "reason": "Specifies the owner when the owner is an umbrella company."
+    },
+    {
+      "id": "MSG-068",
+      "previous": "Bank/name check required.",
+      "approved": "Account name check required.",
+      "reason": "Uses the familiar account name term."
+    },
+    {
+      "id": "MSG-069",
+      "previous": "Run bank/name check",
+      "approved": "Check account name",
+      "reason": "Short, plain action label. The existing route and permissions remain."
+    },
+    {
+      "id": "MSG-070",
+      "previous": "Bank details/name check failed.",
+      "approved": "The account name does not match the bank details.",
+      "reason": "Use only for a definite FAIL result. Near match and unavailable must use their own messages below."
+    },
+    {
+      "id": "MSG-071",
+      "previous": "Bank/name check returned a near match. Review before accepting.",
+      "approved": "The account name is a close match. Check the name and bank details before accepting them.",
+      "reason": "Keeps near match distinct from failure."
+    },
+    {
+      "id": "MSG-072",
+      "previous": "Bank/name check could not be completed. Review before accepting.",
+      "approved": "The bank could not check the account name. Check the bank details before deciding whether to accept them.",
+      "reason": "Keeps UNAVAILABLE distinct and states the decision."
+    },
+    {
+      "id": "MSG-073",
+      "previous": "Bank/name check failed. Review before accepting.",
+      "approved": "The account name does not match the bank details. Check both before accepting them.",
+      "reason": "Specific FAIL explanation and next step."
+    },
+    {
+      "id": "MSG-074",
+      "previous": "Bank/name check passed and the bank account has been set up. Banking Pay will refresh this candidate now.",
+      "approved": "The account name matches and this bank account is ready for payment. Banking Pay is updating the candidate now.",
+      "reason": "Plain success message; current refresh remains."
+    },
+    {
+      "id": "MSG-075",
+      "previous": "Bank/name check completed and needs review. Banking Pay will refresh this candidate now.",
+      "approved": "The account name check is complete. Review the result before this payment can be included. Banking Pay is updating the candidate now.",
+      "reason": "Explains why it is still Action Required. The detailed result must say fail, close match or unavailable."
+    },
+    {
+      "id": "MSG-076",
+      "previous": "Bank/name check has been submitted. Banking Pay will refresh this candidate now.",
+      "approved": "The account name check has started. This payment will update automatically when the result is ready.",
+      "reason": "Correctly places the item in Updating."
+    },
+    {
+      "id": "MSG-077",
+      "previous": "Bank account setup required.",
+      "approved": "Bank account needs setting up.",
+      "reason": "Plain state label."
+    },
+    {
+      "id": "MSG-078",
+      "previous": "Bank/name check has passed or been accepted, but the provider payee map is missing.",
+      "approved": "The bank details have been checked, but this account has not yet been set up for payments.",
+      "reason": "Removes provider payee map while preserving the exact next action."
+    },
+    {
+      "id": "MSG-079",
+      "previous": "Please confirm a reason for accepting this bank-name mismatch. This is auditable and will prevent this mismatch from blocking drafts for these bank details.",
+      "approved": "Enter why you are accepting this account-name mismatch. The reason will be saved in the audit history. These exact bank details will no longer block Draft creation.",
+      "reason": "Preserves mandatory reason, exact bank-details scope and audit trail."
+    },
+    {
+      "id": "MSG-090",
+      "previous": "Review required.",
+      "approved": "Payment issue not identified",
+      "reason": "A generic review instruction does not say what to review. This title is used only for a genuinely unknown reason and the explanation below must accompany it."
+    },
+    {
+      "id": "MSG-091",
+      "previous": "A raw blocker code with underscores replaced by spaces",
+      "approved": "CloudTMS could not identify why this payment is blocked. It will not be included. Refresh Banking Pay; if it remains blocked, contact support.",
+      "reason": "Keep the raw code in diagnostics, not as user wording. The item remains visible, counted and fail-closed."
+    },
+    {
+      "id": "MSG-092",
+      "previous": "This case is currently blocked and needs review before it can move to Ready to Pay.",
+      "approved": "Show the exact server-published reason and what must change. If neither is available: CloudTMS could not identify why this payment is blocked. It will not be included. Refresh Banking Pay; if it remains blocked, contact support.",
+      "reason": "Removes a vague catch-all. No blocked item is hidden."
+    },
+    {
+      "id": "MSG-093",
+      "previous": "This timesheet segment is currently blocked for pay.",
+      "approved": "Show the exact Timesheet reason. If it is unavailable: This Timesheet payment cannot be included because CloudTMS could not confirm its current status. Open the Timesheet or refresh Banking Pay.",
+      "reason": "Requires a specific reason while retaining exact Timesheets navigation and fail-closed state."
+    },
+    {
+      "id": "MSG-094",
+      "previous": "entity_kind must be CANDIDATE or UMBRELLA",
+      "approved": "This payment is missing its bank-account owner. Refresh Banking Pay and try again.",
+      "reason": "Replaces an internal field name if a damaged action reaches the user."
+    },
+    {
+      "id": "MSG-095",
+      "previous": "entity_id is required",
+      "approved": "This payment is missing its bank-account owner. Refresh Banking Pay and try again.",
+      "reason": "Same damaged-context family; no internal field name."
+    },
+    {
+      "id": "MSG-096",
+      "previous": "bank_details_hash is required",
+      "approved": "The bank details changed or could not be confirmed. Refresh Banking Pay and try again.",
+      "reason": "Explains the safe next step without exposing the fingerprint field."
+    },
+    {
+      "id": "MSG-097",
+      "previous": "Reason prompt modal is not available (openUiPromptModal missing).",
+      "approved": "The bank-details review window could not be opened. Refresh Banking Pay and try again.",
+      "reason": "Removes a JavaScript function name."
+    },
+    {
+      "id": "MSG-098",
+      "previous": "Case key is required.",
+      "approved": "This payment case could not be identified. Refresh Banking Pay and try again.",
+      "reason": "Replaces an internal identity term."
+    },
+    {
+      "id": "MSG-099",
+      "previous": "Candidate id is required.",
+      "approved": "This candidate could not be identified. Refresh Banking Pay and try again.",
+      "reason": "Replaces an internal field term."
+    },
+    {
+      "id": "MSG-100",
+      "previous": "Timesheet id is required.",
+      "approved": "This Timesheet could not be identified. Refresh Banking Pay and try again.",
+      "reason": "Replaces an internal field term."
+    },
+    {
+      "id": "MSG-101",
+      "previous": "Candidate and timesheet context are required for the expense set action.",
+      "approved": "CloudTMS could not identify the candidate and Timesheet for this expense action. Refresh Banking Pay and try again.",
+      "reason": "Explains the failed action in plain English."
+    },
+    {
+      "id": "MSG-110",
+      "previous": "Create Draft disabled: selected rows need refresh",
+      "approved": "Create Draft is unavailable while selected payments are updating.",
+      "reason": "Plain reason; Draft stays disabled for the same authority condition."
+    },
+    {
+      "id": "MSG-111",
+      "previous": "The current canonical preview page is still loading for this workbench session/version.",
+      "approved": "Banking Pay is loading the latest payment list.",
+      "reason": "Removes canonical, workbench and session/version."
+    },
+    {
+      "id": "MSG-112",
+      "previous": "Loading the first Ready to Pay preview page.",
+      "approved": "Banking Pay is loading the latest payment list.",
+      "reason": "One consistent loading message."
+    },
+    {
+      "id": "MSG-113",
+      "previous": "The displayed preview does not match the current workbench session/version. Refresh Banking Pay.",
+      "approved": "This payment list is out of date. Refresh Banking Pay before creating a Draft.",
+      "reason": "Preserves the fail-closed version fence."
+    },
+    {
+      "id": "MSG-114",
+      "previous": "This payment preview is obsolete or has been replaced. Open the latest preview session.",
+      "approved": "A newer Banking Pay list is available. Open the latest list before creating a Draft.",
+      "reason": "Removes obsolete/session jargon and keeps the same block."
+    },
+    {
+      "id": "MSG-115",
+      "previous": "Select at least one current eligible Ready to Pay row.",
+      "approved": "Include at least one candidate with a payment ready to pay.",
+      "reason": "Matches the candidate-based main interaction. Candidate Banking still allows payment-level selection."
+    },
+    {
+      "id": "MSG-116",
+      "previous": "Select rows",
+      "approved": "Select candidates",
+      "reason": "Candidate-based disabled button text."
+    },
+    {
+      "id": "MSG-117",
+      "previous": "Some beneficiary checks failed ({failed}/{attempted}). Those payees remain blocked until refreshed or corrected.",
+      "approved": "Some bank-account checks failed ({failed}/{attempted}). The affected payments cannot be included until the bank details are corrected or checked again.",
+      "reason": "Removes beneficiary/payee and makes the impact explicit."
+    },
+    {
+      "id": "MSG-118",
+      "previous": "Beneficiary checks were performed during preview; use Refresh to re-check if bank details change.",
+      "approved": "Bank details were checked when this list was prepared. Use Refresh if those details have changed.",
+      "reason": "Plain description without preview jargon."
+    },
+    {
+      "id": "MSG-119",
+      "previous": "PAYE draft creation is blocked because an existing PAYE draft already exists. Cancel or delete the existing PAYE draft first.",
+      "approved": "A PAYE Draft already exists. Cancel or delete it before creating another PAYE Draft.",
+      "reason": "Removes repetition; same hard guard."
+    },
+    {
+      "id": "MSG-120",
+      "previous": "A non-draft PAYE batch already exists for this payroll week. Creating another PAYE batch for the same week is override-only. Replacement or cancellation is usually the correct path.",
+      "approved": "A PAYE payment batch already exists for this payroll week. Creating another requires extra security checks. Usually the existing batch should be replaced or cancelled instead.",
+      "reason": "Removes override-only jargon while keeping the warning and preferred safe path."
+    },
+    {
+      "id": "MSG-121",
+      "previous": "Override sequence required: password reauthentication, 2FA verification, then explicit continue confirmation.",
+      "approved": "To continue, confirm your password, complete 2FA and confirm that you want to create another PAYE batch.",
+      "reason": "Same security steps in direct language."
+    },
+    {
+      "id": "MSG-130",
+      "previous": "{number} hidden item(s)",
+      "approved": "No Banking Pay message or count",
+      "reason": "Indefinite snoozes are excluded from Banking Pay before counting. Their existing Snoozes-tab functionality remains."
+    },
+    {
+      "id": "MSG-131",
+      "previous": "Indefinite snoozes are hidden from the live pay workbench and are managed in Loans / Snoozes.",
+      "approved": "No Banking Pay message",
+      "reason": "The user should see indefinite snoozes only in the Snoozes tab, not a reminder of hidden Banking Pay items."
+    }
+  ],
+  "actions": [
+    {
+      "name": "banking:pay:acceptBankDetails",
+      "owner": "Action Required detail",
+      "treatment": "Move; retain mandatory audited reason and exact bank-details fingerprint."
+    },
+    {
+      "name": "banking:pay:clearCaseResolution",
+      "owner": "Candidate Banking for a resolved Ready item; otherwise Action Required",
+      "treatment": "Move; retain exact BUCKETED cancellation owner and refresh."
+    },
+    {
+      "name": "banking:pay:clearFilters",
+      "owner": "Main toolbar",
+      "treatment": "Retain."
+    },
+    {
+      "name": "banking:pay:componentClearResolution",
+      "owner": "Candidate Banking or Action Required by effective state",
+      "treatment": "Move; retain state_changed/no_op handling."
+    },
+    {
+      "name": "banking:pay:componentManualAmount",
+      "owner": "Action Required detail",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:componentManualRate",
+      "owner": "Action Required detail",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:componentUseSuggested",
+      "owner": "Action Required detail",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:createDraft",
+      "owner": "Main fixed action",
+      "treatment": "Retain unchanged."
+    },
+    {
+      "name": "banking:pay:ensurePayeeMap",
+      "owner": "Action Required detail",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:exportReadyToPayCsv",
+      "owner": "Main export/overflow and Candidate Banking export",
+      "treatment": "Retain current all-page semantics; add candidate Ready-only scope without weakening global export."
+    },
+    {
+      "name": "banking:pay:manageSnooze",
+      "owner": "Candidate Banking or Blocked; indefinite stays in Snoozes",
+      "treatment": "Move according to effective state."
+    },
+    {
+      "name": "banking:pay:openBucketedResolution",
+      "owner": "Action Required detail",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:openChild",
+      "owner": "Main Draft status/result",
+      "treatment": "Retain."
+    },
+    {
+      "name": "banking:pay:openFiltersModal",
+      "owner": "Main toolbar",
+      "treatment": "Retain."
+    },
+    {
+      "name": "banking:pay:openNonBucketResolution",
+      "owner": "Action Required detail",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:openSnooze",
+      "owner": "Candidate Banking/Blocked where currently allowed",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:openTaxableFinanceCaseRestructure",
+      "owner": "Action Required detail",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:previewPage",
+      "owner": "Candidate Banking, Action Required and Blocked internal paging",
+      "treatment": "Retain the concept; new endpoints own their own stable cursors."
+    },
+    {
+      "name": "banking:pay:refreshDraftCreateStatus",
+      "owner": "Main Draft status",
+      "treatment": "Retain."
+    },
+    {
+      "name": "banking:pay:runBankNameCheck",
+      "owner": "Action Required detail",
+      "treatment": "Move; proposed visible wording changes to Check account name."
+    },
+    {
+      "name": "banking:pay:snoozeAllExpenses",
+      "owner": "Candidate Banking breakdown",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:toggleAllReadyPreviewRows",
+      "owner": "Main header",
+      "treatment": "Retain existing all-page Ready selection authority."
+    },
+    {
+      "name": "banking:pay:toggleExcludeTimesheet",
+      "owner": "Candidate Banking or Action Required by effective state",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:togglePreviewRow",
+      "owner": "Candidate Banking payment row",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:toggleTimesheetBreakdown",
+      "owner": "Candidate Banking only",
+      "treatment": "Move; expressly prohibited in main table."
+    },
+    {
+      "name": "banking:pay:toggleTimesheetPreviewGroup",
+      "owner": "Candidate Banking group",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:toggleWorkbenchSection",
+      "owner": "Replaced by separate permanent modal buttons",
+      "treatment": "Remove shell only. The contents/actions of each section remain available."
+    },
+    {
+      "name": "banking:pay:unsnoozeAllExpenses",
+      "owner": "Candidate Banking breakdown",
+      "treatment": "Move."
+    },
+    {
+      "name": "banking:pay:viewDraftCreateStatus",
+      "owner": "Main Draft status",
+      "treatment": "Retain."
+    },
+    {
+      "name": "banking:pay:viewRowTimesheets",
+      "owner": "Candidate Banking, Action Required and Blocked",
+      "treatment": "Move/reuse exact-ID navigation."
+    }
+  ]
+}

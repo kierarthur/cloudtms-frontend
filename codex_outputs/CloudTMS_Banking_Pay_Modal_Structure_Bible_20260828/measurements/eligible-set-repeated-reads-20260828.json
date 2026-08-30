@@ -1,0 +1,402 @@
+{
+  "evidence": "EVIDENCE-0063",
+  "date": "2026-08-28",
+  "scope": "Disposable local PG17 only; synthetic rollback fixtures. Not hosted or browser performance.",
+  "frontend_head": "b66b2a61d3d266ef4e9a3d410061274ca74a7a8e",
+  "backend_head": "fedcb84c9142e391c4f5c1d1cea56a9ed8f62c64",
+  "source_sha256": {
+    "projection": "02a4d7e2cfccc11834155e34139838efa1fda62f9c31d19e4f0c1ede4a5289d0",
+    "eligible_test": "8e518c29ece70479057c7e5c3245ebc8c61d3eee5b9eced2dad12e55740268c6"
+  },
+  "target": {
+    "host": "127.0.0.1",
+    "port": 55441,
+    "database": "banking_modal_v2_test",
+    "server": "PostgreSQL17.6",
+    "client": "Installed PostgreSQL18 psql",
+    "timeout_changed": false
+  },
+  "mechanism": "Preserve complete certified eligibility, materialize final eligible IDs before physical-row join; preserve single-row normalized payload barrier.",
+  "previous_failure": {
+    "effective_section_calls": 1247802,
+    "sorted_read_ms": 3008.461,
+    "operation_budget_ms": 3000
+  },
+  "repeated_runs": [
+    {
+      "run": 1,
+      "status": 0,
+      "elapsed_ms": 6667,
+      "statement_timings": [
+        "Time: 2.902 ms",
+        "Time: 1.668 ms",
+        "Time: 326.938 ms",
+        "Time: 2.950 ms",
+        "Time: 4.278 ms",
+        "Time: 1072.361 ms",
+        "Time: 2.955 ms",
+        "Time: 509.565 ms",
+        "Time: 490.137 ms",
+        "Time: 519.198 ms",
+        "Time: 461.490 ms",
+        "Time: 443.894 ms",
+        "Time: 464.124 ms",
+        "Time: 1216.970 ms",
+        "Time: 986.522 ms",
+        "Time: 5.287 ms",
+        "Time: 7.133 ms"
+      ]
+    },
+    {
+      "run": 2,
+      "status": 0,
+      "elapsed_ms": 6735,
+      "statement_timings": [
+        "Time: 3.483 ms",
+        "Time: 1.533 ms",
+        "Time: 343.783 ms",
+        "Time: 4.933 ms",
+        "Time: 4.592 ms",
+        "Time: 1044.411 ms (00:01.044)",
+        "Time: 3.948 ms",
+        "Time: 450.878 ms",
+        "Time: 541.462 ms",
+        "Time: 556.089 ms",
+        "Time: 545.394 ms",
+        "Time: 471.187 ms",
+        "Time: 517.762 ms",
+        "Time: 1127.290 ms (00:01.127)",
+        "Time: 951.106 ms",
+        "Time: 7.684 ms",
+        "Time: 4.437 ms"
+      ]
+    },
+    {
+      "run": 3,
+      "status": 0,
+      "elapsed_ms": 6864,
+      "statement_timings": [
+        "Time: 3.858 ms",
+        "Time: 2.249 ms",
+        "Time: 426.161 ms",
+        "Time: 6.045 ms",
+        "Time: 5.812 ms",
+        "Time: 1266.223 ms (00:01.266)",
+        "Time: 3.228 ms",
+        "Time: 512.100 ms",
+        "Time: 493.010 ms",
+        "Time: 455.227 ms",
+        "Time: 491.230 ms",
+        "Time: 457.690 ms",
+        "Time: 448.417 ms",
+        "Time: 1135.692 ms (00:01.136)",
+        "Time: 1002.583 ms (00:01.003)",
+        "Time: 6.149 ms",
+        "Time: 5.111 ms"
+      ]
+    },
+    {
+      "run": 4,
+      "status": 0,
+      "elapsed_ms": 6781,
+      "statement_timings": [
+        "Time: 1.422 ms",
+        "Time: 1.305 ms",
+        "Time: 338.347 ms",
+        "Time: 3.474 ms",
+        "Time: 4.335 ms",
+        "Time: 1110.070 ms (00:01.110)",
+        "Time: 4.209 ms",
+        "Time: 528.213 ms",
+        "Time: 507.713 ms",
+        "Time: 510.751 ms",
+        "Time: 463.906 ms",
+        "Time: 473.258 ms",
+        "Time: 471.044 ms",
+        "Time: 1245.971 ms (00:01.246)",
+        "Time: 964.304 ms",
+        "Time: 5.882 ms",
+        "Time: 7.068 ms"
+      ]
+    },
+    {
+      "run": 5,
+      "status": 0,
+      "elapsed_ms": 6933,
+      "statement_timings": [
+        "Time: 1.742 ms",
+        "Time: 1.627 ms",
+        "Time: 328.609 ms",
+        "Time: 3.533 ms",
+        "Time: 4.085 ms",
+        "Time: 1087.659 ms (00:01.088)",
+        "Time: 1.292 ms",
+        "Time: 515.526 ms",
+        "Time: 584.628 ms",
+        "Time: 466.911 ms",
+        "Time: 482.789 ms",
+        "Time: 538.003 ms",
+        "Time: 535.473 ms",
+        "Time: 1150.960 ms (00:01.151)",
+        "Time: 1060.362 ms (00:01.060)",
+        "Time: 8.874 ms",
+        "Time: 5.706 ms"
+      ]
+    },
+    {
+      "run": 6,
+      "status": 0,
+      "elapsed_ms": 6999,
+      "statement_timings": [
+        "Time: 1.560 ms",
+        "Time: 1.185 ms",
+        "Time: 311.616 ms",
+        "Time: 3.680 ms",
+        "Time: 4.071 ms",
+        "Time: 1027.961 ms (00:01.028)",
+        "Time: 1.527 ms",
+        "Time: 515.580 ms",
+        "Time: 486.506 ms",
+        "Time: 521.335 ms",
+        "Time: 567.379 ms",
+        "Time: 547.023 ms",
+        "Time: 560.251 ms",
+        "Time: 1358.288 ms (00:01.358)",
+        "Time: 946.165 ms",
+        "Time: 5.991 ms",
+        "Time: 5.204 ms"
+      ]
+    },
+    {
+      "run": 7,
+      "status": 0,
+      "elapsed_ms": 7162,
+      "statement_timings": [
+        "Time: 3.553 ms",
+        "Time: 1.606 ms",
+        "Time: 379.109 ms",
+        "Time: 3.740 ms",
+        "Time: 4.851 ms",
+        "Time: 1056.613 ms (00:01.057)",
+        "Time: 2.016 ms",
+        "Time: 578.354 ms",
+        "Time: 617.649 ms",
+        "Time: 490.504 ms",
+        "Time: 483.088 ms",
+        "Time: 533.184 ms",
+        "Time: 589.658 ms",
+        "Time: 1171.394 ms (00:01.171)",
+        "Time: 1078.271 ms (00:01.078)",
+        "Time: 6.078 ms",
+        "Time: 7.105 ms"
+      ]
+    },
+    {
+      "run": 8,
+      "status": 0,
+      "elapsed_ms": 7008,
+      "statement_timings": [
+        "Time: 3.341 ms",
+        "Time: 1.673 ms",
+        "Time: 363.292 ms",
+        "Time: 4.037 ms",
+        "Time: 4.321 ms",
+        "Time: 1232.663 ms (00:01.233)",
+        "Time: 3.061 ms",
+        "Time: 501.239 ms",
+        "Time: 517.983 ms",
+        "Time: 520.404 ms",
+        "Time: 560.759 ms",
+        "Time: 490.354 ms",
+        "Time: 483.857 ms",
+        "Time: 1190.490 ms (00:01.190)",
+        "Time: 971.379 ms",
+        "Time: 7.009 ms",
+        "Time: 5.265 ms"
+      ]
+    },
+    {
+      "run": 9,
+      "status": 0,
+      "elapsed_ms": 6754,
+      "statement_timings": [
+        "Time: 1.890 ms",
+        "Time: 1.503 ms",
+        "Time: 373.586 ms",
+        "Time: 3.786 ms",
+        "Time: 4.287 ms",
+        "Time: 1043.687 ms (00:01.044)",
+        "Time: 1.949 ms",
+        "Time: 514.843 ms",
+        "Time: 551.962 ms",
+        "Time: 502.509 ms",
+        "Time: 473.658 ms",
+        "Time: 516.923 ms",
+        "Time: 442.540 ms",
+        "Time: 1181.329 ms (00:01.181)",
+        "Time: 976.974 ms",
+        "Time: 6.263 ms",
+        "Time: 7.401 ms"
+      ]
+    },
+    {
+      "run": 10,
+      "status": 0,
+      "elapsed_ms": 6703,
+      "statement_timings": [
+        "Time: 2.112 ms",
+        "Time: 1.403 ms",
+        "Time: 327.668 ms",
+        "Time: 3.371 ms",
+        "Time: 3.447 ms",
+        "Time: 1013.437 ms (00:01.013)",
+        "Time: 1.941 ms",
+        "Time: 552.671 ms",
+        "Time: 476.150 ms",
+        "Time: 479.483 ms",
+        "Time: 455.651 ms",
+        "Time: 503.456 ms",
+        "Time: 487.310 ms",
+        "Time: 1211.522 ms (00:01.212)",
+        "Time: 1028.505 ms (00:01.029)",
+        "Time: 6.768 ms",
+        "Time: 5.018 ms"
+      ]
+    }
+  ],
+  "sorted_read_summary": {
+    "samples": 60,
+    "min_ms": 442.54,
+    "p50_ms": 503.456,
+    "p95_ms": 578.354,
+    "max_ms": 617.649
+  },
+  "profile": [
+    [
+      {
+        "calls": 3,
+        "self_ms": 2.64,
+        "function": "public.pay_workbench_session_get_candidate_summary_page_v1",
+        "total_ms": 1656.17
+      },
+      {
+        "calls": 1926,
+        "self_ms": 258.11,
+        "function": "private.pay_workbench_modal_row_payload_v2",
+        "total_ms": 421.13
+      },
+      {
+        "calls": 31272,
+        "self_ms": 339.22,
+        "function": "private.pay_workbench_preview_effective_section_v1",
+        "total_ms": 339.22
+      }
+    ],
+    [
+      {
+        "calls": 4,
+        "self_ms": 3.14,
+        "function": "public.pay_workbench_session_get_candidate_summary_page_v1",
+        "total_ms": 2147.2
+      },
+      {
+        "calls": 2568,
+        "self_ms": 338.81,
+        "function": "private.pay_workbench_modal_row_payload_v2",
+        "total_ms": 553.22
+      },
+      {
+        "calls": 41696,
+        "self_ms": 448.5,
+        "function": "private.pay_workbench_preview_effective_section_v1",
+        "total_ms": 448.5
+      }
+    ],
+    [
+      {
+        "calls": 5,
+        "self_ms": 3.61,
+        "function": "public.pay_workbench_session_get_candidate_summary_page_v1",
+        "total_ms": 2612.68
+      },
+      {
+        "calls": 3210,
+        "self_ms": 414.56,
+        "function": "private.pay_workbench_modal_row_payload_v2",
+        "total_ms": 675.54
+      },
+      {
+        "calls": 52120,
+        "self_ms": 552.75,
+        "function": "private.pay_workbench_preview_effective_section_v1",
+        "total_ms": 552.75
+      }
+    ],
+    [
+      {
+        "calls": 6,
+        "self_ms": 4.25,
+        "function": "public.pay_workbench_session_get_candidate_summary_page_v1",
+        "total_ms": 3191.35
+      },
+      {
+        "calls": 3852,
+        "self_ms": 505.83,
+        "function": "private.pay_workbench_modal_row_payload_v2",
+        "total_ms": 825.01
+      },
+      {
+        "calls": 62544,
+        "self_ms": 672.99,
+        "function": "private.pay_workbench_preview_effective_section_v1",
+        "total_ms": 672.99
+      }
+    ],
+    [
+      {
+        "calls": 7,
+        "self_ms": 4.64,
+        "function": "public.pay_workbench_session_get_candidate_summary_page_v1",
+        "total_ms": 3636.03
+      },
+      {
+        "calls": 4494,
+        "self_ms": 579.06,
+        "function": "private.pay_workbench_modal_row_payload_v2",
+        "total_ms": 945.03
+      },
+      {
+        "calls": 72968,
+        "self_ms": 772.15,
+        "function": "private.pay_workbench_preview_effective_section_v1",
+        "total_ms": 772.15
+      }
+    ],
+    [
+      {
+        "calls": 8,
+        "self_ms": 5.06,
+        "function": "public.pay_workbench_session_get_candidate_summary_page_v1",
+        "total_ms": 4109.76
+      },
+      {
+        "calls": 5136,
+        "self_ms": 656.14,
+        "function": "private.pay_workbench_modal_row_payload_v2",
+        "total_ms": 1070.69
+      },
+      {
+        "calls": 83392,
+        "self_ms": 878.4,
+        "function": "private.pay_workbench_preview_effective_section_v1",
+        "total_ms": 878.4
+      }
+    ]
+  ],
+  "limitations": [
+    "No hosted performance claim",
+    "No browser acceptance claim",
+    "No latest-head clean NEW proof",
+    "No activation; existing full integration/release gates remain"
+  ]
+}

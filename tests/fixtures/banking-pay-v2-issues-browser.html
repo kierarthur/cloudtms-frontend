@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Banking Pay issue lists — local component verification</title>
+<link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/banking-table.css">
+<style>
+body{margin:24px;background:#07101f;color:#f8fafc;font:14px 'Segoe UI',sans-serif}main{max-width:1280px;margin:auto}
+button{color:inherit;background:#152942;border:1px solid #3c526f;border-radius:5px;padding:6px 10px}button:disabled{opacity:.45}
+.fixture-controls{display:flex;gap:8px;margin:16px 0;flex-wrap:wrap}.fixture-note{color:#aebed2;font-size:13px}
+.fixture-shell{padding:20px;border:1px solid #2b405d;border-radius:12px;background:#0b1728}#result{white-space:pre-wrap}[hidden]{display:none!important}
+</style></head><body><main>
+<p class="fixture-note">Local Banking Pay component · synthetic test records · no payment, Draft or API connection. Full application integration remains in progress.</p>
+<div class="fixture-controls"><button id="actions">Show Action Required</button><button id="blocked">Show Blocked for Pay</button><button id="checks">Run component checks</button></div>
+<div id="host" class="fixture-shell"></div><p id="result" role="status">Ready</p>
+</main><script src="/detail-fixture.js"></script><script src="/copy.js"></script><script src="/table.js"></script><script src="/issues.js"></script><script src="/issues-test.js"></script></body></html>

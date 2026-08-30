@@ -1,0 +1,272 @@
+diff --git a/js/main.js b/js/main.js
+index 77b15cd..9d5a6a8 100644
+--- a/js/main.js
++++ b/js/main.js
+@@ -308176,11 +308176,16 @@ if (btnTsAuthorise) {
+     if (!id) { alert('Timesheet id missing.'); return; }
+ 
+     try {
+-      const result = await authoriseTimesheet(id);
+-      if (result && result.ok === false) return;
+-      window.__toast && window.__toast('Timesheet authorised');
+-      if (!(result && result.critical_patch_complete)) await refreshFooter();
+-      else if (fr && typeof fr._updateButtons === 'function') fr._updateButtons();
++      const result = await authoriseTimesheet(id);
++      if (result && result.ok === false) return;
++      window.__toast && window.__toast('Timesheet authorised');
++      try {
++        if (typeof refreshSimpleTimesheetOverviewLifecycleBadgesIfVisible === 'function') {
++          refreshSimpleTimesheetOverviewLifecycleBadgesIfVisible({ frame: fr, timesheet_id: id, action: 'authorise' });
++        }
++      } catch {}
++      if (!(result && result.critical_patch_complete)) await refreshFooter();
++      else if (fr && typeof fr._updateButtons === 'function') fr._updateButtons();
+     } catch (e) {
+       try {
+         if (typeof tsHandleMoved409Modal === 'function') {
+@@ -308234,10 +308239,15 @@ if (btnTsUnauthorise) {
+     if (!ok) return;
+ 
+     try {
+-      const result = await unauthoriseTimesheet(id);
+-      if (result && result.ok === false) return;
+-      window.__toast && window.__toast('Timesheet unauthorised');
+-      if (!(result && result.critical_patch_complete)) await refreshFooter();
++      const result = await unauthoriseTimesheet(id);
++      if (result && result.ok === false) return;
++      window.__toast && window.__toast('Timesheet unauthorised');
++      try {
++        if (typeof refreshSimpleTimesheetOverviewLifecycleBadgesIfVisible === 'function') {
++          refreshSimpleTimesheetOverviewLifecycleBadgesIfVisible({ frame: fr, timesheet_id: id, action: 'unauthorise' });
++        }
++      } catch {}
++      if (!(result && result.critical_patch_complete)) await refreshFooter();
+       else if (fr && typeof fr._updateButtons === 'function') {
+         fr._updateButtons();
+         try { window.__clearTimesheetLifecycleBusyArtifacts && window.__clearTimesheetLifecycleBusyArtifacts(); } catch {}
+@@ -311770,7 +311780,7 @@ function applyTimesheetLifecyclePatchToModal(modalCtxInput, lifecyclePatchInput,
+ }
+ 
+ 
+-function resolveBankingPaymentRouteDisplay(source, options = {}) {
++function resolveBankingPaymentRouteDisplay(source, options = {}) {
+   const root = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+   const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
+   const text = (value) => String(value == null ? '' : value).trim();
+@@ -311999,10 +312009,164 @@ function resolveBankingPaymentRouteDisplay(source, options = {}) {
+     ? `${provider} · ${environment}`
+     : (provider || environment || text(opts.fallbackLabel || opts.fallback_label));
+   return output(label, label ? 'PROVIDER' : 'UNKNOWN', false, false, 'Payment completed successfully.');
+-}
+-
+-
+-function ensureTsRefreshAndRepaintOverview() {
++}
++
++
++function refreshSimpleTimesheetOverviewLifecycleBadgesIfVisible(options = {}) {
++  try {
++    const opts = (options && typeof options === 'object') ? options : {};
++    const mc = (window.modalCtx && typeof window.modalCtx === 'object') ? window.modalCtx : null;
++    if (!mc || mc.entity !== 'timesheets') return false;
++
++    const fr = opts.frame || ((typeof window.__getModalFrame === 'function') ? window.__getModalFrame() : null);
++    if (!fr || fr.entity !== 'timesheets') return false;
++    if (String(fr.currentTabKey || '').trim() !== 'overview') return false;
++
++    const root = document.getElementById('modal');
++    if (!root || root.getAttribute('data-uicf-kind')) return false;
++    const tabs = root.querySelector('#modalTabs');
++    const overviewTab = tabs ? tabs.querySelector('[data-testid="timesheet-tab-overview"]') : null;
++    if (overviewTab && !overviewTab.classList.contains('active')) return false;
++
++    const expectedId = String(opts.timesheet_id || opts.current_timesheet_id || opts.id || '').trim();
++    const modalTargetId = String(
++      mc.data?.timesheet_id ||
++      mc.data?.current_timesheet_id ||
++      mc.data?.contract_week_id ||
++      mc.data?.id ||
++      ''
++    ).trim();
++    if (expectedId && modalTargetId && expectedId !== modalTargetId) return false;
++
++    const body = root.querySelector('#modalBody');
++    if (!body) return false;
++    const normaliseText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
++    const stageRow = Array.from(body.querySelectorAll('.row')).find((row) => {
++      const label = normaliseText(row.querySelector('label')?.textContent || '').toLowerCase();
++      return label === 'stage';
++    });
++    if (!stageRow) return false;
++    const controls = stageRow.querySelector('.controls');
++    if (!controls) return false;
++
++    const surfaces = [
++      mc.data,
++      mc.timesheetDetails,
++      mc.timesheetDetails?.row,
++      mc.timesheetDetails?.timesheet,
++      mc.timesheetDetails?.tsfin,
++      mc.timesheetMeta
++    ].filter((surface) => surface && typeof surface === 'object');
++
++    const firstText = (keys) => {
++      for (const surface of surfaces) {
++        for (const key of keys) {
++          if (!Object.prototype.hasOwnProperty.call(surface, key)) continue;
++          const raw = surface[key];
++          if (raw !== undefined && raw !== null && String(raw).trim() !== '') return String(raw).trim();
++        }
++      }
++      return '';
++    };
++    const firstBool = (keys) => {
++      for (const surface of surfaces) {
++        for (const key of keys) {
++          if (!Object.prototype.hasOwnProperty.call(surface, key)) continue;
++          const value = surface[key];
++          if (value === true || value === 1) return true;
++          if (value === false || value === 0) return false;
++          if (value == null || value === '') continue;
++          const raw = String(value).trim().toLowerCase();
++          if (['true', '1', 'yes', 'y', 'on'].includes(raw)) return true;
++          if (['false', '0', 'no', 'n', 'off'].includes(raw)) return false;
++        }
++      }
++      return null;
++    };
++
++    const processingStatus = firstText(['processing_status', 'new_processing_status', 'status']).toUpperCase();
++    const authStamp = firstText(['authorised_at_server', 'authorised_at_utc', 'authorized_at_server', 'authorized_at_utc']);
++    const explicitAuthorised = firstBool(['is_authorised', 'isAuthorised', 'authorised', 'authorized']);
++    const unauthorised = !!(
++      explicitAuthorised === false ||
++      (!authStamp && ['PENDING_AUTH', 'PENDING', 'UNAUTHORISED', 'UNAUTHORIZED'].includes(processingStatus))
++    );
++    const authorised = !!(
++      explicitAuthorised === true ||
++      !!authStamp ||
++      ['READY_FOR_INVOICE', 'READY_FOR_PAYMENT', 'AUTHORISED', 'AUTHORIZED', 'AUTHORISED_FOR_PAYMENT', 'AUTHORIZED_FOR_PAYMENT'].includes(processingStatus)
++    );
++    if (!unauthorised && !authorised) return false;
++
++    const lifecycleTexts = new Set([
++      'authorised for payment',
++      'authorized for payment',
++      'authorised for invoicing',
++      'authorized for invoicing',
++      'awaiting authorisation',
++      'awaiting authorization'
++    ]);
++    const readyToPayTexts = new Set(['ready to pay']);
++    const pills = () => Array.from(controls.querySelectorAll('.pill'));
++    const findLifecyclePill = () => pills().find((pill) => lifecycleTexts.has(normaliseText(pill.textContent).toLowerCase())) || null;
++    const ensureLifecyclePill = () => {
++      const existing = findLifecyclePill();
++      if (existing) return existing;
++      const created = document.createElement('span');
++      created.className = 'pill';
++      created.style.fontWeight = '600';
++      controls.insertBefore(created, controls.firstChild || null);
++      return created;
++    };
++    const setPill = (pill, textValue, className, title) => {
++      if (!pill) return false;
++      let changed = false;
++      if (normaliseText(pill.textContent) !== textValue) {
++        pill.textContent = textValue;
++        changed = true;
++      }
++      if (String(pill.className || '') !== className) {
++        pill.className = className;
++        changed = true;
++      }
++      if (String(pill.getAttribute('title') || '') !== title) {
++        pill.setAttribute('title', title);
++        changed = true;
++      }
++      if (!pill.style.fontWeight) pill.style.fontWeight = '600';
++      return changed;
++    };
++
++    let changed = false;
++    const targetPill = ensureLifecyclePill();
++    if (unauthorised) {
++      changed = setPill(targetPill, 'Awaiting Authorisation', 'pill pill-warn', 'This timesheet requires authorisation before it can proceed.') || changed;
++      for (const pill of pills()) {
++        if (pill !== targetPill && readyToPayTexts.has(normaliseText(pill.textContent).toLowerCase())) {
++          pill.remove();
++          changed = true;
++        }
++      }
++    } else if (authorised) {
++      changed = setPill(targetPill, 'Authorised for Payment', 'pill pill-ok', 'This timesheet is authorised for payment.') || changed;
++    }
++
++    for (const pill of pills()) {
++      if (pill !== targetPill && lifecycleTexts.has(normaliseText(pill.textContent).toLowerCase())) {
++        pill.remove();
++        changed = true;
++      }
++    }
++    return changed;
++  } catch (err) {
++    try { console.warn('[TS][OVERVIEW] lifecycle badge refresh failed', err); } catch {}
++    return false;
++  }
++}
++try { window.__refreshSimpleTimesheetOverviewLifecycleBadgesIfVisible = refreshSimpleTimesheetOverviewLifecycleBadgesIfVisible; } catch {}
++
++
++function ensureTsRefreshAndRepaintOverview() {
+   if (typeof window.__tsRefreshAndRepaintOverview === 'function') {
+     return window.__tsRefreshAndRepaintOverview;
+   }
+@@ -334576,10 +334740,7 @@ function renderTimesheetOverviewTab(ctx) {
+     ) &&
+     (lifecycleAuthorisedAtServer || lifecycleAuthorisedAtUtc || authInfo.authorised === true)
+   );
+-  const showAuthorisedForPaymentStageBadge = !!(
+-    lifecycleIsPaymentAuthorised &&
+-    !isEffectivelyPaid
+-  );
++  const showAuthorisedForPaymentStageBadge = !!lifecycleIsPaymentAuthorised;
+ 
+   const showAdvancePaymentAction =
+     !!tsId &&
+@@ -334715,13 +334876,13 @@ function renderTimesheetOverviewTab(ctx) {
+     stageBadges.unshift(makeStageBadgeHtml(key, cls, title));
+   };
+ 
+-  if (showAuthorisedForPaymentStageBadge) {
+-    prependStage(
+-      'Authorised for Payment',
+-      'pill-ok',
+-      'This timesheet is authorised for payment and is not fully paid.'
+-    );
+-  }
++  if (showAuthorisedForPaymentStageBadge) {
++    prependStage(
++      'Authorised for Payment',
++      'pill-ok',
++      'This timesheet is authorised for payment.'
++    );
++  }
+ 
+   // Authoritative pay-state badges. Payment money is driven from pay_state paid_totals/adjusted,
+   // not component-count diagnostics, and all payment badges stay in the Stage row.
+@@ -344980,10 +345141,10 @@ async function refreshTimesheetsSummaryAfterRotation(newId, opts = {}) {
+       } else if (authorised) {
+         changed = setPill(
+           targetPill,
+-          'Authorised for Payment',
+-          'pill pill-ok',
+-          'This timesheet is authorised for payment and is not fully paid.'
+-        ) || changed;
++	          'Authorised for Payment',
++	          'pill pill-ok',
++	          'This timesheet is authorised for payment.'
++	        ) || changed;
+       }
+ 
+       for (const pill of pills()) {
